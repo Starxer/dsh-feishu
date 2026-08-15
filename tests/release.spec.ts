@@ -22,5 +22,6 @@ describe('release configuration', () => {
       'GITHUB_REF_NAME#v',
     ]) expect(workflow).toContain(required)
     expect(workflow).not.toContain('NPM_TOKEN')
+    expect(workflow).toContain('npm publish "$GITHUB_WORKSPACE/${{ steps.pack.outputs.path }}"')
   })
 })

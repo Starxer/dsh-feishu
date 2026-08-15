@@ -88,4 +88,4 @@ jobs:
 
       - name: Publish to npm
         if: steps.npm-version.outputs.exists != 'true'
-        run: npm publish "${{ steps.pack.outputs.path }}"
+        run: npm publish "$GITHUB_WORKSPACE/${{ steps.pack.outputs.path }}"
