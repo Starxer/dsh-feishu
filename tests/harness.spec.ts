@@ -4,7 +4,7 @@ import { HarnessConversationService } from '../src/harness.ts'
 function fixture() {
   let seq = 0
   const agents = new Map<string, any>()
-  const create = vi.fn(async ({ sessionId }: { sessionId: string }) => {
+  const createHandle = async (sessionId: string) => {
     const events: any[] = []
     const agent = {
       session: { id: sessionId, get seq() { return seq }, events },
@@ -17,18 +17,21 @@ function fixture() {
     }
     agents.set(String(sessionId), agent)
     return { agent, dispose: vi.fn(async () => undefined) }
-  })
+  }
+  const create = vi.fn(async ({ sessionId }: { sessionId: string }) => createHandle(sessionId))
+  const resume = vi.fn(async ({ resumeSessionId }: { resumeSessionId: string }) => createHandle(resumeSessionId))
   const flush = vi.fn(async () => true)
   const workspace = { path: '/first-workspace', attachSession: vi.fn(async () => undefined) }
   const mount = vi.fn(async () => undefined)
   const resolve = vi.fn(async (id?: string) => ({ id: id ?? 'default-preset' }))
-  return { create, flush, agents, workspace, mount, resolve }
+  return { create, resume, flush, agents, workspace, mount, resolve }
 }
 
 function dependencies(f: ReturnType<typeof fixture>) {
   return {
-    agents: { create: f.create },
+    agents: { create: f.create, resume: f.resume, get: (id: string) => f.agents.get(id) },
     sessions: { flush: f.flush },
+    sessionPersistence: { list: vi.fn(async () => []) },
     selection: () => ({ provider: 'p', model: 'm' }),
     agentPresets: { resolve: f.resolve, mount: f.mount },
     workspaceRegistry: { list: () => [f.workspace], resolveByPath: vi.fn(async () => undefined) },
@@ -43,6 +46,36 @@ describe('HarnessConversationService', () => {
     await expect(service.reply({ chatId: 'oc_1', chatType: 'p2p', content: 'two' })).resolves.toBe('answer:two')
     expect(f.create).toHaveBeenCalledTimes(1)
     expect(f.flush).toHaveBeenCalledTimes(2)
+  })
+
+  it('resumes a persisted conversation instead of creating its session again', async () => {
+    const f = fixture()
+    const deps = dependencies(f)
+    const sessionId = 'lark-v2-427e3361f60f3bd896c74f6acd7d065d2e0198db'
+    deps.sessionPersistence.list = vi.fn(async () => [{ id: sessionId }])
+    const service = new HarnessConversationService(deps, { domain: 'lark' })
+
+    await expect(service.reply({ chatId: 'a', chatType: 'p2p', content: 'again' })).resolves.toBe('answer:again')
+
+    expect(f.resume).toHaveBeenCalledWith(expect.objectContaining({ resumeSessionId: sessionId }))
+    expect(f.create).not.toHaveBeenCalled()
+  })
+
+  it('reuses a live agent without trying to resume the same session', async () => {
+    const f = fixture()
+    const sessionId = 'lark-v2-427e3361f60f3bd896c74f6acd7d065d2e0198db'
+    const liveHandle = await f.create({ sessionId })
+    f.create.mockClear()
+    const deps = dependencies(f)
+    deps.sessionPersistence.list = vi.fn(async () => [{ id: sessionId }])
+    const service = new HarnessConversationService(deps, { domain: 'lark' })
+
+    await expect(service.reply({ chatId: 'a', chatType: 'p2p', content: 'live' })).resolves.toBe('answer:live')
+    await service.dispose()
+
+    expect(f.resume).not.toHaveBeenCalled()
+    expect(f.create).not.toHaveBeenCalled()
+    expect(liveHandle.dispose).not.toHaveBeenCalled()
   })
 
   it('isolates different chats and honors an explicit model route', async () => {
@@ -93,7 +126,7 @@ describe('HarnessConversationService', () => {
 
   it('rejects a turn that commits no successful assistant answer', async () => {
     const create = vi.fn(async ({ sessionId }: any) => ({ agent: { session: { id: sessionId, seq: 0, events: [{ seq: 0, type: 'turn/end', data: { reason: { kind: 'error' } } }] }, whenIdle: async () => undefined, followup() {} }, dispose: async () => undefined }))
-    const service = new HarnessConversationService({ agents: { create }, sessions: { flush: async () => true }, selection: () => ({ provider: 'p', model: 'm' }), agentPresets: { resolve: async () => ({ id: 'default' }), mount: async () => undefined }, workspaceRegistry: { list: () => [], resolveByPath: async () => undefined } }, { domain: 'feishu', workspace: '/work' })
+    const service = new HarnessConversationService({ agents: { create, resume: vi.fn(), get: () => undefined }, sessions: { flush: async () => true }, sessionPersistence: { list: async () => [] }, selection: () => ({ provider: 'p', model: 'm' }), agentPresets: { resolve: async () => ({ id: 'default' }), mount: async () => undefined }, workspaceRegistry: { list: () => [], resolveByPath: async () => undefined } }, { domain: 'feishu', workspace: '/work' })
     await expect(service.reply({ chatId: 'a', chatType: 'p2p', content: 'one' })).rejects.toThrow(/successful assistant response/)
   })
 })

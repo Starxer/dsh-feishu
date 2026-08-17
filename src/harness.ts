@@ -18,8 +18,13 @@ interface WorkspaceLike {
 }
 
 export interface HarnessDependencies {
-  agents: { create: (options: any) => Promise<AgentHandleLike> }
+  agents: {
+    create: (options: any) => Promise<AgentHandleLike>
+    resume: (options: any) => Promise<AgentHandleLike>
+    get: (id: ReturnType<typeof toSessionId>) => AgentLike | undefined
+  }
   sessions: { flush(session: AgentLike['session']): Promise<unknown> }
+  sessionPersistence: { list(): Promise<Array<{ id: string }>> }
   selection(): { provider: string; model: string }
   agentPresets: {
     resolve(id?: string): Promise<{ id: string }>
@@ -81,6 +86,11 @@ export class HarnessConversationService {
   }
 
   private async createAgent(key: string): Promise<AgentHandleLike> {
+    const sessionId = toSessionId(this.config.domain, key)
+    const liveAgent = this.deps.agents.get(sessionId)
+    if (liveAgent !== undefined) {
+      return { agent: liveAgent, dispose: async () => undefined }
+    }
     const fallback = this.deps.selection()
     const selection = {
       provider: this.config.provider ?? fallback.provider,
@@ -91,16 +101,19 @@ export class HarnessConversationService {
       : await this.deps.workspaceRegistry.resolveByPath(this.config.workspace)
     const cwd = this.config.workspace ?? workspace?.path ?? process.cwd()
     const agentPreset = (await this.deps.agentPresets.resolve(this.config.agentPreset)).id
-    const sessionId = toSessionId(this.config.domain, key)
-    const handle = await this.deps.agents.create({
-      sessionId,
-      meta: { cwd, agentPreset },
-      agentOptions: selection,
-      setup: async (agentCtx: Parameters<typeof installModelSelection>[0]) => {
-        installModelSelection(agentCtx, { current: selection, assembled: undefined })
-        await this.deps.agentPresets.mount(agentCtx, agentPreset)
-      },
-    })
+    const setup = async (agentCtx: Parameters<typeof installModelSelection>[0]) => {
+      installModelSelection(agentCtx, { current: selection, assembled: undefined })
+      await this.deps.agentPresets.mount(agentCtx, agentPreset)
+    }
+    const persisted = (await this.deps.sessionPersistence.list()).some(item => item.id === sessionId)
+    const handle = persisted
+      ? await this.deps.agents.resume({ resumeSessionId: sessionId, agentOptions: selection, setup })
+      : await this.deps.agents.create({
+        sessionId,
+        meta: { cwd, agentPreset },
+        agentOptions: selection,
+        setup,
+      })
     try {
       await workspace?.attachSession(sessionId)
     } catch (error: unknown) {

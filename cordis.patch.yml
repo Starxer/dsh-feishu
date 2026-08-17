@@ -1,12 +1,11 @@
-# This bundle patch is intentionally inactive until credentials are supplied.
-# Enable and configure this existing id from the active profile patch; do not insert it again.
+# The plugin stays active while unconfigured so it can serve its local settings page.
 - insert:
     - id: lark-channel
       name: '@sugarforever/dsh-lark'
-      disabled: true
+      disabled: false
       config:
-        appId: !!js process.env.FEISHU_APP_ID
-        appSecret: !!js process.env.FEISHU_APP_SECRET
+        appId: ''
+        appSecretRef: DSH_LARK_APP_SECRET
         domain: feishu
         requireMention: true
         dmMode: open

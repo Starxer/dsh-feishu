@@ -14,6 +14,29 @@ describe('release configuration', () => {
     })
   })
 
+  it('ships an enabled, credential-reference based settings entry', async () => {
+    const patch = await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+    const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
+    expect(patch).toContain('disabled: false')
+    expect(patch).toContain('appSecretRef: DSH_LARK_APP_SECRET')
+    expect(patch).not.toContain('process.env.FEISHU_APP_SECRET')
+    expect(readme).toContain('**Settings**')
+  })
+
+  it('declares a Harness web client that contributes the embedded settings section', async () => {
+    const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+    expect(pkg.dsh.client).toEqual({
+      platform: 'web',
+      inject: expect.arrayContaining([
+        '@deepseek-ai/dsh-client-runtime',
+        '@deepseek-ai/dsh-client-locale',
+        '@deepseek-ai/dsh-client-ui-settings',
+      ]),
+    })
+    expect(pkg.exports['./client']).toBe('./client/client.js')
+    expect(pkg.files).toContain('client/client.js')
+  })
+
   it('publishes release tarballs through GitHub OIDC after all quality gates', async () => {
     const workflow = await readFile(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8')
     for (const required of [
