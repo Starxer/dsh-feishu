@@ -35,20 +35,22 @@ jobs:
 
       - name: Install latest Harness packages
         if: matrix.dependencies == 'latest-harness'
-        run: >-
-          npm install --no-save --package-lock=false
-          @deepseek-ai/cordis@latest
-          @deepseek-ai/dsh-agent@latest
-          @deepseek-ai/dsh-agent-default-model@latest
-          @deepseek-ai/dsh-agent-presets@latest
-          @deepseek-ai/dsh-client-ui-primitives@latest
-          @deepseek-ai/dsh-credentials@latest
-          @deepseek-ai/dsh-host-webserver@latest
-          @deepseek-ai/dsh-llm@latest
-          @deepseek-ai/dsh-session@latest
-          @deepseek-ai/dsh-session-persistence@latest
-          @deepseek-ai/dsh-settings@latest
-          @deepseek-ai/dsh-workspace@latest
+        shell: bash
+        run: |
+          dsh_version="$(npm view @deepseek-ai/dsh@latest version)"
+          echo "Testing against Harness $dsh_version"
+          npm install --no-save --package-lock=false \
+            "@deepseek-ai/dsh-agent@$dsh_version" \
+            "@deepseek-ai/dsh-agent-default-model@$dsh_version" \
+            "@deepseek-ai/dsh-agent-presets@$dsh_version" \
+            "@deepseek-ai/dsh-client-ui-primitives@$dsh_version" \
+            "@deepseek-ai/dsh-credentials@$dsh_version" \
+            "@deepseek-ai/dsh-host-webserver@$dsh_version" \
+            "@deepseek-ai/dsh-llm@$dsh_version" \
+            "@deepseek-ai/dsh-session@$dsh_version" \
+            "@deepseek-ai/dsh-session-persistence@$dsh_version" \
+            "@deepseek-ai/dsh-settings@$dsh_version" \
+            "@deepseek-ai/dsh-workspace@$dsh_version"
 
       - name: Run tests
         run: npm test
