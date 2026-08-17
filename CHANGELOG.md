@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+- Mark Harness-provided peer dependencies as optional for package-manager resolution, avoiding misleading missing-peer warnings in DSH Profiles.
+- Keep the supported Harness range starting at `0.1.0-rc.6` while validating development and release builds against `0.1.0-rc.7`.
+- Add continuous compatibility checks against the latest published Harness packages.
+
 ## 0.2.0
 
 - Contribute an embedded **Feishu & Lark** section to Harness Settings through the plugin web client.

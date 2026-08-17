@@ -20,7 +20,7 @@
 ## 运行要求
 
 - Node.js `^22.19.0` 或 `>=24.0.0`。
-- 已安装或能够通过 `npx` 运行 DeepSeek Harness。
+- 已安装或能够通过 `npx` 运行 DeepSeek Harness `0.1.0-rc.6` 或更高的 `0.1.x` 版本。
 - 一个飞书或 Lark 自建应用。
 - 应用已经启用机器人能力。
 - 应用使用长连接接收事件，并订阅 `im.message.receive_v1`。
@@ -119,6 +119,8 @@ npx @deepseek-ai/dsh web
 ```sh
 npx @deepseek-ai/dsh plugin --profile web add @sugarforever/dsh-lark
 ```
+
+Harness 的 Agent、Session、Settings 等服务由 Profile Bundle 在运行时提供。插件将这些包声明为 optional peer，以适配 DSH 的 Bundle 加载机制；它不会在 Profile 中重复安装另一套 Harness。兼容范围从 `0.1.0-rc.6` 开始，并通过 CI 持续验证最新发布的 Harness 版本，因此升级到后续 RC 通常不需要重新发布插件。
 
 查看已经安装的插件：
 
