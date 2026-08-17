@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0
+
+- Contribute an embedded **Feishu & Lark** section to Harness Settings through the plugin web client.
+- Require same-origin browser requests for settings and credential mutations.
+- Store App Secret through Harness Credentials using `DSH_LARK_APP_SECRET` by default.
+- Apply Settings and credential changes by replacing the Lark channel without restarting Harness.
+- Keep the plugin active but idle until required application credentials are configured.
+- Show explicit configured and missing App Secret states without returning the secret to the browser.
+- Populate linked Provider and Model selectors from the current Harness model catalog.
+- Resume persisted Lark sessions after restart and reuse an already-live Agent when available.
+- Print initial connection, channel, and message-handling failures to the terminal as well as the Harness logger, with App Secret redaction.
+- Remove the generic configuration-file action from the Lark-focused Settings experience.
+
 ## 0.1.1
 
 - Mount the Harness default or configured Agent Preset for Lark sessions.

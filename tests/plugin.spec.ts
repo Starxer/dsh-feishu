@@ -35,8 +35,39 @@ describe('startChannel', () => {
   it('sends a safe fallback when the Harness turn fails', async () => {
     const channel = fakeChannel()
     const bridge = { reply: vi.fn(async () => { throw new Error('secret stack') }), dispose: vi.fn(async () => undefined) }
-    await startChannel({ appId: 'id', appSecret: 'secret', domain: 'lark', requireMention: true, dmMode: 'open', groupAllowlist: [], dmAllowlist: [], workspace: '/work', errorMessage: 'safe error' }, bridge, () => channel as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() })
+    const terminal = { error: vi.fn() }
+    await startChannel({ appId: 'id', appSecret: 'secret', domain: 'lark', requireMention: true, dmMode: 'open', groupAllowlist: [], dmAllowlist: [], workspace: '/work', errorMessage: 'safe error' }, bridge, () => channel as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, terminal)
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'group', threadId: 'omt_1', content: 'hi' })
+    expect(terminal.error).toHaveBeenCalledWith('dsh-lark: message handling failed: secret stack')
     expect(channel.send).toHaveBeenCalledWith('oc_1', { text: 'safe error' }, { replyTo: 'om_1', replyInThread: true })
+  })
+
+  it('disposes conversation resources when channel disconnect fails', async () => {
+    const channel = fakeChannel()
+    channel.disconnect.mockRejectedValueOnce(new Error('disconnect failed'))
+    const bridge = { reply: vi.fn(async () => ''), dispose: vi.fn(async () => undefined) }
+    const stop = await startChannel({
+      appId: 'id', appSecret: 'secret', domain: 'lark', requireMention: true, dmMode: 'open',
+      groupAllowlist: [], dmAllowlist: [], workspace: '/work', errorMessage: 'safe error',
+    }, bridge, () => channel as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() })
+    await expect(stop()).rejects.toThrow('disconnect failed')
+    expect(bridge.dispose).toHaveBeenCalledOnce()
+  })
+
+  it('logs an initial connection failure to the Harness logger and terminal without exposing the secret', async () => {
+    const channel = fakeChannel()
+    channel.connect.mockRejectedValueOnce(new Error('authentication failed for secret'))
+    const bridge = { reply: vi.fn(async () => ''), dispose: vi.fn(async () => undefined) }
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const terminal = { error: vi.fn() }
+
+    await expect(startChannel({
+      appId: 'id', appSecret: 'secret', domain: 'lark', requireMention: true, dmMode: 'open',
+      groupAllowlist: [], dmAllowlist: [], workspace: '/work', errorMessage: 'safe error',
+    }, bridge, () => channel as any, logger, terminal)).rejects.toThrow('authentication failed for secret')
+
+    expect(logger.error).toHaveBeenCalledWith('dsh-lark: WebSocket connection failed: authentication failed for [redacted]')
+    expect(terminal.error).toHaveBeenCalledWith('dsh-lark: WebSocket connection failed: authentication failed for [redacted]')
+    expect(bridge.dispose).toHaveBeenCalledOnce()
   })
 })

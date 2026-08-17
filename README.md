@@ -44,7 +44,7 @@ npx @deepseek-ai/dsh web
 3. 填写应用名称、描述和图标。
 4. 进入“凭证与基础信息”，记录 App ID 和 App Secret。
 
-不要把 App Secret 直接写进仓库中的 YAML 文件。后续通过环境变量传给插件。
+不要把 App Secret 直接写进仓库中的 YAML 文件。后续通过 Harness Settings 页面保存，或者通过启动环境变量传给插件。
 
 ### 启用机器人
 
@@ -138,90 +138,51 @@ npm run build
 npx @deepseek-ai/dsh plugin --profile web add "$PWD"
 ```
 
-插件自带的 `cordis.patch.yml` 默认处于禁用状态，避免安装后在没有凭据的情况下反复连接。下一步需要在 Web Profile 中启用实例。
-
-## 配置环境变量
-
-在启动 Harness 的同一个终端中设置凭据：
-
-```sh
-export FEISHU_APP_ID=cli_xxxxxxxxxxxxxxxx
-export FEISHU_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-也可以把变量放进仅限当前用户读取的启动脚本或服务配置中。不要提交包含真实凭据的 `.env`、YAML 或 Shell 文件。
-
-如果使用国际版 Lark，变量名仍然可以保持不变，平台由后面的 `domain` 配置决定。
-
-## 启用插件实例
-
-打开 Web Profile 的 `cordis.patch.yml`。默认路径：
-
-```text
-~/.dsh/profiles/web/cordis.patch.yml
-```
-
-插件安装后，bundle 层已经创建了一个禁用状态的 `lark-channel` 实例。Profile patch 应覆盖并启用这个实例，不要再次使用 `insert` 创建同名实例：
-
-```yaml
-- id: lark-channel
-  disabled: false
-  config:
-    appId: !!js process.env.FEISHU_APP_ID
-    appSecret: !!js process.env.FEISHU_APP_SECRET
-    domain: feishu
-    requireMention: true
-    dmMode: open
-```
-
-如果使用 `LARK_APP_ID` 和 `LARK_APP_SECRET` 作为环境变量，只需修改映射：
-
-```yaml
-- id: lark-channel
-  disabled: false
-  config:
-    appId: !!js process.env.LARK_APP_ID
-    appSecret: !!js process.env.LARK_APP_SECRET
-    domain: lark
-    requireMention: true
-    dmMode: open
-```
-
-如果启动时报 `duplicate loader entry id: lark-channel`，说明 Profile patch 中使用了 `insert`，与插件 bundle 自带的实例发生重复。删除 `insert` 和重复的 `name`，改成上面的 id-targeted 覆盖格式。
-
-国际版 Lark 使用：
-
-```yaml
-domain: lark
-```
-
-`workspace` 和 `agentPreset` 是可选配置项。默认情况下，不需要把它们加入 Profile patch，也不需要修改插件自带的 `cordis.patch.yml`：
-
-- 未配置 `workspace` 时，插件使用 Harness 中第一个已注册的 Workspace。
-- 未配置 `agentPreset` 时，插件使用 Harness 当前的默认 Agent Preset。
-
-如果机器人只应操作一个固定项目，可以在现有实例的 `config` 下增加：
-
-```yaml
-- id: lark-channel
-  disabled: false
-  config:
-    appId: !!js process.env.LARK_APP_ID
-    appSecret: !!js process.env.LARK_APP_SECRET
-    domain: lark
-    workspace: /Users/you/github/project
-    agentPreset: coding
-```
-
-这里仍然是覆盖已有的 `lark-channel` 实例，不要添加 `insert` 或重复的 `name`。
+插件安装后保持启用，但在 App ID 和 App Secret 尚未配置时不会建立飞书连接。这样安装完成后就能直接配置，而不必编辑 profile patch。
 
 ## 启动 Harness
 
-确认环境变量已经设置，再启动 Web Profile：
+启动 Web Profile：
 
 ```sh
 npx @deepseek-ai/dsh web
 ```
+
+打开 Harness 的 **Settings**，选择 **飞书与 Lark**。这里可以配置 App ID、App Secret、飞书或 Lark 域名、访问策略和 Agent 参数。Provider 和 Model 来自 Harness 当前的模型目录，选择 Provider 后，Model 下拉框只显示该 Provider 的模型；留空时跟随 Harness 默认配置。
+
+点击保存后，普通参数写入 `$DSH_HOME/settings.yaml` 的 `lark-channel` section；App Secret 通过 Harness Credentials 保存到 `$DSH_HOME/.credentials.yaml`，不会写入普通 Settings，也不会从 Host 回显到浏览器。
+
+Secret 输入框为空不代表凭据丢失。页面会明确显示“Secret 已配置”或“Secret 未配置”：
+
+- 已经配置 Secret 时，保持输入框为空并保存其他设置，不会修改或删除现有 Secret。
+- 在输入框中填写新值并保存，才会替换现有 Secret。
+- 只有点击“删除已保存的 Secret”，才会删除 Credentials 文件中的值。
+- 如果 Secret 来自启动环境变量或旧版 patch 中的 `appSecret`，页面会显示只读状态，不能通过 UI 覆盖或删除该来源。
+
+配置或凭据变化后，插件会关闭旧 WebSocket 和会话资源，再创建新的 channel，不需要重启 Harness。
+
+对于 CI、容器或服务部署，也可以继续使用环境变量。默认 CredentialRef 是 `DSH_LARK_APP_SECRET`，启动环境的同名变量优先于 Credentials 文件：
+
+```sh
+export DSH_LARK_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+npx @deepseek-ai/dsh web
+```
+
+环境变量来源只读，并且在 Harness 启动时冻结。修改它仍然需要重启进程。App ID 等普通参数可以在 profile patch 中作为 composition base 提供，也可以在配置页面中覆盖：
+
+```yaml
+- id: lark-channel
+  config:
+    appId: cli_xxxxxxxxxxxxxxxx
+    appSecretRef: DSH_LARK_APP_SECRET
+    domain: feishu
+```
+
+不要再次使用 `insert` 创建同名实例，否则会出现 `duplicate loader entry id: lark-channel`。
+
+Profile patch 是基础配置，Settings 页面保存的普通参数是覆盖层。已经通过 UI 保存的 `appId`、`domain` 等值优先于 patch；删除对应的 Settings 覆盖后，才会重新使用 patch 中的值。`appSecretRef` 默认保持为 `DSH_LARK_APP_SECRET`，UI 保存的 Secret 会写到这个引用名对应的 Harness Credential 中。
+
+旧版本使用的明文 `appSecret` 仍可作为只读兼容来源，但不建议继续保留。迁移时先在 UI 中保存 Secret 或设置 `DSH_LARK_APP_SECRET`，确认连接成功后，再从 patch 中删除 `appSecret`。
 
 连接成功后，终端会出现：
 
@@ -241,6 +202,7 @@ dsh-lark: WebSocket connected
 4. 机器人会回复这次 turn 最后生成的 assistant 文本。
 
 同一个单聊中的后续消息会继续使用同一个 Harness Session，因此能够保留前文。
+Harness 重启后，插件会恢复对应的持久化 Session；如果该 Session 已经在当前进程中运行，则直接复用现有 Agent，不会重复创建或恢复。
 
 ### 群聊
 
@@ -262,8 +224,8 @@ dsh-lark: WebSocket connected
 - id: lark-channel
   disabled: false
   config:
-    appId: !!js process.env.FEISHU_APP_ID
-    appSecret: !!js process.env.FEISHU_APP_SECRET
+    appId: cli_xxxxxxxxxxxxxxxx
+    appSecretRef: DSH_LARK_APP_SECRET
     domain: feishu
     requireMention: true
     dmMode: open
@@ -280,8 +242,8 @@ dsh-lark: WebSocket connected
 
 | 配置项 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `appId` | 是 | 无 | 飞书或 Lark 应用的 App ID |
-| `appSecret` | 是 | 无 | 应用的 App Secret，建议从环境变量读取 |
+| `appId` | 连接时是 | 空字符串 | 飞书或 Lark 应用的 App ID |
+| `appSecretRef` | 否 | `DSH_LARK_APP_SECRET` | Harness Credentials 中保存 App Secret 的引用名 |
 | `domain` | 否 | `feishu` | 中国版使用 `feishu`，国际版使用 `lark` |
 | `requireMention` | 否 | `true` | 群聊是否必须 @机器人 |
 | `dmMode` | 否 | `open` | 单聊策略：`open`、`allowlist` 或 `disabled` |
@@ -355,8 +317,8 @@ dmMode: disabled
 
 ## 安全说明
 
-- App Secret 只应存在于环境变量或 Secret Manager 中。
-- `cordis.patch.yml` 应通过 `process.env` 读取凭据。
+- App Secret 只应存在于 Harness Credentials、启动环境变量或外部 Secret Manager 中。
+- `$DSH_HOME/.credentials.yaml` 是权限为 `0600` 的明文 YAML，不是加密保险库；同一 OS 用户运行的进程仍可读取。
 - 插件不会记录 App ID 和 App Secret。
 - Agent 的异常堆栈不会发送给飞书用户。
 - 用户只能看到 `errorMessage` 中配置的失败提示。
@@ -399,7 +361,7 @@ dmMode: disabled
 
 ### 修改配置后没有生效
 
-停止并重新启动 Harness。插件实例和 WebSocket 连接在 Profile 启动时创建，修改 YAML 后需要重新加载。
+在 Harness **Settings → 飞书与 Lark** 保存后查看其中的 Runtime 状态。Settings 和 Credentials 文件支持热更新，插件会重建 WebSocket。只有修改启动环境变量时才需要重启 Harness。
 
 ## 升级和卸载
 
@@ -426,6 +388,25 @@ npm test
 npm run typecheck
 npm run build
 npm pack --dry-run
+```
+
+### 用本地构建覆盖已安装版本
+
+在仓库中完成构建后执行：
+
+```sh
+npm install
+npm run build
+npx @deepseek-ai/dsh plugin --profile web add "$PWD"
+```
+
+这会把 Web Profile 中的 `@sugarforever/dsh-lark` 依赖改为当前本地目录。它只覆盖该 Profile 使用的插件包，不会改写 npm registry 中的生产版本。由于服务端和 Web 客户端 bundle 都在 Harness 启动时加载，安装本地构建后需要重新启动 `dsh web`；之后在 Settings 中修改 Lark 参数仍然可以热生效。
+
+恢复 npm 上的生产版本：
+
+```sh
+npx @deepseek-ai/dsh plugin --profile web remove @sugarforever/dsh-lark
+npx @deepseek-ai/dsh plugin --profile web add @sugarforever/dsh-lark
 ```
 
 ## 版本与发布

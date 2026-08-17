@@ -1,6 +1,6 @@
 import { Domain, LoggerLevel, createLarkChannel } from '@larksuiteoapi/node-sdk'
 import type { LarkChannel, LarkChannelOptions, NormalizedMessage } from '@larksuiteoapi/node-sdk'
-import type { ResolvedConfig } from './config.ts'
+import type { RuntimeConfig } from './config.ts'
 import type { HarnessConversationService } from './harness.ts'
 
 export type ChannelFactory = (options: LarkChannelOptions) => LarkChannel
@@ -11,11 +11,16 @@ export interface PluginLogger {
 }
 
 export async function startChannel(
-  config: ResolvedConfig,
+  config: Omit<RuntimeConfig, 'appSecretRef'>,
   bridge: Pick<HarnessConversationService, 'reply' | 'dispose'>,
   factory: ChannelFactory = createLarkChannel,
   logger: PluginLogger = console,
+  terminalLogger?: Pick<PluginLogger, 'error'>,
 ): Promise<() => Promise<void>> {
+  const logError = (message: string) => {
+    logger.error(message)
+    terminalLogger?.error(message)
+  }
   const channel = factory({
     appId: config.appId,
     appSecret: config.appSecret,
@@ -48,22 +53,25 @@ export async function startChannel(
           replyInThread,
         })
       } catch (error: unknown) {
-        logger.error(`dsh-lark: message handling failed: ${error instanceof Error ? error.message : String(error)}`)
+        logError(`dsh-lark: message handling failed: ${error instanceof Error ? error.message : String(error)}`)
         await channel.send(message.chatId, { text: config.errorMessage }, {
           replyTo: message.messageId,
           replyInThread,
         }).catch((sendError: unknown) => {
-          logger.error(`dsh-lark: fallback reply failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`)
+          logError(`dsh-lark: fallback reply failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`)
         })
       }
     }),
     channel.on('reconnecting', () => { logger.warn('dsh-lark: WebSocket reconnecting') }),
     channel.on('reconnected', () => { logger.info('dsh-lark: WebSocket reconnected') }),
-    channel.on('error', (error) => { logger.error(`dsh-lark: channel error: ${String(error)}`) }),
+    channel.on('error', (error) => { logError(`dsh-lark: channel error: ${String(error)}`) }),
   ]
   try {
     await channel.connect()
   } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    const redacted = config.appSecret === '' ? detail : detail.split(config.appSecret).join('[redacted]')
+    logError(`dsh-lark: WebSocket connection failed: ${redacted}`)
     for (const unsubscribe of unsubscribers) unsubscribe()
     await bridge.dispose()
     throw error
@@ -72,8 +80,11 @@ export async function startChannel(
 
   return async () => {
     for (const unsubscribe of unsubscribers) unsubscribe()
-    await channel.disconnect()
-    logger.info('dsh-lark: WebSocket disconnected')
-    await bridge.dispose()
+    try {
+      await channel.disconnect()
+      logger.info('dsh-lark: WebSocket disconnected')
+    } finally {
+      await bridge.dispose()
+    }
   }
 }
