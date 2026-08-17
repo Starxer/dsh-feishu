@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2
+
+- Restore npm 12 lockfile entries required for clean Linux CI installs.
+
 ## 0.2.1
 
 - Mark Harness-provided peer dependencies as optional for package-manager resolution, avoiding misleading missing-peer warnings in DSH Profiles.
