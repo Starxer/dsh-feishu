@@ -1,12 +1,12 @@
 # DeepSeek Harness Lark / 飞书
 
-> **Fork 来源**：本插件 fork 自 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark)（commit `ee639df Fix latest Harness compatibility check`，同步于本 fork HEAD）。上游包名 `@starxer/ds-feishu`、License MIT（继承）。
+> **历史来源**：本插件基于 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark)（commit `ee639df`，fork 时上游 HEAD）独立维护。**已与上游分叉**，不再跟踪 upstream 同步。本仓库保留上游 LICENSE（`Copyright (c) 2026 sugarforever`，MIT）以满足 MIT 协议 modified-work 声明要求。
 >
-> **本 fork 的所有改动记录在 [CHANGELOG.md](./CHANGELOG.md) 的「Unreleased — Forked」段**。改动主要为：DSH rc.7 兼容、`/compact` 命令移除（与 DSH 自带 `command-compact` 同名冲突）、provision 流程改进（扫码配置）。
+> **本仓库改动记录见 [CHANGELOG.md](./CHANGELOG.md) 的「Unreleased」段**。当前主要差异：DSH `0.1.0-rc.7` 适配（移除 `/compact` 命令避免与 DSH 自带 `command-compact` 冲突、`inject` 清理）、provision 流程改进。
 >
 > **dsh 配置路径**（非本仓库）：`~/.dsh/profiles/web/cordis.patch.yml`（已设置 `lark-channel` 启用 + 配合 `compaction-basic`/`command-compact` 拉回 host plane）。
 
-`@starxer/ds-feishu` 是一个 DeepSeek Harness Host 插件。安装后，用户可以直接从飞书或 Lark 与 Harness Agent 对话，并继续使用 Harness 中配置的模型、工具、系统提示和会话存储。
+`@starxer/dsh-feishu` 是一个 DeepSeek Harness Host 插件。安装后，用户可以直接从飞书或 Lark 与 Harness Agent 对话，并继续使用 Harness 中配置的模型、工具、系统提示和会话存储。
 
 插件使用飞书官方 `@larksuiteoapi/node-sdk` 的 Channel API，通过 WebSocket 长连接接收消息，不需要公网服务器、域名或 Webhook 回调地址。官方 SDK 负责连接、自动重连、消息去重、过期事件过滤、同一聊天的串行处理、消息格式转换和发送回复；插件负责把飞书会话映射到 Harness Session，再把消息交给 Agent。
 

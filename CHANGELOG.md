@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased — Forked
+## Unreleased
 
-本 fork 在 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark) HEAD（`ee639df`）上的改动记录。所有改动仅修改本仓库文件，**未对 DSH 源码（`DSH 源码/packages/*`、`vendor/*`）做任何改动**。
+本仓库基于 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark) HEAD（`ee639df`）独立维护，**不再跟踪 upstream 同步**。所有改动仅修改本仓库文件，**未对 DSH 源码（`DSH 源码/packages/*`、`vendor/*`）做任何改动**。上游 LICENSE（MIT, Copyright (c) 2026 sugarforever）保留以满足 MIT modified-work 声明。
 
 ### 兼容性
 
@@ -18,6 +18,13 @@
 
 - `~/.dsh/profiles/web/cordis.patch.yml` 必须启用 `compaction-basic` + `command-compact`（拉回 host plane），否则 DSH 自带 `/compact` 命令在 web UI 上也不可用。
 - 启用 `lark-channel`（无特殊要求，前提是上方 `command-compact` 已启用）。
+
+### 命名与仓库迁移
+
+- GitHub 仓库：`Starxer/dsh-lark`（fork）→ `Starxer/dsh-feishu`（独立仓库）
+- npm 包名：`@starxer/ds-feishu` → `@starxer/dsh-feishu`
+- 本地目录保留 `workspace/dsh-lark`（不改名，避免影响 `~/.dsh/profiles/web/package.json` 的 pnpm link 路径）
+- 与上游分叉：移除 `/compact` 命令与上游设计哲学冲突，无法反向合并回 upstream
 
 ### Bug 修复
 

@@ -1,5 +1,5 @@
 {
-  "name": "@starxer/ds-feishu",
+  "name": "@starxer/dsh-feishu",
   "version": "0.1.0",
   "description": "Feishu/Lark WebSocket channel with scan-to-configure for DeepSeek Harness",
   "type": "module",
@@ -138,5 +138,13 @@
     "tsdown": "^0.15.0",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Starxer/dsh-feishu.git"
+  },
+  "homepage": "https://github.com/Starxer/dsh-feishu",
+  "bugs": {
+    "url": "https://github.com/Starxer/dsh-feishu/issues"
   }
 }
