@@ -1,21 +1,30 @@
-# AGENTS.md — dsh-lark (fork)
+# AGENTS.md — dsh-feishu
 
-> 本插件 fork 自 **[sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark)**（commit `ee639df`，同步于 HEAD）。上游包名 `@starxer/ds-feishu`，MIT License 继承。
+> 本插件基于 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark)（commit `ee639df`，fork 时上游 HEAD）**独立维护**，不再跟踪 upstream 同步。上游 LICENSE（`Copyright (c) 2026 sugarforever`，MIT）已保留以满足 MIT 协议 modified-work 声明。
 >
-> 所有改动记录见 [CHANGELOG.md](./CHANGELOG.md) 的「Unreleased — Forked」段；**未对 DSH 源码做任何改动**。
+> 所有改动记录见 [CHANGELOG.md](./CHANGELOG.md) 的「Unreleased」段；**未对 DSH 源码做任何改动**。
+
+## 包名与仓库
+
+| | |
+|---|---|
+| npm 包名 | `@starxer/dsh-feishu` |
+| GitHub | https://github.com/Starxer/dsh-feishu |
+| 本地目录 | `~/workspace-lyf/deepseek-harness/workspace/dsh-lark`（保留旧名） |
+| 上游来源 | `sugarforever/dsh-lark@ee639df`（fork 起点，不再同步） |
 
 ## 仓库结构
 
 ```
 dsh-lark/
-├── src/                 # 插件源码（fork 后的改动在这里）
+├── src/                 # 插件源码（独立维护的改动在这里）
 ├── tests/               # 单元测试（vitest）
 ├── client/              # 编译产物（web UI 客户端）
 ├── lib/                 # 编译产物（DSH host 端运行时）
 ├── docs/                # 架构文档
 ├── cordis.patch.yml     # 插件元数据（DSH loader 读取）
 ├── package.json         # name: @starxer/ds-feishu, link: pnpm link 到 DSH profile
-└── CHANGELOG.md         # 上游 + 本 fork 的改动记录
+└── CHANGELOG.md         # 本仓库的独立改动记录
 ```
 
 `lib/` 与 `client/client.js` 由 `npm run build` 生成，不在 git 跟踪（`.gitignore`）。
@@ -45,20 +54,18 @@ npm run build           # 让 lib/index.js 同步
 systemctl --user restart dsh
 ```
 
-## 与 upstream 同步
+## 与上游关系
+
+仓库创建时是 upstream `sugarforever/dsh-lark` 的 fork，但 **当前已不再跟踪上游同步**——见顶部说明。如需手工对比上游改动做 cherry-pick：
 
 ```sh
-git fetch origin
-git log origin/main..HEAD --oneline   # 本 fork 独自 commit（无）
-git log HEAD..origin/main --oneline   # upstream 新增
+git remote add upstream https://github.com/sugarforever/dsh-lark.git
+git fetch upstream
+git log HEAD..upstream/main --oneline     # 上游新增（未合并）
+git cherry-pick <upstream-commit-sha>     # 按需选 commit
 ```
 
-当前本 fork 与 upstream HEAD 一致（`ee639df`），所有 fork-side 改动都是**未提交的工作区改动**（`git status --short` 显示 31 个 `M` + 7 个 `??`）。如要整理成独立 commit：
-
-```sh
-git add -A
-git commit -m "fork: <desc>"
-```
+上游当前节奏：单人 AI 辅助开发，release 频繁（v0.2.x 已发），单点风险高。**不建议大 merge 上游 main**——本仓库与上游已存在功能性分歧（DSH 兼容性、`/compact` 命令处理）。
 
 ## 关键坑（必读）
 
@@ -73,6 +80,6 @@ git commit -m "fork: <desc>"
 
 ## 关联记录
 
-- 主项目工作区：`~/workspace-lyf/deepseek-harness/`（DSH 源码，本 fork 不修改此处）
+- 主项目工作区：`~/workspace-lyf/deepseek-harness/`（DSH 源码，本插件不修改此处）
 - DSH 项目文档：`~/workspace-lyf/deepseek-harness/docs/architecture.md`
 - 部署运维 skill：`~/.hermes/skills/autonomous-ai-agents/deepseek-harness-ops/`（含 rc.7 兼容性记录）
