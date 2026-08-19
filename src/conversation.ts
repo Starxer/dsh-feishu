@@ -25,7 +25,7 @@ export function toSessionId(domain: DomainName, key: string): SessionId {
 interface EventLike {
   seq: number
   type: string
-  data: Record<string, unknown>
+  data: any
 }
 
 export interface TurnSummary { text: string; ok: boolean }

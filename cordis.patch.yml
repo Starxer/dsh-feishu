@@ -1,7 +1,7 @@
 # The plugin stays active while unconfigured so it can serve its local settings page.
 - insert:
     - id: lark-channel
-      name: '@sugarforever/dsh-lark'
+      name: '@starxer/ds-feishu'
       disabled: false
       config:
         appId: ''

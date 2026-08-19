@@ -12,8 +12,13 @@ describe('resolveSettingsConfig', () => {
     expect(resolveSettingsConfig({ appId: 'id' })).toMatchObject({
       domain: 'feishu', requireMention: true, dmMode: 'open',
       errorMessage: '抱歉，处理这条消息时遇到了问题，请稍后重试。',
+      reactEmoji: 'THUMBSUP',
     })
     expect(resolveSettingsConfig({ appId: 'id' })).not.toHaveProperty('workspace')
+  })
+
+  it('preserves an empty reaction override that disables the acknowledgement', () => {
+    expect(resolveSettingsConfig({ appId: 'id', reactEmoji: '' }).reactEmoji).toBe('')
   })
 
   it('preserves Lark and access-policy configuration', () => {

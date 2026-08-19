@@ -1,8 +1,17 @@
 import * as React from 'react'
 import { Button, Input, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import { QRCodeSVG } from 'qrcode.react'
 
 type Translate = (key: string) => string
 type RuntimeState = 'unconfigured' | 'connecting' | 'connected' | 'error' | 'stopped'
+type ProvisionPhase = 'idle' | 'waiting' | 'configuring' | 'done' | 'error'
+
+interface ProvisionState {
+  phase: ProvisionPhase
+  qrUrl?: string
+  expireIn?: number
+  message?: string
+}
 
 interface SettingsPayload {
   revision: number
@@ -18,9 +27,11 @@ interface SettingsPayload {
     workspace?: string
     agentPreset?: string
     errorMessage: string
+    reactEmoji: string
   }
   credential: { configured: boolean; source?: string; writable: boolean }
   runtime: { state: RuntimeState; message?: string }
+  provision: ProvisionState
 }
 
 interface FormState {
@@ -36,6 +47,7 @@ interface FormState {
   workspace: string
   agentPreset: string
   errorMessage: string
+  reactEmoji: string
 }
 
 export interface ModelCatalogModel {
@@ -63,7 +75,7 @@ interface LarkSettingsSectionProps {
 
 const EMPTY_FORM: FormState = {
   appId: '', appSecret: '', domain: 'feishu', requireMention: true, dmMode: 'open',
-  groupAllowlist: '', dmAllowlist: '', provider: '', model: '', workspace: '', agentPreset: '', errorMessage: '',
+  groupAllowlist: '', dmAllowlist: '', provider: '', model: '', workspace: '', agentPreset: '', errorMessage: '', reactEmoji: '',
 }
 
 export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps): JSX.Element {
@@ -73,9 +85,20 @@ export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps)
   const [modelCatalogFailed, setModelCatalogFailed] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
   const [notice, setNotice] = React.useState('')
+  const [provision, setProvision] = React.useState<ProvisionState | null>(null)
+  const [provisionBusy, setProvisionBusy] = React.useState(false)
+  const provisionPoll = React.useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const stopPolling = React.useCallback(() => {
+    if (provisionPoll.current !== null) {
+      clearInterval(provisionPoll.current)
+      provisionPoll.current = null
+    }
+  }, [])
 
   const adopt = React.useCallback((next: SettingsPayload) => {
     setPayload(next)
+    setProvision(next.provision)
     setForm({
       appId: next.settings.appId,
       appSecret: '',
@@ -89,22 +112,26 @@ export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps)
       workspace: next.settings.workspace ?? '',
       agentPreset: next.settings.agentPreset ?? '',
       errorMessage: next.settings.errorMessage,
+      reactEmoji: next.settings.reactEmoji,
     })
   }, [])
 
-  React.useEffect(() => {
-    const controller = new AbortController()
-    fetch('/dsh-lark/settings', { headers: { accept: 'application/json' }, cache: 'no-store', signal: controller.signal })
-      .then(async response => {
-        const value = await response.json() as SettingsPayload & { error?: string }
-        if (!response.ok) throw new Error(value.error ?? t('loadFailed'))
-        adopt(value)
-      })
-      .catch(error => {
-        if (!controller.signal.aborted) setNotice(error instanceof Error ? error.message : String(error))
-      })
-    return () => controller.abort()
+  const loadSettings = React.useCallback(async () => {
+    try {
+      const response = await fetch('/dsh-lark/settings', { headers: { accept: 'application/json' }, cache: 'no-store' })
+      const value = await response.json() as SettingsPayload & { error?: string }
+      if (!response.ok) throw new Error(value.error ?? t('loadFailed'))
+      adopt(value)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    }
   }, [adopt, t])
+
+  React.useEffect(() => {
+    void loadSettings()
+  }, [loadSettings])
+
+  React.useEffect(() => () => stopPolling(), [stopPolling])
 
   React.useEffect(() => {
     if (loadModels === undefined) return
@@ -120,6 +147,42 @@ export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps)
     return () => { active = false }
   }, [loadModels])
 
+  const beginPolling = React.useCallback(() => {
+    stopPolling()
+    provisionPoll.current = setInterval(() => {
+      void (async () => {
+        try {
+          const response = await fetch('/dsh-lark/provision', { headers: { accept: 'application/json' }, cache: 'no-store' })
+          const value = await response.json() as ProvisionState & { error?: string }
+          if (!response.ok) throw new Error(value.error ?? t('provisionFailed'))
+          setProvision(value)
+          if (value.phase === 'done' || value.phase === 'error' || value.phase === 'idle') {
+            stopPolling()
+            if (value.phase === 'done') void loadSettings()
+          }
+        } catch (error) {
+          setNotice(error instanceof Error ? error.message : String(error))
+        }
+      })()
+    }, 2000)
+  }, [stopPolling, loadSettings, t])
+
+  const startProvision = async () => {
+    setProvisionBusy(true)
+    setNotice('')
+    try {
+      const response = await fetch('/dsh-lark/provision', { method: 'POST', headers: { accept: 'application/json' } })
+      const value = await response.json() as ProvisionState & { error?: string }
+      if (!response.ok) throw new Error(value.error ?? t('provisionFailed'))
+      setProvision(value)
+      beginPolling()
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      setProvisionBusy(false)
+    }
+  }
+
   const update = <K extends keyof FormState>(key: K, value: FormState[K]) => setForm(current => ({ ...current, [key]: value }))
   const lines = (value: string) => value.split(/\n/u).map(item => item.trim()).filter(Boolean)
 
@@ -131,6 +194,7 @@ export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps)
       expectedRevision: payload?.revision,
       appId: form.appId.trim(), domain: form.domain, requireMention: form.requireMention, dmMode: form.dmMode,
       groupAllowlist: lines(form.groupAllowlist), dmAllowlist: lines(form.dmAllowlist), errorMessage: form.errorMessage,
+      reactEmoji: form.reactEmoji,
     }
     for (const key of ['provider', 'model', 'workspace', 'agentPreset'] as const) {
       body[key] = form[key].trim() === '' ? null : form[key].trim()
@@ -190,6 +254,20 @@ export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps)
     {payload !== null ? <form onSubmit={save}>
       <div className="dsh-lark-card">
         <h3>{t('application')}</h3>
+        <div className="dsh-lark-provision">
+          <Button variant="outline" type="button" disabled={provisionBusy || provision?.phase === 'waiting' || provision?.phase === 'configuring'} onClick={startProvision}>
+            {provisionBusy ? t('provisionStarting') : t('scanToConfigure')}
+          </Button>
+          {provision?.phase === 'waiting' && provision.qrUrl !== undefined ? (
+            <div className="dsh-lark-qr">
+              <QRCodeSVG value={provision.qrUrl} size={220} marginSize={1} />
+              <p>{t('scanHint')}</p>
+              <code className="dsh-lark-qr-link">{provision.qrUrl}</code>
+            </div>
+          ) : null}
+          {provision?.phase === 'configuring' ? <p className="dsh-lark-detail">{t('provisioning')}</p> : null}
+          {provision?.phase === 'error' ? <p className="dsh-lark-detail dsh-lark-error">{t('provisionFailed')}{provision.message !== undefined ? `: ${provision.message}` : ''}</p> : null}
+        </div>
         <div className="dsh-lark-grid">
           <label><span>{t('appId')}</span><Input aria-label="appId" value={form.appId} onChange={event => update('appId', event.target.value)} autoComplete="off" /></label>
           <label><span>{t('domain')}</span><select aria-label="domain" value={form.domain} onChange={event => update('domain', event.target.value as FormState['domain'])}><option value="feishu">Feishu</option><option value="lark">Lark</option></select></label>
@@ -217,6 +295,7 @@ export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps)
           <label><span>{t('groupAllowlist')}</span><textarea value={form.groupAllowlist} onChange={event => update('groupAllowlist', event.target.value)} placeholder={t('onePerLine')} /></label>
           <label><span>{t('dmAllowlist')}</span><textarea value={form.dmAllowlist} onChange={event => update('dmAllowlist', event.target.value)} placeholder={t('onePerLine')} /></label>
         </div>
+        <label><span>{t('reactEmoji')}</span><Input aria-label="reactEmoji" value={form.reactEmoji} onChange={event => update('reactEmoji', event.target.value)} placeholder={t('reactEmojiHint')} /></label>
       </div>
 
       <div className="dsh-lark-card">

@@ -1,6 +1,6 @@
 import { defineConfig } from 'tsdown'
 
-const moduleId = '@sugarforever/dsh-lark'
+const moduleId = '@starxer/ds-feishu'
 const externals = [
   'react',
   'react/jsx-runtime',
@@ -17,6 +17,7 @@ export default defineConfig({
   dts: false,
   sourcemap: true,
   external: externals,
+  noExternal: ['qrcode.react'],
   outputOptions: {
     entryFileNames: 'client.js',
     banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(moduleId)}, factory: (require) => {`,

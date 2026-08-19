@@ -10,12 +10,22 @@ export interface PluginLogger {
   error(message: string): unknown
 }
 
+/**
+ * Dispatch a parsed slash command against the receiving chat.
+ * Returning `undefined` means the message is not a command; the bridge
+ * falls back to its ordinary agent reply.
+ */
+export type SlashCommandHandler = (
+  message: NormalizedMessage,
+) => Promise<{ kind: 'success' | 'error'; text: string } | undefined>
+
 export async function startChannel(
   config: Omit<RuntimeConfig, 'appSecretRef'>,
   bridge: Pick<HarnessConversationService, 'reply' | 'dispose'>,
   factory: ChannelFactory = createLarkChannel,
   logger: PluginLogger = console,
   terminalLogger?: Pick<PluginLogger, 'error'>,
+  slashCommand?: SlashCommandHandler,
 ): Promise<() => Promise<void>> {
   const logError = (message: string) => {
     logger.error(message)
@@ -46,6 +56,37 @@ export async function startChannel(
   const unsubscribers = [
     channel.on('message', async (message: NormalizedMessage) => {
       const replyInThread = message.threadId !== undefined
+      if (config.reactEmoji !== '') {
+        try {
+          await channel.addReaction(message.messageId, config.reactEmoji)
+        } catch (error: unknown) {
+          logger.warn(`dsh-lark: reaction failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      // Slash commands bypass the agent loop entirely; the registered
+      // command handler resolves the chat's session and produces a direct
+      // textual result.
+      if (slashCommand !== undefined) {
+        try {
+          const commandResult = await slashCommand(message)
+          if (commandResult !== undefined) {
+            await channel.send(message.chatId, { text: commandResult.text }, {
+              replyTo: message.messageId,
+              replyInThread,
+            })
+            return
+          }
+        } catch (error: unknown) {
+          logError(`dsh-lark: slash command failed: ${error instanceof Error ? error.message : String(error)}`)
+          await channel.send(message.chatId, { text: config.errorMessage }, {
+            replyTo: message.messageId,
+            replyInThread,
+          }).catch((sendError: unknown) => {
+            logError(`dsh-lark: fallback reply failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`)
+          })
+          return
+        }
+      }
       try {
         const text = await bridge.reply(message)
         await channel.send(message.chatId, { markdown: text }, {

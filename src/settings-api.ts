@@ -1,6 +1,7 @@
 import { resolveSettingsConfig } from './config.ts'
 import type { Config, SettingsConfig } from './config.ts'
 import type { RuntimeStatus } from './runtime.ts'
+import type { ProvisionState } from './provision.ts'
 
 export interface CredentialInfo {
   configured: boolean
@@ -21,6 +22,10 @@ export interface SettingsApiDependencies {
   }
   runtimeStatus(): RuntimeStatus
   reconcile(): Promise<void>
+  provision: {
+    status(): ProvisionState
+    start(): ProvisionState
+  }
 }
 
 type NullableOverride = 'provider' | 'model' | 'workspace' | 'agentPreset'
@@ -31,7 +36,7 @@ export type SettingsUpdate = Omit<Config, 'appSecret' | 'appSecretRef' | Nullabl
 
 const SETTINGS_KEYS = new Set([
   'appId', 'domain', 'requireMention', 'dmMode', 'groupAllowlist', 'dmAllowlist',
-  'provider', 'model', 'workspace', 'agentPreset', 'errorMessage', 'appSecret', 'expectedRevision',
+  'provider', 'model', 'workspace', 'agentPreset', 'errorMessage', 'reactEmoji', 'appSecret', 'expectedRevision',
 ])
 
 export function createSettingsApi(deps: SettingsApiDependencies) {
@@ -48,7 +53,16 @@ export function createSettingsApi(deps: SettingsApiDependencies) {
         settings,
         credential,
         runtime: deps.runtimeStatus(),
+        provision: deps.provision.status(),
       }
+    },
+
+    provision() {
+      return deps.provision.start()
+    },
+
+    provisionStatus() {
+      return deps.provision.status()
     },
 
     async update(input: SettingsUpdate) {

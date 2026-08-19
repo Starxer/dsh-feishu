@@ -44,7 +44,7 @@ describe('Lark settings client plugin', () => {
       revision: 1,
       settings: {
         appId: 'cli_existing', domain: 'feishu', requireMention: true, dmMode: 'open',
-        groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error',
+        groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: 'THUMBSUP',
       },
       credential: { configured: true, source: 'file', writable: true },
       runtime: { state: 'connected' },
@@ -89,7 +89,7 @@ describe('LarkSettingsSection', () => {
     revision: 12,
     settings: {
       appId: 'cli_existing', appSecretRef: 'DSH_LARK_APP_SECRET', domain: 'feishu', requireMention: true,
-      dmMode: 'open', groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error',
+      dmMode: 'open', groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: 'THUMBSUP',
     },
     credential: { configured: true, source: 'file', writable: true },
     runtime: { state: 'connected' },
@@ -100,6 +100,7 @@ describe('LarkSettingsSection', () => {
     render(h(LarkSettingsSection, { t: (key: string) => key }))
     expect(await screen.findByDisplayValue('cli_existing')).toBeTruthy()
     expect(screen.getByLabelText('appSecret').getAttribute('type')).toBe('password')
+    expect(screen.getByLabelText('reactEmoji')).toBeTruthy()
     expect(screen.getByText('connected')).toBeTruthy()
     expect(screen.getByText('credentialConfigured')).toBeTruthy()
   })

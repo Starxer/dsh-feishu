@@ -3,3 +3,9 @@ lib/
 dist/
 *.tgz
 .env
+
+# Fork 调试时可能产生的临时备份文件
+src/*.bak.*
+*.bak.*
+# Map 文件通常不 commit（upstream 也没 commit client.js.map，对应 lib/index.js.map 一致）
+client/client.js.map

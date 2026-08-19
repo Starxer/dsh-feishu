@@ -6,6 +6,7 @@ export type DirectMessageMode = 'open' | 'allowlist' | 'disabled'
 export const LARK_APP_SECRET_REF = 'DSH_LARK_APP_SECRET'
 export const LARK_SETTINGS_NAMESPACE = 'lark-channel'
 const DEFAULT_ERROR_MESSAGE = '抱歉，处理这条消息时遇到了问题，请稍后重试。'
+const DEFAULT_REACTION_EMOJI = 'THUMBSUP'
 const CREDENTIAL_REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u
 
 export interface Config {
@@ -23,11 +24,13 @@ export interface Config {
   workspace?: string
   agentPreset?: string
   errorMessage?: string
+  /** Emoji reaction the bot adds to every inbound message; empty string disables it. */
+  reactEmoji?: string
 }
 
 export interface SettingsConfig extends Required<Pick<Config,
   'appId' | 'appSecretRef' | 'domain' | 'requireMention' | 'dmMode' | 'groupAllowlist' |
-  'dmAllowlist' | 'errorMessage'>> {
+  'dmAllowlist' | 'errorMessage' | 'reactEmoji'>> {
   appSecret?: string
   provider?: string
   model?: string
@@ -54,6 +57,7 @@ export const ConfigSchema: z<Config> = z.object({
   workspace: z.string(),
   agentPreset: z.string(),
   errorMessage: z.string().default(DEFAULT_ERROR_MESSAGE),
+  reactEmoji: z.string().default(DEFAULT_REACTION_EMOJI).description('Emoji reaction added to each inbound message; empty string disables it'),
 })
 
 export function resolveSettingsConfig(config: Config): SettingsConfig {
@@ -70,6 +74,7 @@ export function resolveSettingsConfig(config: Config): SettingsConfig {
     groupAllowlist: config.groupAllowlist ?? [],
     dmAllowlist: config.dmAllowlist ?? [],
     errorMessage,
+    reactEmoji: config.reactEmoji ?? DEFAULT_REACTION_EMOJI,
     ...(config.appSecret === undefined ? {} : { appSecret: config.appSecret }),
     ...(config.provider === undefined ? {} : { provider: config.provider }),
     ...(config.model === undefined ? {} : { model: config.model }),

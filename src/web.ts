@@ -1,11 +1,14 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 export const SETTINGS_PATH = '/dsh-lark/settings'
+export const PROVISION_PATH = '/dsh-lark/provision'
 
 export interface SettingsApiLike {
   describe(): Promise<unknown>
   update(input: any): Promise<unknown>
   unsetSecret(): Promise<unknown>
+  provision(): unknown
+  provisionStatus(): unknown
 }
 
 export async function handleSettingsRequest(req: IncomingMessage, res: ServerResponse, api: SettingsApiLike): Promise<void> {
@@ -18,6 +21,21 @@ export async function handleSettingsRequest(req: IncomingMessage, res: ServerRes
     if (req.method === 'POST') return send(res, 200, await api.update(JSON.parse(await readBody(req))))
     if (req.method === 'DELETE') return send(res, 200, await api.unsetSecret())
     res.setHeader('allow', 'GET, POST, DELETE')
+    send(res, 405, { error: 'method not allowed' })
+  } catch (error) {
+    send(res, 400, { error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+export async function handleProvisionRequest(req: IncomingMessage, res: ServerResponse, api: SettingsApiLike): Promise<void> {
+  if (!isLoopback(req.socket.remoteAddress)) return send(res, 403, { error: 'DSH Lark provisioning is available only from localhost' })
+  try {
+    if (req.method === 'GET') return send(res, 200, api.provisionStatus())
+    if (req.method === 'POST' && !isSameOrigin(req)) {
+      return send(res, 403, { error: 'untrusted origin' })
+    }
+    if (req.method === 'POST') return send(res, 200, api.provision())
+    res.setHeader('allow', 'GET, POST')
     send(res, 405, { error: 'method not allowed' })
   } catch (error) {
     send(res, 400, { error: error instanceof Error ? error.message : String(error) })

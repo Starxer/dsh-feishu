@@ -24,6 +24,10 @@ function setup(overrides: Record<string, unknown> = {}) {
     credentials,
     runtimeStatus: () => ({ state: 'connected' as const }),
     reconcile: vi.fn(async () => undefined),
+    provision: {
+      status: () => ({ phase: 'idle' as const }),
+      start: () => ({ phase: 'waiting' as const }),
+    },
     ...overrides,
   })
   return { api, update, credentials }
@@ -68,6 +72,12 @@ describe('settings API', () => {
     const { api, update } = setup()
     await api.update({ provider: null, model: null, expectedRevision: 7 })
     expect(update).toHaveBeenCalledWith({}, ['provider', 'model'], 7)
+  })
+
+  it('forwards a reaction emoji through the ordinary settings patch', async () => {
+    const { api, update } = setup()
+    await api.update({ reactEmoji: 'OK', expectedRevision: 7 })
+    expect(update).toHaveBeenCalledWith({ reactEmoji: 'OK' }, [], 7)
   })
 
   it('does not write a secret when the settings revision is stale', async () => {
