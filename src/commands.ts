@@ -2,7 +2,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult, CommandRuntime } from '@deepseek-ai/dsh-commands'
 import type { AgentDefaultModelConfig } from '@deepseek-ai/dsh-agent-default-model'
 import type { LlmProviderInfo, LlmModelInfo } from '@deepseek-ai/dsh-llm'
-import type { CompactionEngine } from '@deepseek-ai/dsh-compaction'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -57,13 +56,6 @@ export interface CommandTranslations {
   readonly modelListEmpty: string
   readonly modelSwitched: (provider: string, model: string) => string
   readonly modelUnknown: (route: string) => string
-  readonly compactDescription: string
-  readonly compactUsage: string
-  readonly compactNoHistory: string
-  readonly compactSucceeded: (count: number, tokens: number) => string
-  readonly compactBusy: string
-  readonly compactCancelled: string
-  readonly compactChanged: string
 }
 
 /** Parse `provider/model` or `provider/model:reasoning-effort` from the raw input. */
@@ -85,12 +77,11 @@ function parseModelRoute(rawInput: string): { provider: string; model: string; r
 }
 
 /**
- * Build and register the `/model` and `/compact` commands.
+ * Build and register the `/model` command.
  *
  * `/model` either reports the current selection, lists every configured
  * provider/model route, or switches the default selection when invoked with a
- * `provider/model[:reasoning]` argument. `/compact` forwards to
- * `ctx.compaction.compactNow()` and reports the compacted span.
+ * `provider/model[:reasoning]` argument.
  */
 export function registerLarkCommands(
   ctx: Context,
@@ -142,33 +133,4 @@ async function handleModelCommand(
   // because the parser does not yet know the target provider's brand type.
   await agentDefaultModel.saveSelection(selection as Parameters<AgentDefaultModelConfig['saveSelection']>[0])
   return { kind: 'success', text: t.modelSwitched(route.provider, route.model) }
-}
-
-async function handleCompactCommand(
-  invocation: CommandInvocation,
-  compaction: CompactionEngine,
-  t: CommandTranslations,
-): Promise<CommandResult> {
-  if (invocation.rawInput.trim().length > 0) {
-    return { kind: 'error', text: t.compactUsage }
-  }
-  // Honour an already-aborted signal up front so callers that pre-cancel
-  // their dispatch never reach the backend; the catch below still handles
-  // mid-flight aborts.
-  if (invocation.signal.aborted) return { kind: 'error', text: t.compactCancelled }
-  try {
-    const result = await compaction.compactNow(invocation.agent, invocation.signal, invocation.commandId)
-    if (result === null) return { kind: 'success', text: t.compactNoHistory }
-    return {
-      kind: 'success',
-      text: t.compactSucceeded(result.shadowedSeqs.length, result.shadowedTokenCount),
-      sourceEventSeq: result.summarySeq,
-    }
-  } catch (error: unknown) {
-    if (invocation.signal.aborted) return { kind: 'error', text: t.compactCancelled }
-    const message = error instanceof Error ? error.message : String(error)
-    if (/busy/i.test(message)) return { kind: 'error', text: t.compactBusy }
-    if (/changed/i.test(message)) return { kind: 'error', text: t.compactChanged }
-    throw error
-  }
 }

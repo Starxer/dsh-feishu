@@ -23,7 +23,7 @@ dsh-lark/
 ├── lib/                 # 编译产物（DSH host 端运行时）
 ├── docs/                # 架构文档
 ├── cordis.patch.yml     # 插件元数据（DSH loader 读取）
-├── package.json         # name: @starxer/ds-feishu, link: pnpm link 到 DSH profile
+├── package.json         # name: @starxer/dsh-feishu, link: pnpm link 到 DSH profile
 └── CHANGELOG.md         # 本仓库的独立改动记录
 ```
 
@@ -42,7 +42,7 @@ npm run test
 
 | 文件 | 角色 |
 |---|---|
-| `~/.dsh/profiles/web/package.json` | pnpm link 引用本目录（`"@starxer/ds-feishu": "link:/home/lyf/workspace-lyf/deepseek-harness/workspace/dsh-lark"`） |
+| `~/.dsh/profiles/web/package.json` | pnpm link 引用本目录（`"@starxer/dsh-feishu": "link:/home/lyf/workspace-lyf/deepseek-harness/workspace/dsh-lark"`） |
 | `~/.dsh/profiles/web/cordis.patch.yml` | 启用 `lark-channel`（DSH loader 通过 plugin name 加载）|
 | `~/.dsh/settings.yaml` | `lark-channel` section（`appId`、`appSecretRef`、`domain` 等） |
 | `~/.dsh/.credentials.yaml` | `DSH_LARK_APP_SECRET: <secret>`（由 `appSecretRef` 引用） |
