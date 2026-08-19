@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { handleSettingsRequest } from '../src/web.ts'
+import { handleProvisionRequest, handleSettingsRequest } from '../src/web.ts'
 
 function response() {
   const headers = new Map<string, string>()
@@ -73,5 +73,36 @@ describe('settings web route', () => {
     await handleSettingsRequest(request as any, res as any, api as any)
     expect(res.statusCode).toBe(403)
     expect(api.update).not.toHaveBeenCalled()
+  })
+})
+
+describe('provision web route', () => {
+  it('rejects non-loopback requests', async () => {
+    const res = response()
+    await handleProvisionRequest({ method: 'GET', headers: {}, socket: { remoteAddress: '192.168.1.2' } } as any, res as any, {} as any)
+    expect(res.statusCode).toBe(403)
+  })
+
+  it('serves the provision status on GET and starts on same-origin POST', async () => {
+    const api = {
+      provisionStatus: vi.fn(() => ({ phase: 'waiting', qrUrl: 'https://scan.example/verify' })),
+      provision: vi.fn(() => ({ phase: 'waiting', qrUrl: 'https://scan.example/verify' })),
+    }
+    const getRes = response()
+    await handleProvisionRequest({ method: 'GET', headers: {}, socket: { remoteAddress: '127.0.0.1' } } as any, getRes as any, api as any)
+    expect(api.provisionStatus).toHaveBeenCalledOnce()
+    expect(getRes.body).toContain('scan.example')
+
+    const postRes = response()
+    await handleProvisionRequest({ method: 'POST', headers: { origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080' }, socket: { remoteAddress: '::1' } } as any, postRes as any, api as any)
+    expect(api.provision).toHaveBeenCalledOnce()
+  })
+
+  it('rejects cross-origin provisioning', async () => {
+    const api = { provisionStatus: vi.fn(), provision: vi.fn() }
+    const res = response()
+    await handleProvisionRequest({ method: 'POST', headers: { origin: 'https://attacker.example', host: '127.0.0.1:3080' }, socket: { remoteAddress: '127.0.0.1' } } as any, res as any, api as any)
+    expect(res.statusCode).toBe(403)
+    expect(api.provision).not.toHaveBeenCalled()
   })
 })

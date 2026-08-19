@@ -2,14 +2,10 @@ import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 
 describe('release configuration', () => {
-  it('declares the public repository and npm package metadata', async () => {
+  it('declares the public npm package metadata', async () => {
     const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
     expect(pkg).toMatchObject({
-      name: '@sugarforever/dsh-lark',
-      repository: {
-        type: 'git',
-        url: 'git+https://github.com/sugarforever/dsh-lark.git',
-      },
+      name: '@starxer/ds-feishu',
       publishConfig: { access: 'public' },
     })
   })

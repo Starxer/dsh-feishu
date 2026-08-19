@@ -2,25 +2,32 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { CommandRuntime, CommandResult } from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-workspace'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { NormalizedMessage } from '@larksuiteoapi/node-sdk'
 import { createLarkChannel } from '@larksuiteoapi/node-sdk'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { ConfigSchema, LARK_SETTINGS_NAMESPACE, resolveSettingsConfig } from './config.ts'
 import type { Config as PluginConfig, SettingsConfig } from './config.ts'
 import { HarnessConversationService } from './harness.ts'
-import { startChannel } from './channel.ts'
+import { startChannel, type SlashCommandHandler } from './channel.ts'
 import { LarkRuntime } from './runtime.ts'
 import { createSettingsApi } from './settings-api.ts'
-import { handleSettingsRequest, SETTINGS_PATH } from './web.ts'
+import { renderTerminalQr } from './provision.ts'
+import { ProvisionManager } from './provision-manager.ts'
+import { registerLarkCommands, type CommandTranslations } from './commands.ts'
+import { handleProvisionRequest, handleSettingsRequest, PROVISION_PATH, SETTINGS_PATH } from './web.ts'
 
 export const name = 'lark-channel'
 export const inject = [
   'agents', 'sessions', 'sessionPersistence', 'agentDefaultModel', 'agentPresets', 'workspaceRegistry',
-  'settings', 'credentials', 'webServer',
+  'settings', 'credentials', 'webServer', 'commands', 'llm',
 ]
 export const Config = ConfigSchema
 export type { PluginConfig }
@@ -36,8 +43,13 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   const settings = ctx.get('settings')
   const credentials = ctx.get('credentials')
   const webServer = ctx.get('webServer')
+  const commands = ctx.get('commands')
+  const llm = ctx.get('llm') as LlmRuntime | undefined
   if (agents === undefined || sessions === undefined || sessionPersistence === undefined || defaultModel === undefined || agentPresets === undefined || workspaceRegistry === undefined || settings === undefined || credentials === undefined || webServer === undefined) {
     throw new Error('dsh-lark requires Harness agent, settings, credentials, workspace, and webServer services')
+  }
+  if (commands === undefined || llm === undefined) {
+    throw new Error('dsh-lark requires commands and llm services for /model support')
   }
 
   const settingsScope = settings.register(
@@ -47,7 +59,10 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   )
   const namespace = settingsNamespace(LARK_SETTINGS_NAMESPACE)
   const currentSettings = (): SettingsConfig => resolveSettingsConfig(settingsScope.get())
+  const currentRevision = () => settings.describe({ redactSecrets: true }).find(item => item.ns === namespace)?.revision ?? 0
   let apiUpdateDepth = 0
+
+  registerLarkCommands(ctx, llm, defaultModel, larkCommandTranslations)
 
   const runtime = new LarkRuntime({
     settings: currentSettings,
@@ -61,13 +76,42 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         agentPresets,
         workspaceRegistry,
       }, config)
-      return startChannel(config, bridge, createLarkChannel, ctx.logger, console)
+      return startChannel(
+        config,
+        bridge,
+        createLarkChannel,
+        ctx.logger,
+        console,
+        message => executeSlashCommand(message, bridge, commands),
+      )
+    },
+  })
+
+  let lastPrintedQrUrl: string | undefined
+  const provisionManager = new ProvisionManager({
+    domain: () => currentSettings().domain,
+    onState: state => {
+      if (state.phase === 'waiting' && state.qrUrl !== undefined && state.qrUrl !== lastPrintedQrUrl) {
+        lastPrintedQrUrl = state.qrUrl
+        renderTerminalQr(state.qrUrl, ctx.logger)
+      }
+    },
+    onProvisioned: async result => {
+      const ref = currentSettings().appSecretRef
+      apiUpdateDepth += 1
+      try {
+        await credentials.set(credentialRef(ref), result.appSecret)
+        await settings.mutate(namespace, [{ op: 'set', path: ['appId'], value: result.appId }], currentRevision())
+      } finally {
+        apiUpdateDepth -= 1
+      }
+      await runtime.reconcile()
     },
   })
 
   const api = createSettingsApi({
     getSettings: currentSettings,
-    revision: () => settings.describe({ redactSecrets: true }).find(item => item.ns === namespace)?.revision ?? 0,
+    revision: currentRevision,
     beginUpdate: () => { apiUpdateDepth += 1 },
     endUpdate: () => { apiUpdateDepth -= 1 },
     updateSettings: (patch, unset, expectedRevision) => settings.mutate(namespace, [
@@ -81,6 +125,10 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     },
     runtimeStatus: () => runtime.status(),
     reconcile: () => runtime.reconcile(),
+    provision: {
+      status: () => provisionManager.status(),
+      start: () => provisionManager.start(),
+    },
   })
 
   settingsScope.watch(() => apiUpdateDepth > 0 ? undefined : runtime.reconcile())
@@ -92,6 +140,74 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     path: SETTINGS_PATH,
     handler: (req, res) => handleSettingsRequest(req, res, api),
   }), 'dsh-lark: settings page')
-  ctx.effect(() => () => runtime.dispose(), 'dsh-lark: runtime')
+  ctx.effect(() => webServer.register({
+    kind: 'exact',
+    path: PROVISION_PATH,
+    handler: (req, res) => handleProvisionRequest(req, res, api),
+  }), 'dsh-lark: provision endpoint')
+  ctx.effect(() => () => {
+    provisionManager.dispose()
+    return runtime.dispose()
+  }, 'dsh-lark: runtime')
   await runtime.reconcile()
 }
+
+/**
+ * Localized strings for `/model` and `/compact`. Keeping these inline (rather
+ * than registering a locale namespace) keeps the dependency surface small —
+ * the strings are owned by the Feishu-facing command handlers and rarely
+ * change.
+ */
+const larkCommandTranslations: CommandTranslations = {
+  modelDescription: 'Show, list, or switch the active model',
+  modelCurrentHeader: 'Current model:',
+  modelUsage: 'Usage: /model [list|<provider>/<model>[:reasoning]]',
+  modelListHeader: 'Available models:',
+  modelListEmpty: 'No registered providers are available.',
+  modelSwitched: (provider, model) => `Switched default model to \`${provider}/${model}\`.`,
+  modelUnknown: route => `Unknown model route "${route}".`,
+  compactDescription: 'Compact older conversation history',
+  compactUsage: 'Usage: /compact (no arguments)',
+  compactNoHistory: 'No compactable history yet.',
+  compactSucceeded: (count, tokens) => `Compacted ${count} history items (~${tokens} tokens).`,
+  compactBusy: 'Compaction is unavailable because this process has an active compaction, or the agent is not idle.',
+  compactCancelled: 'Compaction cancelled.',
+  compactChanged: 'The history selected for compaction changed before it could be replaced. The conversation is unchanged; the attempt is recorded in the session log.',
+}
+
+/**
+ * Detect a slash command in an inbound chat message and dispatch it through
+ * the Harness command runtime, returning the textual result so the channel
+ * can echo it back to the user. A `undefined` return signals that the
+ * message is not a command and should fall through to the agent reply.
+ */
+async function executeSlashCommand(
+  message: NormalizedMessage,
+  bridge: HarnessConversationService,
+  commands: CommandRuntime,
+): Promise<{ kind: 'success' | 'error'; text: string } | undefined> {
+  const parsed = parseCommand(message.content)
+  if (parsed === undefined) return undefined
+  const chatMessage = {
+    chatId: message.chatId,
+    chatType: message.chatType,
+    ...message.threadId === undefined ? {} : { threadId: message.threadId },
+  }
+  const agent = await bridge.resolveAgent(chatMessage)
+  if (agent === undefined) {
+    return {
+      kind: 'error',
+      text: 'Slash commands need an existing conversation in this chat — send a regular message first.',
+    }
+  }
+  const controller = new AbortController()
+  const line = `/${parsed.name}${parsed.rawInput}`
+  const execution = await commands.execute(agent, line, controller.signal)
+  if (execution === undefined) return undefined
+  const result: CommandResult = execution.result
+  return { kind: result.kind, text: result.text ?? `Command /${parsed.name} produced no output.` }
+}
+
+// Keep the SlashCommandHandler import live for callers that prefer the type
+// alias without reaching into `./channel.ts`.
+export type { SlashCommandHandler }

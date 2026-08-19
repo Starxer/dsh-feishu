@@ -1,11 +1,13 @@
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { conversationKey, summarizeTurn, toSessionId } from './conversation.ts'
 import type { ConversationMessage } from './conversation.ts'
 import type { DomainName } from './config.ts'
 
+/** Minimum surface of {@link Agent} the conversation service depends on. */
 interface AgentLike {
-  session: { id: unknown; seq: number; events: readonly any[] }
+  session: { id: unknown; seq: number; events: readonly { seq: number; type: string; data: any }[] }
   whenIdle(): Promise<void>
   followup(message: ReturnType<typeof createUserMessage>): void
 }
@@ -21,7 +23,7 @@ export interface HarnessDependencies {
   agents: {
     create: (options: any) => Promise<AgentHandleLike>
     resume: (options: any) => Promise<AgentHandleLike>
-    get: (id: ReturnType<typeof toSessionId>) => AgentLike | undefined
+    get: (id: ReturnType<typeof toSessionId>) => Agent | undefined
   }
   sessions: { flush(session: AgentLike['session']): Promise<unknown> }
   sessionPersistence: { list(): Promise<Array<{ id: string }>> }
@@ -68,6 +70,32 @@ export class HarnessConversationService {
     return result.text
   }
 
+  /**
+   * Resolve the agent backing one inbound message without creating one.
+   * Slash-command handlers need a live agent to attach lifecycle events to;
+   * silently spawning one would let the user run `/compact` against an empty
+   * session and report "no compactable history yet" instead of an error.
+   * @param message - inbound chat coordinates used to derive the session id.
+   * @returns the existing agent for this chat, or `undefined` when no
+   *   conversation has been started yet.
+   */
+  async resolveAgent(message: ConversationMessage): Promise<Agent | undefined> {
+    const key = conversationKey(message)
+    const sessionId = toSessionId(this.config.domain, key)
+    const live = this.deps.agents.get(sessionId)
+    if (live !== undefined) return live
+    const pending = this.handles.get(key)
+    if (pending === undefined) return undefined
+    try {
+      // The handle's agent is the bridge's narrowed AgentLike; the command
+      // runtime needs every Agent member, so cast through the structural
+      // shape that the bridge already accepts.
+      return (await pending).agent as unknown as Agent
+    } catch {
+      return undefined
+    }
+  }
+
   async dispose(): Promise<void> {
     const handles = await Promise.allSettled(this.handles.values())
     await Promise.all(handles.flatMap(result => result.status === 'fulfilled' ? [result.value.dispose()] : []))
@@ -89,7 +117,7 @@ export class HarnessConversationService {
     const sessionId = toSessionId(this.config.domain, key)
     const liveAgent = this.deps.agents.get(sessionId)
     if (liveAgent !== undefined) {
-      return { agent: liveAgent, dispose: async () => undefined }
+      return { agent: liveAgent as unknown as AgentLike, dispose: async () => undefined }
     }
     const fallback = this.deps.selection()
     const selection = {

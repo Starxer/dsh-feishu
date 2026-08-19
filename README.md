@@ -1,6 +1,12 @@
 # DeepSeek Harness Lark / 飞书
 
-`@sugarforever/dsh-lark` 是一个 DeepSeek Harness Host 插件。安装后，用户可以直接从飞书或 Lark 与 Harness Agent 对话，并继续使用 Harness 中配置的模型、工具、系统提示和会话存储。
+> **Fork 来源**：本插件 fork 自 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark)（commit `ee639df Fix latest Harness compatibility check`，同步于本 fork HEAD）。上游包名 `@starxer/ds-feishu`、License MIT（继承）。
+>
+> **本 fork 的所有改动记录在 [CHANGELOG.md](./CHANGELOG.md) 的「Unreleased — Forked」段**。改动主要为：DSH rc.7 兼容、`/compact` 命令移除（与 DSH 自带 `command-compact` 同名冲突）、provision 流程改进（扫码配置）。
+>
+> **dsh 配置路径**（非本仓库）：`~/.dsh/profiles/web/cordis.patch.yml`（已设置 `lark-channel` 启用 + 配合 `compaction-basic`/`command-compact` 拉回 host plane）。
+
+`@starxer/ds-feishu` 是一个 DeepSeek Harness Host 插件。安装后，用户可以直接从飞书或 Lark 与 Harness Agent 对话，并继续使用 Harness 中配置的模型、工具、系统提示和会话存储。
 
 插件使用飞书官方 `@larksuiteoapi/node-sdk` 的 Channel API，通过 WebSocket 长连接接收消息，不需要公网服务器、域名或 Webhook 回调地址。官方 SDK 负责连接、自动重连、消息去重、过期事件过滤、同一聊天的串行处理、消息格式转换和发送回复；插件负责把飞书会话映射到 Harness Session，再把消息交给 Agent。
 
@@ -11,6 +17,8 @@
 - 单聊和普通群聊按聊天复用 Harness Session。
 - 话题群按线程使用独立 Harness Session。
 - 回复会关联原始消息，并保留在原来的话题线程中。
+- 收到消息时会先给该消息添加一个表情回应（默认 👍 `THUMBSUP`），作为已收到信号的即时确认；可配置为空字符串关闭。
+- 支持飞书聊天内的斜杠命令：`/model` 查看、列出或切换当前模型，`/compact` 立即压缩当前会话历史，`/stop` 立即中止正在运行的 Agent 轮次。
 - 群聊默认需要 @机器人，单聊默认开放。
 - 可以通过白名单限制群聊和单聊用户。
 - 可以沿用 Harness 默认模型，也可以为飞书渠道指定模型。
@@ -35,9 +43,20 @@ npx @deepseek-ai/dsh web
 
 ## 创建飞书应用
 
-以下名称在飞书中国版和国际版 Lark 控制台中可能略有区别，但配置内容相同。
+### 扫码一键配置（推荐）
 
-### 创建自建应用
+插件内置了飞书官方 `registerApp`（OAuth 2.0 Device Authorization Grant）扫码建应用能力，无需手动前往开发者后台创建应用、配置权限和事件：
+
+1. 启动 Harness Web Profile 后，打开 **Settings → 飞书与 Lark**。
+2. 点击 **扫码配置**。
+3. 页面会显示一个二维码（同时也会打印到 Harness 终端），用飞书 App 扫码并确认授权。
+4. 授权完成后，插件自动拿到 App ID 和 App Secret，写入 Harness Credentials，并开启长连接、订阅 `im.message.receive_v1`，随后建立连接。
+
+扫码流程会自动预填机器人所需的最小权限（单聊读取、群聊 @ 读取、以机器人身份发消息）、更新应用配置所需的 `application:application:patch` 权限，以及 `im.message.receive_v1` 事件。扫码后的落地页可以「创建新应用」，也可以「选择已有应用」为其补开通这些权限。如果企业管理员限制了扫码建应用能力，仍可参考下方手动配置。
+
+### 创建自建应用（手动）
+
+以下名称在飞书中国版和国际版 Lark 控制台中可能略有区别，但配置内容相同。
 
 1. 打开飞书或 Lark 开发者后台。
 2. 创建一个企业自建应用。
@@ -117,7 +136,7 @@ npx @deepseek-ai/dsh web
 从 npm 安装到 Harness Web Profile：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add @sugarforever/dsh-lark
+npx @deepseek-ai/dsh plugin --profile web add @starxer/ds-feishu
 ```
 
 Harness 的 Agent、Session、Settings 等服务由 Profile Bundle 在运行时提供。插件将这些包声明为 optional peer，以适配 DSH 的 Bundle 加载机制；它不会在 Profile 中重复安装另一套 Harness。兼容范围从 `0.1.0-rc.6` 开始，并通过 CI 持续验证最新发布的 Harness 版本，因此升级到后续 RC 通常不需要重新发布插件。
@@ -128,11 +147,10 @@ Harness 的 Agent、Session、Settings 等服务由 Profile Bundle 在运行时�
 npx @deepseek-ai/dsh plugin --profile web list
 ```
 
-开发本项目时，也可以安装本地目录：
+开发本项目时，也可以直接安装本地目录（把路径换成你的插件 checkout 目录）：
 
 ```sh
-git clone https://github.com/sugarforever/dsh-lark.git
-cd dsh-lark
+cd /path/to/ds-feishu
 npm install
 npm test
 npm run typecheck
@@ -239,6 +257,7 @@ Harness 重启后，插件会恢复对应的持久化 Session；如果该 Sessio
     model: deepseek-v4-flash
     workspace: /absolute/path/to/workspace
     agentPreset: coding
+    reactEmoji: THUMBSUP
     errorMessage: 抱歉，处理这条消息时遇到了问题，请稍后重试。
 ```
 
@@ -255,9 +274,25 @@ Harness 重启后，插件会恢复对应的持久化 Session；如果该 Sessio
 | `model` | 否 | Harness 默认值 | 为这个渠道指定模型 |
 | `workspace` | 否 | 第一个已注册 Workspace；没有时为 DSH 进程工作目录 | Agent 使用的工作目录；显式路径优先 |
 | `agentPreset` | 否 | Harness 当前默认 Preset | Agent 使用的 Preset，决定工具、系统提示等组合 |
+| `reactEmoji` | 否 | `THUMBSUP` | 收到消息时添加的表情回应；留空字符串关闭此确认 |
 | `errorMessage` | 否 | 内置中文提示 | Agent 执行失败时返回给用户的文本，最长 500 个字符 |
 
 `provider` 和 `model` 建议同时设置。如果都不设置，插件会读取 Harness 当前的默认模型配置。
+
+### 飞书聊天内的斜杠命令
+
+飞书插件把 Harness 的全局斜杠命令面暴露到了飞书聊天中。当前注册的可用命令：
+
+| 命令 | 用法 | 行为 |
+| --- | --- | --- |
+| `/model` | 无参数 | 报告当前默认模型 |
+| `/model list` | 列出可用 Provider/Model | 枚举当前 Harness 中已注册的 Provider 与每个 Provider 的可用 Model |
+| `/model <provider>/<model>[:reasoning]` | 切换默认模型 | 把 Harness 默认选择写为 `<provider>/<model>`，可选附 `reasoning` 段（如 `high`），下次创建 Agent 即生效 |
+| `/model <keyword>` | 模糊搜索 | 在所有 Provider/Model 名称中做不区分大小写的子串匹配，列出候选并标记当前选择；用 `/model <provider>/<model>` 完成切换 |
+| `/compact` | 无参数 | 对当前聊天对应的 Agent 立即执行一次手动压缩 |
+| `/stop` | 无参数 | 立即中止当前聊天里正在运行的 Agent 轮次（聊天本身保持可用，下条消息会开新轮次） |
+
+命令在发送给飞书/Lark 之前完全在 Harness 内解析，不会走模型。`/model` 只读取和写入 Harness Settings；`/compact` 调用 `ctx.compaction.compactNow()`，所以挂载了 `@deepseek-ai/dsh-compaction-basic` 后端时同样能跑。在某个聊天中第一次发送斜杠命令前，请先在该聊天发过至少一条普通消息，以便插件创建对应的 Harness Agent。
 
 ### Workspace 和 Agent Preset
 
@@ -370,14 +405,14 @@ dmMode: disabled
 升级插件：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web remove @sugarforever/dsh-lark
-npx @deepseek-ai/dsh plugin --profile web add @sugarforever/dsh-lark
+npx @deepseek-ai/dsh plugin --profile web remove @starxer/ds-feishu
+npx @deepseek-ai/dsh plugin --profile web add @starxer/ds-feishu
 ```
 
 卸载插件：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web remove @sugarforever/dsh-lark
+npx @deepseek-ai/dsh plugin --profile web remove @starxer/ds-feishu
 ```
 
 卸载后再检查 Web Profile 的 `cordis.patch.yml`，确认没有残留的手工配置实例。环境变量可以随后从服务配置或启动脚本中移除。
@@ -402,13 +437,13 @@ npm run build
 npx @deepseek-ai/dsh plugin --profile web add "$PWD"
 ```
 
-这会把 Web Profile 中的 `@sugarforever/dsh-lark` 依赖改为当前本地目录。它只覆盖该 Profile 使用的插件包，不会改写 npm registry 中的生产版本。由于服务端和 Web 客户端 bundle 都在 Harness 启动时加载，安装本地构建后需要重新启动 `dsh web`；之后在 Settings 中修改 Lark 参数仍然可以热生效。
+这会把 Web Profile 中的 `@starxer/ds-feishu` 依赖改为当前本地目录。它只覆盖该 Profile 使用的插件包，不会改写 npm registry 中的生产版本。由于服务端和 Web 客户端 bundle 都在 Harness 启动时加载，安装本地构建后需要重新启动 `dsh web`；之后在 Settings 中修改 Lark 参数仍然可以热生效。
 
 恢复 npm 上的生产版本：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web remove @sugarforever/dsh-lark
-npx @deepseek-ai/dsh plugin --profile web add @sugarforever/dsh-lark
+npx @deepseek-ai/dsh plugin --profile web remove @starxer/ds-feishu
+npx @deepseek-ai/dsh plugin --profile web add @starxer/ds-feishu
 ```
 
 ## 版本与发布
@@ -426,7 +461,7 @@ npx @deepseek-ai/dsh plugin --profile web add @sugarforever/dsh-lark
 
 ### 首次发布
 
-如果 `@sugarforever/dsh-lark` 尚未在 npm 中创建，需要先从本地发布第一个版本：
+如果 `@starxer/ds-feishu` 尚未在 npm 中创建，需要先从本地发布第一个版本：
 
 ```sh
 npm login
@@ -438,10 +473,10 @@ npm pack --dry-run
 npm publish --access public
 ```
 
-首个版本发布后，在 npmjs.com 打开 `@sugarforever/dsh-lark` 的 Settings → Trusted Publisher，选择 GitHub Actions，并填写：
+首个版本发布后，在 npmjs.com 打开 `@starxer/ds-feishu` 的 Settings → Trusted Publisher，选择 GitHub Actions，并填写：
 
-- Organization or user：`sugarforever`
-- Repository：`dsh-lark`
+- Organization or user：`starxer`
+- Repository：`ds-feishu`
 - Workflow filename：`publish.yml`
 - Allowed action：`npm publish`
 
