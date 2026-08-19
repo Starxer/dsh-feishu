@@ -136,7 +136,7 @@ npx @deepseek-ai/dsh web
 从 npm 安装到 Harness Web Profile：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add @starxer/ds-feishu
+npx @deepseek-ai/dsh plugin --profile web add @starxer/dsh-feishu
 ```
 
 Harness 的 Agent、Session、Settings 等服务由 Profile Bundle 在运行时提供。插件将这些包声明为 optional peer，以适配 DSH 的 Bundle 加载机制；它不会在 Profile 中重复安装另一套 Harness。兼容范围从 `0.1.0-rc.6` 开始，并通过 CI 持续验证最新发布的 Harness 版本，因此升级到后续 RC 通常不需要重新发布插件。
@@ -150,7 +150,7 @@ npx @deepseek-ai/dsh plugin --profile web list
 开发本项目时，也可以直接安装本地目录（把路径换成你的插件 checkout 目录）：
 
 ```sh
-cd /path/to/ds-feishu
+cd /path/to/dsh-feishu
 npm install
 npm test
 npm run typecheck
@@ -405,14 +405,14 @@ dmMode: disabled
 升级插件：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web remove @starxer/ds-feishu
-npx @deepseek-ai/dsh plugin --profile web add @starxer/ds-feishu
+npx @deepseek-ai/dsh plugin --profile web remove @starxer/dsh-feishu
+npx @deepseek-ai/dsh plugin --profile web add @starxer/dsh-feishu
 ```
 
 卸载插件：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web remove @starxer/ds-feishu
+npx @deepseek-ai/dsh plugin --profile web remove @starxer/dsh-feishu
 ```
 
 卸载后再检查 Web Profile 的 `cordis.patch.yml`，确认没有残留的手工配置实例。环境变量可以随后从服务配置或启动脚本中移除。
@@ -437,13 +437,13 @@ npm run build
 npx @deepseek-ai/dsh plugin --profile web add "$PWD"
 ```
 
-这会把 Web Profile 中的 `@starxer/ds-feishu` 依赖改为当前本地目录。它只覆盖该 Profile 使用的插件包，不会改写 npm registry 中的生产版本。由于服务端和 Web 客户端 bundle 都在 Harness 启动时加载，安装本地构建后需要重新启动 `dsh web`；之后在 Settings 中修改 Lark 参数仍然可以热生效。
+这会把 Web Profile 中的 `@starxer/dsh-feishu` 依赖改为当前本地目录。它只覆盖该 Profile 使用的插件包，不会改写 npm registry 中的生产版本。由于服务端和 Web 客户端 bundle 都在 Harness 启动时加载，安装本地构建后需要重新启动 `dsh web`；之后在 Settings 中修改 Lark 参数仍然可以热生效。
 
 恢复 npm 上的生产版本：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web remove @starxer/ds-feishu
-npx @deepseek-ai/dsh plugin --profile web add @starxer/ds-feishu
+npx @deepseek-ai/dsh plugin --profile web remove @starxer/dsh-feishu
+npx @deepseek-ai/dsh plugin --profile web add @starxer/dsh-feishu
 ```
 
 ## 版本与发布
@@ -461,7 +461,7 @@ npx @deepseek-ai/dsh plugin --profile web add @starxer/ds-feishu
 
 ### 首次发布
 
-如果 `@starxer/ds-feishu` 尚未在 npm 中创建，需要先从本地发布第一个版本：
+如果 `@starxer/dsh-feishu` 尚未在 npm 中创建，需要先从本地发布第一个版本：
 
 ```sh
 npm login
@@ -473,10 +473,10 @@ npm pack --dry-run
 npm publish --access public
 ```
 
-首个版本发布后，在 npmjs.com 打开 `@starxer/ds-feishu` 的 Settings → Trusted Publisher，选择 GitHub Actions，并填写：
+首个版本发布后，在 npmjs.com 打开 `@starxer/dsh-feishu` 的 Settings → Trusted Publisher，选择 GitHub Actions，并填写：
 
 - Organization or user：`starxer`
-- Repository：`ds-feishu`
+- Repository：`dsh-feishu`
 - Workflow filename：`publish.yml`
 - Allowed action：`npm publish`
 

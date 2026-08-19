@@ -1,4 +1,4 @@
-window.__ModuleLoader__.load({ id: "@starxer/ds-feishu", factory: (require) => {
+window.__ModuleLoader__.load({ id: "@starxer/dsh-feishu", factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
 //#region rolldown:runtime
 var __create = Object.create;

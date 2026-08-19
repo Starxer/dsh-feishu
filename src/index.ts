@@ -153,9 +153,9 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
 }
 
 /**
- * Localized strings for `/model` and `/compact`. Keeping these inline (rather
+ * Localized strings for the `/model` command. Keeping these inline (rather
  * than registering a locale namespace) keeps the dependency surface small —
- * the strings are owned by the Feishu-facing command handlers and rarely
+ * the strings are owned by the Feishu-facing command handler and rarely
  * change.
  */
 const larkCommandTranslations: CommandTranslations = {
@@ -166,13 +166,6 @@ const larkCommandTranslations: CommandTranslations = {
   modelListEmpty: 'No registered providers are available.',
   modelSwitched: (provider, model) => `Switched default model to \`${provider}/${model}\`.`,
   modelUnknown: route => `Unknown model route "${route}".`,
-  compactDescription: 'Compact older conversation history',
-  compactUsage: 'Usage: /compact (no arguments)',
-  compactNoHistory: 'No compactable history yet.',
-  compactSucceeded: (count, tokens) => `Compacted ${count} history items (~${tokens} tokens).`,
-  compactBusy: 'Compaction is unavailable because this process has an active compaction, or the agent is not idle.',
-  compactCancelled: 'Compaction cancelled.',
-  compactChanged: 'The history selected for compaction changed before it could be replaced. The conversation is unchanged; the attempt is recorded in the session log.',
 }
 
 /**
