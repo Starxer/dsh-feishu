@@ -79,6 +79,11 @@ export interface CommandTranslations {
   readonly threadLastActiveHoursAgo: (n: number) => string
   readonly threadLastActiveDaysAgo: (n: number) => string
   readonly threadLastActiveUnknown: string
+  readonly helpDescription: string
+  readonly helpHeader: string
+  readonly helpUsage: string
+  readonly helpEntry: (name: string, description: string, hint: string | undefined) => string
+  readonly helpEmpty: string
 }
 
 /**
@@ -137,6 +142,7 @@ export function registerLarkCommands(
   >,
   chatMessageFor: (invocation: CommandInvocation) => ConversationMessage,
   t: CommandTranslations,
+  commands: Pick<CommandRuntime, 'list'>,
 ): void {
   ctx.effect(function* () {
     yield ctx.commands.register({
@@ -171,7 +177,12 @@ export function registerLarkCommands(
         t,
       ),
     })
-  }, 'dsh-lark: /model /new /thread commands')
+    yield ctx.commands.register({
+      name: 'help',
+      description: t.helpDescription,
+      handler: invocation => handleHelpCommand(invocation, commands, t),
+    })
+  }, 'dsh-lark: /model /new /thread /help commands')
 }
 
 async function handleModelCommand(
@@ -284,4 +295,32 @@ async function handleThreadCommand(
     return { kind: 'error', text: t.threadArchived }
   }
   return { kind: 'success', text: t.threadSwitched(index, entry.id) }
+}
+
+/**
+ * Handle `/help`. Lists every slash command currently registered on the
+ * receiving agent's command view, including commands contributed by other
+ * plugins (e.g. `compact`, `goal`, `feedback`, `export`). Listing reads the
+ * command runtime directly so newly-registered commands appear without any
+ * change to this plugin.
+ */
+async function handleHelpCommand(
+  invocation: CommandInvocation,
+  commands: Pick<CommandRuntime, 'list'>,
+  t: CommandTranslations,
+): Promise<CommandResult> {
+  const descriptors = commands.list(invocation.agent)
+  if (descriptors.length === 0) {
+    return { kind: 'success', text: t.helpEmpty }
+  }
+  const lines = [t.helpHeader]
+  for (const descriptor of descriptors) {
+    lines.push(t.helpEntry(
+      descriptor.name,
+      descriptor.description,
+      descriptor.input?.hint,
+    ))
+  }
+  lines.push(t.helpUsage)
+  return { kind: 'success', text: lines.join('\n') }
 }

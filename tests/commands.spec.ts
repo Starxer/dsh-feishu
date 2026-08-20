@@ -30,6 +30,13 @@ const translations: CommandTranslations = {
   threadLastActiveHoursAgo: n => `${n}h ago`,
   threadLastActiveDaysAgo: n => `${n}d ago`,
   threadLastActiveUnknown: 'unknown',
+  helpDescription: 'help desc',
+  helpHeader: 'help header:',
+  helpUsage: 'help usage',
+  helpEntry: (name, description, hint) => hint === undefined
+    ? `${name}: ${description}`
+    : `${name}: ${description} [${hint}]`,
+  helpEmpty: 'help empty',
 }
 
 interface Registration { name: string; handler: (invocation: CommandInvocation) => CommandResult | Promise<CommandResult> }
@@ -123,11 +130,17 @@ function fakeLlmDirectory(overrides: {
   }
 }
 
+function fakeCommands(descriptors: ReadonlyArray<{ name: string; description: string; input?: { hint: string } }> = []) {
+  return {
+    list: vi.fn(() => descriptors),
+  }
+}
+
 describe('registerLarkCommands', () => {
-  it('registers the /model, /new, and /thread commands on the registry', () => {
+  it('registers the /model, /new, /thread, and /help commands on the registry', () => {
     const fake = fakeContext()
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
-    expect(fake.registered.map(item => item.name)).toEqual(['model', 'new', 'thread'])
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands())
+    expect(fake.registered.map(item => item.name)).toEqual(['model', 'new', 'thread', 'help'])
     fake.dispose()
   })
 })
@@ -135,7 +148,7 @@ describe('registerLarkCommands', () => {
 describe('/model command', () => {
   it('reports the current selection when invoked without arguments', async () => {
     const fake = fakeContext()
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     const result = await handler(fakeInvocation(''))
     expect(result).toEqual({ kind: 'success', text: 'Current:\n• `p/m`' })
@@ -150,7 +163,7 @@ describe('/model command', () => {
         p2: [{ provider: 'p2', id: 'm3', name: 'M3' }],
       },
     })
-    registerLarkCommands(fake.ctx, llm, fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, llm, fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     const result = await handler(fakeInvocation('list'))
     expect(result).toMatchObject({ kind: 'success' })
@@ -161,7 +174,7 @@ describe('/model command', () => {
 
   it('reports an empty catalog when no providers are registered', async () => {
     const fake = fakeContext()
-    registerLarkCommands(fake.ctx, fakeLlmDirectory({ providers: [] }), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory({ providers: [] }), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     const result = await handler(fakeInvocation('list'))
     expect(result).toEqual({ kind: 'success', text: 'none' })
@@ -170,7 +183,7 @@ describe('/model command', () => {
   it('switches the default selection for a known provider/model', async () => {
     const fake = fakeContext()
     const model = fakeDefaultModel()
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     const result = await handler(fakeInvocation('p1/m1'))
     expect(model.saveSelection).toHaveBeenCalledWith({ provider: 'p1', model: 'm1' })
@@ -180,7 +193,7 @@ describe('/model command', () => {
   it('passes the reasoning-effort suffix through to saveSelection', async () => {
     const fake = fakeContext()
     const model = fakeDefaultModel()
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     await handler(fakeInvocation('p1/m1:high'))
     expect(model.saveSelection).toHaveBeenCalledWith({ provider: 'p1', model: 'm1', reasoningEffort: 'high' })
@@ -193,7 +206,7 @@ describe('/model command', () => {
     // selection ref; the handler then reports the change as live-applied.
     const setCurrentSelection = vi.fn(() => ({ provider: 'old', model: 'old' }))
     const { bridge, chatMessageFor } = fakeBridge({ setCurrentSelection })
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, bridge, chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, bridge, chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     const result = await handler(fakeInvocation('p1/m1'))
     expect(setCurrentSelection).toHaveBeenCalledWith(
@@ -209,7 +222,7 @@ describe('/model command', () => {
     const model = fakeDefaultModel()
     const setCurrentSelection = vi.fn(() => undefined)
     const { bridge, chatMessageFor } = fakeBridge({ setCurrentSelection })
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, bridge, chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, bridge, chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     await handler(fakeInvocation('unknown/x'))
     expect(setCurrentSelection).not.toHaveBeenCalled()
@@ -218,7 +231,7 @@ describe('/model command', () => {
   it('rejects an unknown provider', async () => {
     const fake = fakeContext()
     const model = fakeDefaultModel()
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     const result = await handler(fakeInvocation('unknown/x'))
     expect(result).toEqual({ kind: 'error', text: 'unknown unknown/x\nUsage: /model' })
@@ -228,7 +241,7 @@ describe('/model command', () => {
   it('rejects a malformed provider/model argument', async () => {
     const fake = fakeContext()
     const model = fakeDefaultModel()
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     const result = await handler(fakeInvocation('p1/m1/extra'))
     expect(result).toMatchObject({ kind: 'error' })
@@ -241,7 +254,7 @@ describe('/new command', () => {
     const fake = fakeContext()
     const startNewSession = vi.fn(() => 'new-session-id')
     const { bridge, chatMessageFor } = fakeBridge({ startNewSession })
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'new')!.handler
     const result = await handler(fakeInvocation(''))
     expect(startNewSession).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_1' }), expect.any(String))
@@ -261,7 +274,7 @@ describe('/thread command', () => {
         { id: 'session-B', updatedAt: now - 3 * 3_600_000, title: 'Second chat' },
       ])
       const { bridge, chatMessageFor } = fakeBridge({ listSessions })
-      registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+      registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands())
       const handler = fake.registered.find(item => item.name === 'thread')!.handler
       const result = await handler(fakeInvocation(''))
       expect(listSessions).toHaveBeenCalled()
@@ -284,7 +297,7 @@ describe('/thread command', () => {
         { id: 'session-A', updatedAt: now, title: '' },
       ])
       const { bridge, chatMessageFor } = fakeBridge({ listSessions })
-      registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+      registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands())
       const handler = fake.registered.find(item => item.name === 'thread')!.handler
       const result = await handler(fakeInvocation(''))
       expect((result as { text: string }).text).toContain('1. (idle:session-A) - just now (session-A)')
@@ -306,7 +319,7 @@ describe('/thread command', () => {
         { id: 's-?', updatedAt: 0, title: '?' },
       ])
       const { bridge, chatMessageFor } = fakeBridge({ listSessions })
-      registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+      registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands())
       const handler = fake.registered.find(item => item.name === 'thread')!.handler
       const result = await handler(fakeInvocation(''))
       const text = (result as { text: string }).text
@@ -322,7 +335,7 @@ describe('/thread command', () => {
   it('reports an empty catalog when no persisted sessions exist', async () => {
     const fake = fakeContext()
     const { bridge, chatMessageFor } = fakeBridge({ listSessions: vi.fn(async () => []) })
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'thread')!.handler
     const result = await handler(fakeInvocation(''))
     expect(result).toEqual({ kind: 'success', text: 'empty' })
@@ -336,7 +349,7 @@ describe('/thread command', () => {
     ]
     const switchToSession = vi.fn(() => true)
     const { bridge, chatMessageFor } = fakeBridge({ listSessions: vi.fn(async () => sessions), switchToSession })
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'thread')!.handler
     const result = await handler(fakeInvocation('2'))
     expect(switchToSession).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_1' }), 'session-B')
@@ -350,7 +363,7 @@ describe('/thread command', () => {
       listSessions: vi.fn(async () => [{ id: 'session-A', updatedAt: 1, title: 'a' }]),
       switchToSession,
     })
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'thread')!.handler
     const result = await handler(fakeInvocation('1'))
     expect(switchToSession).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_1' }), 'session-A')
@@ -364,7 +377,7 @@ describe('/thread command', () => {
       listSessions: vi.fn(async () => [{ id: 'session-A', updatedAt: 1, title: 'a' }]),
       switchToSession,
     })
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'thread')!.handler
     const result = await handler(fakeInvocation('9'))
     expect(result).toMatchObject({ kind: 'error' })
@@ -378,10 +391,66 @@ describe('/thread command', () => {
       listSessions: vi.fn(async () => [{ id: 'session-A', updatedAt: 1, title: 'a' }]),
       switchToSession,
     })
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands())
     const handler = fake.registered.find(item => item.name === 'thread')!.handler
     const result = await handler(fakeInvocation('abc'))
     expect(result).toMatchObject({ kind: 'error' })
     expect(switchToSession).not.toHaveBeenCalled()
+  })
+})
+
+describe('/help command', () => {
+  it('lists every command returned by the command runtime', async () => {
+    const fake = fakeContext()
+    const descriptors = [
+      { name: 'compact', description: 'Compact older conversation history' },
+      { name: 'export', description: 'Download this Session log as a ZIP archive' },
+      { name: 'model', description: 'Show, list, or switch the active model' },
+    ]
+    const cmds = fakeCommands(descriptors)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations, cmds)
+    const handler = fake.registered.find(item => item.name === 'help')!.handler
+    const result = await handler(fakeInvocation(''))
+    expect(cmds.list).toHaveBeenCalledWith(expect.objectContaining({ session: { id: 'a' } }))
+    const text = (result as { text: string }).text
+    expect(text).toContain('help header:')
+    expect(text).toContain('compact: Compact older conversation history')
+    expect(text).toContain('export: Download this Session log as a ZIP archive')
+    expect(text).toContain('model: Show, list, or switch the active model')
+    expect(text).toContain('help usage')
+  })
+
+  it('renders the input hint in [brackets] when the descriptor declares one', async () => {
+    const fake = fakeContext()
+    const descriptors = [
+      {
+        name: 'goal',
+        description: 'set or view the goal for a long-running task',
+        input: { hint: '[<objective>|clear|edit <objective>|pause|resume]' },
+      },
+    ]
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands(descriptors))
+    const handler = fake.registered.find(item => item.name === 'help')!.handler
+    const result = await handler(fakeInvocation(''))
+    const text = (result as { text: string }).text
+    expect(text).toContain('goal: set or view the goal for a long-running task [[<objective>|clear|edit <objective>|pause|resume]]')
+  })
+
+  it('reports an empty list when no descriptors are returned', async () => {
+    const fake = fakeContext()
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands([]))
+    const handler = fake.registered.find(item => item.name === 'help')!.handler
+    const result = await handler(fakeInvocation(''))
+    expect(result).toEqual({ kind: 'success', text: 'help empty' })
+  })
+
+  it('ignores extra raw input', async () => {
+    const fake = fakeContext()
+    const cmds = fakeCommands([{ name: 'compact', description: 'Compact older conversation history' }])
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations, cmds)
+    const handler = fake.registered.find(item => item.name === 'help')!.handler
+    const result = await handler(fakeInvocation('anything here'))
+    expect(result).toMatchObject({ kind: 'success' })
+    expect(cmds.list).toHaveBeenCalledTimes(1)
   })
 })

@@ -91,6 +91,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       return last
     },
     larkCommandTranslations,
+    commands,
   )
 
   const runtime = new LarkRuntime({
@@ -214,6 +215,13 @@ const larkCommandTranslations: CommandTranslations = {
   threadLastActiveHoursAgo: n => `${n}h ago`,
   threadLastActiveDaysAgo: n => `${n}d ago`,
   threadLastActiveUnknown: 'unknown',
+  helpDescription: 'List every slash command available in this chat',
+  helpHeader: 'Available commands:',
+  helpUsage: 'Send `/<name> [arguments]` to run a command. Optional input hints appear in `[brackets]`.',
+  helpEntry: (name, description, hint) => hint === undefined
+    ? `• \`/${name}\` — ${description}`
+    : `• \`/${name}\` — ${description} \`[${hint}]\``,
+  helpEmpty: 'No slash commands are available right now.',
 }
 
 /**
