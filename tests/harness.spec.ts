@@ -6,7 +6,9 @@ function fixture() {
   const agents = new Map<string, any>()
   const createHandle = async (sessionId: string) => {
     const events: any[] = []
+    const ctx = { on: vi.fn(() => () => undefined) } as any
     const agent = {
+      ctx,
       session: { id: sessionId, get seq() { return seq }, events },
       whenIdle: vi.fn(async () => undefined),
       followup: vi.fn((message: any) => {
@@ -31,10 +33,10 @@ function dependencies(f: ReturnType<typeof fixture>) {
   return {
     agents: { create: f.create, resume: f.resume, get: (id: string) => f.agents.get(id) },
     sessions: { flush: f.flush },
-    sessionPersistence: { list: vi.fn(async () => []) },
+    sessionPersistence: { list: vi.fn(async () => []), readFrom: vi.fn() },
     selection: () => ({ provider: 'p', model: 'm' }),
     agentPresets: { resolve: f.resolve, mount: f.mount },
-    workspaceRegistry: { list: () => [f.workspace], resolveByPath: vi.fn(async () => undefined) },
+    workspaceRegistry: { list: () => [f.workspace], resolveByPath: vi.fn(async () => undefined), archivedSessionIds: [] },
   } as any
 }
 
@@ -76,6 +78,27 @@ describe('HarnessConversationService', () => {
     expect(f.resume).not.toHaveBeenCalled()
     expect(f.create).not.toHaveBeenCalled()
     expect(liveHandle.dispose).not.toHaveBeenCalled()
+  })
+
+  it('attaches a fresh selection ref when reusing a live agent so /model takes effect', async () => {
+    const f = fixture()
+    const sessionId = 'lark-v2-427e3361f60f3bd896c74f6acd7d065d2e0198db'
+    const liveHandle = await f.create({ sessionId })
+    liveHandle.agent.ctx.on.mockClear()
+    f.create.mockClear()
+    const deps = dependencies(f)
+    deps.sessionPersistence.list = vi.fn(async () => [{ id: sessionId }])
+    const service = new HarnessConversationService(deps, { domain: 'lark' })
+
+    const chatMessage = { chatId: 'a', chatType: 'p2p' as const }
+    // Reuse path should install selection listeners against the live agent ctx.
+    await service.reply({ ...chatMessage, content: 'first' })
+    expect(liveHandle.agent.ctx.on).toHaveBeenCalled()
+    // /model then flips the cached ref so the next request routes to the new model.
+    const previous = service.setCurrentSelection(chatMessage, { provider: 'p2', model: 'm2' })
+    expect(previous).toEqual({ provider: 'p', model: 'm' })
+    expect(service.currentSelectionFor(chatMessage)).toEqual({ provider: 'p2', model: 'm2' })
+    await service.dispose()
   })
 
   it('isolates different chats and honors an explicit model route', async () => {
@@ -126,7 +149,46 @@ describe('HarnessConversationService', () => {
 
   it('rejects a turn that commits no successful assistant answer', async () => {
     const create = vi.fn(async ({ sessionId }: any) => ({ agent: { session: { id: sessionId, seq: 0, events: [{ seq: 0, type: 'turn/end', data: { reason: { kind: 'error' } } }] }, whenIdle: async () => undefined, followup() {} }, dispose: async () => undefined }))
-    const service = new HarnessConversationService({ agents: { create, resume: vi.fn(), get: () => undefined }, sessions: { flush: async () => true }, sessionPersistence: { list: async () => [] }, selection: () => ({ provider: 'p', model: 'm' }), agentPresets: { resolve: async () => ({ id: 'default' }), mount: async () => undefined }, workspaceRegistry: { list: () => [], resolveByPath: async () => undefined } }, { domain: 'feishu', workspace: '/work' })
+    const service = new HarnessConversationService({ agents: { create, resume: vi.fn(), get: () => undefined }, sessions: { flush: async () => true }, sessionPersistence: { list: async () => [] }, selection: () => ({ provider: 'p', model: 'm' }), agentPresets: { resolve: async () => ({ id: 'default' }), mount: async () => undefined }, workspaceRegistry: { list: () => [], resolveByPath: async () => undefined, archivedSessionIds: [] } }, { domain: 'feishu', workspace: '/work' })
     await expect(service.reply({ chatId: 'a', chatType: 'p2p', content: 'one' })).rejects.toThrow(/successful assistant response/)
+  })
+
+  it('listSessions filters out the workspace archive set', async () => {
+    const f = fixture()
+    const deps = dependencies(f)
+    deps.sessionPersistence.list = vi.fn(async () => [
+      { id: 'kept-1' },
+      { id: 'gone-1' },
+      { id: 'kept-2' },
+    ])
+    deps.workspaceRegistry = { ...deps.workspaceRegistry, archivedSessionIds: ['gone-1'] }
+    const service = new HarnessConversationService(deps, { domain: 'feishu' })
+    const sessions = await service.listSessions()
+    expect(sessions.map(s => s.id)).toEqual(['kept-1', 'kept-2'])
+  })
+
+  it('listSessions filters out live blank sessions (no turn/start)', async () => {
+    const f = fixture()
+    const sessionId = 'lark-v2-test-blank'
+    const blankHandle = await f.create({ sessionId: sessionId as never })
+    blankHandle.agent.session.events.push(
+      { seq: 0, type: 'session', data: {} },
+      { seq: 1, type: 'session/end-seed', data: {} },
+    )
+    const deps = dependencies(f)
+    deps.sessionPersistence.list = vi.fn(async () => [{ id: sessionId }])
+    const service = new HarnessConversationService(deps, { domain: 'feishu' })
+    const sessions = await service.listSessions()
+    expect(sessions.map(s => s.id)).toEqual([])
+  })
+
+  it('switchToSession refuses to redirect a chat to an archived session', async () => {
+    const f = fixture()
+    const deps = dependencies(f)
+    deps.workspaceRegistry = { ...deps.workspaceRegistry, archivedSessionIds: ['gone-1'] }
+    const service = new HarnessConversationService(deps, { domain: 'feishu' })
+    const chatMessage = { chatId: 'a', chatType: 'p2p' as const }
+    expect(service.switchToSession(chatMessage, 'gone-1')).toBe(false)
+    expect(service.switchToSession(chatMessage, 'kept-1')).toBe(true)
   })
 })

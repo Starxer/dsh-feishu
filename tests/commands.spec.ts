@@ -12,6 +12,24 @@ const translations: CommandTranslations = {
   modelListEmpty: 'none',
   modelSwitched: (provider, model) => `switched ${provider}/${model}`,
   modelUnknown: route => `unknown ${route}`,
+  modelPersisted: 'persisted',
+  modelLiveApplied: 'live applied',
+  newDescription: 'new desc',
+  newSessionReady: sessionId => `ready ${sessionId}`,
+  threadDescription: 'thread desc',
+  threadUsage: 'Usage: /thread [N]',
+  threadListHeader: 'sessions:',
+  threadListEmpty: 'empty',
+  threadListEntry: (index, id, title, lastActive) => `${index}. ${title} - ${lastActive} (${id})`,
+  threadSwitched: (index, id) => `switched ${index} ${id}`,
+  threadInvalidIndex: 'invalid',
+  threadArchived: 'archived',
+  threadIdle: (id: string) => `(idle:${id})`,
+  threadLastActiveJustNow: 'just now',
+  threadLastActiveMinutesAgo: n => `${n}m ago`,
+  threadLastActiveHoursAgo: n => `${n}h ago`,
+  threadLastActiveDaysAgo: n => `${n}d ago`,
+  threadLastActiveUnknown: 'unknown',
 }
 
 interface Registration { name: string; handler: (invocation: CommandInvocation) => CommandResult | Promise<CommandResult> }
@@ -50,12 +68,39 @@ function fakeAgent() {
   return { session: { id: 'a' }, status: 'idle', cancel: vi.fn() } as unknown as CommandInvocation['agent']
 }
 
+function fakeBridge(overrides?: {
+  setCurrentSelection?: ReturnType<typeof vi.fn>
+  startNewSession?: ReturnType<typeof vi.fn>
+  switchToSession?: ReturnType<typeof vi.fn>
+  listSessions?: ReturnType<typeof vi.fn>
+}) {
+  const setCurrentSelection = overrides?.setCurrentSelection ?? vi.fn(() => undefined)
+  const startNewSession = overrides?.startNewSession ?? vi.fn(() => 'new-session-id')
+  const switchToSession = overrides?.switchToSession ?? vi.fn(() => true)
+  const listSessions = overrides?.listSessions ?? vi.fn(async () => [])
+  return {
+    bridge: {
+      setCurrentSelection,
+      currentSelectionFor: vi.fn(() => undefined),
+      startNewSession,
+      switchToSession,
+      listSessions,
+    },
+    setCurrentSelection,
+    startNewSession,
+    switchToSession,
+    listSessions,
+    chatMessageFor: () => ({ chatId: 'oc_1', chatType: 'p2p' as const }),
+  }
+}
+
 function fakeInvocation(rawInput: string): CommandInvocation {
   return {
     commandId: 'cmd-test' as never,
     agent: fakeAgent(),
     rawInput,
     signal: new AbortController().signal,
+    attachments: [],
   }
 }
 
@@ -79,10 +124,10 @@ function fakeLlmDirectory(overrides: {
 }
 
 describe('registerLarkCommands', () => {
-  it('registers the /model command on the registry', () => {
+  it('registers the /model, /new, and /thread commands on the registry', () => {
     const fake = fakeContext()
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), translations)
-    expect(fake.registered.map(item => item.name)).toEqual(['model'])
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
+    expect(fake.registered.map(item => item.name)).toEqual(['model', 'new', 'thread'])
     fake.dispose()
   })
 })
@@ -90,7 +135,7 @@ describe('registerLarkCommands', () => {
 describe('/model command', () => {
   it('reports the current selection when invoked without arguments', async () => {
     const fake = fakeContext()
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     const result = await handler(fakeInvocation(''))
     expect(result).toEqual({ kind: 'success', text: 'Current:\n• `p/m`' })
@@ -105,7 +150,7 @@ describe('/model command', () => {
         p2: [{ provider: 'p2', id: 'm3', name: 'M3' }],
       },
     })
-    registerLarkCommands(fake.ctx, llm, fakeDefaultModel(), translations)
+    registerLarkCommands(fake.ctx, llm, fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     const result = await handler(fakeInvocation('list'))
     expect(result).toMatchObject({ kind: 'success' })
@@ -116,7 +161,7 @@ describe('/model command', () => {
 
   it('reports an empty catalog when no providers are registered', async () => {
     const fake = fakeContext()
-    registerLarkCommands(fake.ctx, fakeLlmDirectory({ providers: [] }), fakeDefaultModel(), translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory({ providers: [] }), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     const result = await handler(fakeInvocation('list'))
     expect(result).toEqual({ kind: 'success', text: 'none' })
@@ -125,26 +170,55 @@ describe('/model command', () => {
   it('switches the default selection for a known provider/model', async () => {
     const fake = fakeContext()
     const model = fakeDefaultModel()
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     const result = await handler(fakeInvocation('p1/m1'))
     expect(model.saveSelection).toHaveBeenCalledWith({ provider: 'p1', model: 'm1' })
-    expect(result).toEqual({ kind: 'success', text: 'switched p1/m1' })
+    expect((result as { text: string }).text).toContain('switched p1/m1')
   })
 
   it('passes the reasoning-effort suffix through to saveSelection', async () => {
     const fake = fakeContext()
     const model = fakeDefaultModel()
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     await handler(fakeInvocation('p1/m1:high'))
     expect(model.saveSelection).toHaveBeenCalledWith({ provider: 'p1', model: 'm1', reasoningEffort: 'high' })
   })
 
+  it('mutates the chat selection through the bridge on a successful switch', async () => {
+    const fake = fakeContext()
+    const model = fakeDefaultModel()
+    // Returning a non-undefined "previous" simulates the chat having a cached
+    // selection ref; the handler then reports the change as live-applied.
+    const setCurrentSelection = vi.fn(() => ({ provider: 'old', model: 'old' }))
+    const { bridge, chatMessageFor } = fakeBridge({ setCurrentSelection })
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, bridge, chatMessageFor, translations)
+    const handler = fake.registered.find(item => item.name === 'model')!.handler
+    const result = await handler(fakeInvocation('p1/m1'))
+    expect(setCurrentSelection).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 'oc_1' }),
+      { provider: 'p1', model: 'm1' },
+    )
+    expect((result as { text: string }).text).toContain('switched p1/m1')
+    expect((result as { text: string }).text).toContain('live applied')
+  })
+
+  it('does not call setCurrentSelection when the route is rejected', async () => {
+    const fake = fakeContext()
+    const model = fakeDefaultModel()
+    const setCurrentSelection = vi.fn(() => undefined)
+    const { bridge, chatMessageFor } = fakeBridge({ setCurrentSelection })
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, bridge, chatMessageFor, translations)
+    const handler = fake.registered.find(item => item.name === 'model')!.handler
+    await handler(fakeInvocation('unknown/x'))
+    expect(setCurrentSelection).not.toHaveBeenCalled()
+  })
+
   it('rejects an unknown provider', async () => {
     const fake = fakeContext()
     const model = fakeDefaultModel()
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     const result = await handler(fakeInvocation('unknown/x'))
     expect(result).toEqual({ kind: 'error', text: 'unknown unknown/x\nUsage: /model' })
@@ -154,10 +228,160 @@ describe('/model command', () => {
   it('rejects a malformed provider/model argument', async () => {
     const fake = fakeContext()
     const model = fakeDefaultModel()
-    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, translations)
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), model, fakeBridge().bridge, fakeBridge().chatMessageFor, translations)
     const handler = fake.registered.find(item => item.name === 'model')!.handler
     const result = await handler(fakeInvocation('p1/m1/extra'))
     expect(result).toMatchObject({ kind: 'error' })
     expect(model.saveSelection).not.toHaveBeenCalled()
+  })
+})
+
+describe('/new command', () => {
+  it('starts a new session for the current chat', async () => {
+    const fake = fakeContext()
+    const startNewSession = vi.fn(() => 'new-session-id')
+    const { bridge, chatMessageFor } = fakeBridge({ startNewSession })
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+    const handler = fake.registered.find(item => item.name === 'new')!.handler
+    const result = await handler(fakeInvocation(''))
+    expect(startNewSession).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_1' }), expect.any(String))
+    expect(result).toEqual({ kind: 'success', text: 'ready new-session-id' })
+  })
+})
+
+describe('/thread command', () => {
+  it('lists persisted sessions when invoked without an argument', async () => {
+    vi.useFakeTimers()
+    try {
+      const now = Date.now()
+      vi.setSystemTime(now)
+      const fake = fakeContext()
+      const listSessions = vi.fn(async () => [
+        { id: 'session-A', updatedAt: now - 30 * 60_000, title: 'First chat' },
+        { id: 'session-B', updatedAt: now - 3 * 3_600_000, title: 'Second chat' },
+      ])
+      const { bridge, chatMessageFor } = fakeBridge({ listSessions })
+      registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+      const handler = fake.registered.find(item => item.name === 'thread')!.handler
+      const result = await handler(fakeInvocation(''))
+      expect(listSessions).toHaveBeenCalled()
+      const text = (result as { text: string }).text
+      expect(text).toContain('1. First chat - 30m ago (session-A)')
+      expect(text).toContain('2. Second chat - 3h ago (session-B)')
+      expect(text).toContain('Usage: /thread [N]')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('falls back to (untitled) when a session has no title', async () => {
+    vi.useFakeTimers()
+    try {
+      const now = Date.now()
+      vi.setSystemTime(now)
+      const fake = fakeContext()
+      const listSessions = vi.fn(async () => [
+        { id: 'session-A', updatedAt: now, title: '' },
+      ])
+      const { bridge, chatMessageFor } = fakeBridge({ listSessions })
+      registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+      const handler = fake.registered.find(item => item.name === 'thread')!.handler
+      const result = await handler(fakeInvocation(''))
+      expect((result as { text: string }).text).toContain('1. (idle:session-A) - just now (session-A)')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('uses coarse time buckets: minutes, hours, days', async () => {
+    vi.useFakeTimers()
+    try {
+      const now = Date.now()
+      vi.setSystemTime(now)
+      const fake = fakeContext()
+      const listSessions = vi.fn(async () => [
+        { id: 's-m', updatedAt: now - 5 * 60_000, title: 'm' },
+        { id: 's-h', updatedAt: now - 2 * 3_600_000, title: 'h' },
+        { id: 's-d', updatedAt: now - 2 * 86_400_000, title: 'd' },
+        { id: 's-?', updatedAt: 0, title: '?' },
+      ])
+      const { bridge, chatMessageFor } = fakeBridge({ listSessions })
+      registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+      const handler = fake.registered.find(item => item.name === 'thread')!.handler
+      const result = await handler(fakeInvocation(''))
+      const text = (result as { text: string }).text
+      expect(text).toContain('m - 5m ago')
+      expect(text).toContain('h - 2h ago')
+      expect(text).toContain('d - 2d ago')
+      expect(text).toContain('? - unknown')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reports an empty catalog when no persisted sessions exist', async () => {
+    const fake = fakeContext()
+    const { bridge, chatMessageFor } = fakeBridge({ listSessions: vi.fn(async () => []) })
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+    const handler = fake.registered.find(item => item.name === 'thread')!.handler
+    const result = await handler(fakeInvocation(''))
+    expect(result).toEqual({ kind: 'success', text: 'empty' })
+  })
+
+  it('switches the chat to the session selected by index', async () => {
+    const fake = fakeContext()
+    const sessions = [
+      { id: 'session-A', updatedAt: 2, title: 'first' },
+      { id: 'session-B', updatedAt: 5, title: 'second' },
+    ]
+    const switchToSession = vi.fn(() => true)
+    const { bridge, chatMessageFor } = fakeBridge({ listSessions: vi.fn(async () => sessions), switchToSession })
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+    const handler = fake.registered.find(item => item.name === 'thread')!.handler
+    const result = await handler(fakeInvocation('2'))
+    expect(switchToSession).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_1' }), 'session-B')
+    expect(result).toEqual({ kind: 'success', text: 'switched 2 session-B' })
+  })
+
+  it('reports the bridge rejection when the target session is archived', async () => {
+    const fake = fakeContext()
+    const switchToSession = vi.fn(() => false)
+    const { bridge, chatMessageFor } = fakeBridge({
+      listSessions: vi.fn(async () => [{ id: 'session-A', updatedAt: 1, title: 'a' }]),
+      switchToSession,
+    })
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+    const handler = fake.registered.find(item => item.name === 'thread')!.handler
+    const result = await handler(fakeInvocation('1'))
+    expect(switchToSession).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_1' }), 'session-A')
+    expect(result).toEqual({ kind: 'error', text: 'archived' })
+  })
+
+  it('rejects an out-of-range index', async () => {
+    const fake = fakeContext()
+    const switchToSession = vi.fn(() => true)
+    const { bridge, chatMessageFor } = fakeBridge({
+      listSessions: vi.fn(async () => [{ id: 'session-A', updatedAt: 1, title: 'a' }]),
+      switchToSession,
+    })
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+    const handler = fake.registered.find(item => item.name === 'thread')!.handler
+    const result = await handler(fakeInvocation('9'))
+    expect(result).toMatchObject({ kind: 'error' })
+    expect(switchToSession).not.toHaveBeenCalled()
+  })
+
+  it('rejects a non-numeric argument', async () => {
+    const fake = fakeContext()
+    const switchToSession = vi.fn(() => true)
+    const { bridge, chatMessageFor } = fakeBridge({
+      listSessions: vi.fn(async () => [{ id: 'session-A', updatedAt: 1, title: 'a' }]),
+      switchToSession,
+    })
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations)
+    const handler = fake.registered.find(item => item.name === 'thread')!.handler
+    const result = await handler(fakeInvocation('abc'))
+    expect(result).toMatchObject({ kind: 'error' })
+    expect(switchToSession).not.toHaveBeenCalled()
   })
 })
