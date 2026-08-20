@@ -62,7 +62,36 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   const currentRevision = () => settings.describe({ redactSecrets: true }).find(item => item.ns === namespace)?.revision ?? 0
   let apiUpdateDepth = 0
 
-  registerLarkCommands(ctx, llm, defaultModel, larkCommandTranslations)
+  // The bridge is recreated every time the Lark channel reconciles; hold it
+  // in a single-cell so the `/model` command always reaches the bridge that
+  // is currently serving the inbound message. `lastChatMessage` is overwritten
+  // on every inbound message under `chatQueue.enabled: true`, so a synchronous
+  // command dispatch sees its own chat coordinates; concurrent chats in
+  // different sessions are serialized by the queue and the race never happens.
+  const bridgeHolder: {
+    current: HarnessConversationService | undefined
+    lastChatMessage: { chatId: string; chatType: 'p2p' | 'group'; threadId?: string } | undefined
+  } = { current: undefined, lastChatMessage: undefined }
+  registerLarkCommands(
+    ctx,
+    llm,
+    defaultModel,
+    {
+      setCurrentSelection: (chatMessage, next) => bridgeHolder.current?.setCurrentSelection(chatMessage, next),
+      currentSelectionFor: chatMessage => bridgeHolder.current?.currentSelectionFor(chatMessage),
+      startNewSession: (chatMessage, salt) => bridgeHolder.current?.startNewSession(chatMessage, salt) ?? '',
+      switchToSession: (chatMessage, sessionId) => bridgeHolder.current?.switchToSession(chatMessage, sessionId) ?? false,
+      listSessions: async () => bridgeHolder.current?.listSessions() ?? [],
+    },
+    () => {
+      const last = bridgeHolder.lastChatMessage
+      if (last === undefined) {
+        throw new Error('dsh-lark: chat coordinates missing for /model command — send a regular message first')
+      }
+      return last
+    },
+    larkCommandTranslations,
+  )
 
   const runtime = new LarkRuntime({
     settings: currentSettings,
@@ -76,13 +105,14 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         agentPresets,
         workspaceRegistry,
       }, config)
+      bridgeHolder.current = bridge
       return startChannel(
         config,
         bridge,
         createLarkChannel,
         ctx.logger,
         console,
-        message => executeSlashCommand(message, bridge, commands),
+        message => executeSlashCommand(message, bridge, commands, bridgeHolder),
       )
     },
   })
@@ -166,6 +196,24 @@ const larkCommandTranslations: CommandTranslations = {
   modelListEmpty: 'No registered providers are available.',
   modelSwitched: (provider, model) => `Switched default model to \`${provider}/${model}\`.`,
   modelUnknown: route => `Unknown model route "${route}".`,
+  modelPersisted: 'The change is persisted; the next message in this chat will use it.',
+  modelLiveApplied: 'The change applies to this chat immediately on the next message.',
+  newDescription: 'Start a fresh conversation in this chat',
+  newSessionReady: sessionId => `Started a new conversation. Next message uses session \`${sessionId}\`.`,
+  threadDescription: 'List persisted sessions or switch the chat to one by index',
+  threadUsage: 'Usage: /thread [N]',
+  threadListHeader: 'Available sessions (reply with `/thread N` to switch):',
+  threadListEmpty: 'No persisted sessions yet.',
+  threadListEntry: (index, id, title, lastActive) => `${index}. ${title} — ${lastActive} (\`${id}\`)`,
+  threadSwitched: (index, id) => `Switched to session #${index} (\`${id}\`).`,
+  threadInvalidIndex: 'Invalid session index.',
+  threadArchived: 'That session is archived — unarchive it from the workspace webui first.',
+  threadIdle: id => `(idle: ${id.slice(-12)})`,
+  threadLastActiveJustNow: 'just now',
+  threadLastActiveMinutesAgo: n => `${n}m ago`,
+  threadLastActiveHoursAgo: n => `${n}h ago`,
+  threadLastActiveDaysAgo: n => `${n}d ago`,
+  threadLastActiveUnknown: 'unknown',
 }
 
 /**
@@ -178,6 +226,7 @@ async function executeSlashCommand(
   message: NormalizedMessage,
   bridge: HarnessConversationService,
   commands: CommandRuntime,
+  bridgeHolder: { lastChatMessage: { chatId: string; chatType: 'p2p' | 'group'; threadId?: string } | undefined },
 ): Promise<{ kind: 'success' | 'error'; text: string } | undefined> {
   const parsed = parseCommand(message.content)
   if (parsed === undefined) return undefined
@@ -186,6 +235,11 @@ async function executeSlashCommand(
     chatType: message.chatType,
     ...message.threadId === undefined ? {} : { threadId: message.threadId },
   }
+  // Stash the chat coordinates so the registered handler can find them
+  // without holding per-invocation state on the agent. The bridge serializes
+  // inbound messages per chat, so a synchronous dispatch always sees its own
+  // chat context here.
+  bridgeHolder.lastChatMessage = chatMessage
   const agent = await bridge.resolveAgent(chatMessage)
   if (agent === undefined) {
     return {
@@ -195,7 +249,9 @@ async function executeSlashCommand(
   }
   const controller = new AbortController()
   const line = `/${parsed.name}${parsed.rawInput}`
-  const execution = await commands.execute(agent, line, controller.signal)
+  // `commands.execute` takes `(agent, line, images, signal)`; the Feishu
+  // channel has no image-attachment path, so pass an empty image list.
+  const execution = await commands.execute(agent, line, [], controller.signal)
   if (execution === undefined) return undefined
   const result: CommandResult = execution.result
   return { kind: result.kind, text: result.text ?? `Command /${parsed.name} produced no output.` }
