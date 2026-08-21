@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
-import type { CommandRuntime, CommandResult } from '@deepseek-ai/dsh-commands'
+import type { CommandRuntime, CommandResult, CommandExecution } from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
@@ -263,9 +263,15 @@ async function executeSlashCommand(
   }
   const controller = new AbortController()
   const line = `/${parsed.name}${parsed.rawInput}`
-  // `commands.execute` takes `(agent, line, images, signal)`; the Feishu
-  // channel has no image-attachment path, so pass an empty image list.
-  const execution = await commands.execute(agent, line, [], controller.signal)
+  // `commands.execute` takes `(agent, line, signal)` in the published
+  // `^0.1.0-rc.7` ABI; later dsh versions added an `images` argument between
+  // `line` and `signal`. Branch by arity so the plugin compiles against both
+  // shapes — the Feishu channel has no image path so we pass nothing either
+  // way.
+  const execute = commands.execute as unknown as (...args: unknown[]) => Promise<CommandExecution | undefined>
+  const execution = execute.length >= 4
+    ? await execute(agent, line, [], controller.signal)
+    : await execute(agent, line, controller.signal)
   if (execution === undefined) return undefined
   const result: CommandResult = execution.result
   return { kind: result.kind, text: result.text ?? `Command /${parsed.name} produced no output.` }
