@@ -44,7 +44,7 @@ jobs:
           # in dsh-llm@^rc.8 but the lockfile pins rc.7). Tolerate the
           # mismatched peer set so the latest-harness matrix entry keeps
           # running its typecheck and tests against current dsh HEAD.
-          npm install --no-save --package-lock=false --legacy-peer-deps \
+          npm install --no-save --legacy-peer-deps \
             "@deepseek-ai/dsh-agent@$dsh_version" \
             "@deepseek-ai/dsh-agent-default-model@$dsh_version" \
             "@deepseek-ai/dsh-agent-presets@$dsh_version" \
