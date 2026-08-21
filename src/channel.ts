@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream'
 import { Domain, LoggerLevel, createLarkChannel } from '@larksuiteoapi/node-sdk'
 import type { LarkChannel, LarkChannelOptions, NormalizedMessage, ResourceDescriptor } from '@larksuiteoapi/node-sdk'
 import type { AttachmentStore, ImageAttachmentRef, SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
@@ -45,10 +46,28 @@ function pickImageMime(descriptor: ResourceDescriptor): 'image/jpeg' | 'image/pn
 }
 
 /**
- * Pull every image resource off one normalized message, decode it through the
- * channel's HTTP client, and durably commit the bytes via the attachment
- * store. Returns an empty array when the message carries no images so the
- * caller can keep the same code for text-only messages.
+ * Read the SDK download wrapper (which exposes its body as a Readable) into
+ * a single buffer. `im.v1.image.get` and `im.v1.messageResource.get` both
+ * return `{ writeFile, getReadableStream, headers }`, not a raw Buffer.
+ */
+async function readDownloadStream(raw: unknown): Promise<Buffer> {
+  if (Buffer.isBuffer(raw)) return raw
+  if (raw instanceof Uint8Array) return Buffer.from(raw)
+  if (raw !== null && typeof raw === 'object' && typeof (raw as { getReadableStream?: () => unknown }).getReadableStream === 'function') {
+    const stream = (raw as { getReadableStream: () => unknown }).getReadableStream()
+    if (!(stream instanceof Readable)) throw new Error('dsh-lark: unexpected stream type from messageResource.get')
+    const chunks: Buffer[] = []
+    for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array))
+    return Buffer.concat(chunks)
+  }
+  throw new Error('dsh-lark: unsupported download response shape')
+}
+
+/**
+ * Pull every image resource off one normalized message, download it via the
+ * correct `im.v1.messageResource` endpoint (user-sent images, NOT `im.v1.image`
+ * which only serves bot-uploaded keys), and durably commit the bytes via the
+ * attachment store. Returns an empty array when the message carries no images.
  */
 async function admitImagesForMessage(
   channel: LarkChannel,
@@ -65,8 +84,17 @@ async function admitImagesForMessage(
     if (mediaType === undefined || !accepted.includes(mediaType)) {
       throw new Error(`dsh-lark: image type "${mediaType ?? 'unknown'}" is not accepted by the deployment`)
     }
-    const bytes = await channel.downloadResource(resource.fileKey, 'image')
     if (signal.aborted) throw new Error('dsh-lark: image admission aborted')
+    // `LarkChannel.downloadResource(fileKey, 'image')` resolves the wrong
+    // endpoint (`im.v1.image.get`) which 400s for user-sent keys. The
+    // `im.v1.messageResource.get` endpoint takes the message id plus the file
+    // key, so reach into the raw HTTP client directly.
+    const raw = await channel.rawClient.im.v1.messageResource.get({
+      params: { type: 'image' },
+      path: { message_id: message.messageId, file_key: resource.fileKey },
+    })
+    if (signal.aborted) throw new Error('dsh-lark: image admission aborted')
+    const bytes = await readDownloadStream(raw)
     inputs.push({
       data: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
       mediaType,
