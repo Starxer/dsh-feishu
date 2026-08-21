@@ -45,7 +45,10 @@ jobs:
           # @testing-library/dom, @deepseek-ai/dsh-scope) that the latest
           # dsh-llm / dsh-agent now need; legacy-peer-deps is also required
           # because the latest dsh-system-prompt pulls in dsh-llm@^rc.8 while
-          # the devDependency set still pins rc.7.
+          # the devDependency set still pins rc.7. Also explicitly install
+          # the runtime packages the latest dsh-agent / dsh-llm / client-ui
+          # pull in (dsh-scope, dsh-timeout, @testing-library/dom) since
+          # --legacy-peer-deps suppresses peer auto-install.
           rm -f package-lock.json
           npm install --no-save --legacy-peer-deps \
             "@deepseek-ai/dsh-agent@$dsh_version" \
@@ -55,10 +58,13 @@ jobs:
             "@deepseek-ai/dsh-credentials@$dsh_version" \
             "@deepseek-ai/dsh-host-webserver@$dsh_version" \
             "@deepseek-ai/dsh-llm@$dsh_version" \
+            "@deepseek-ai/dsh-scope@$dsh_version" \
             "@deepseek-ai/dsh-session@$dsh_version" \
             "@deepseek-ai/dsh-session-persistence@$dsh_version" \
             "@deepseek-ai/dsh-settings@$dsh_version" \
-            "@deepseek-ai/dsh-workspace@$dsh_version"
+            "@deepseek-ai/dsh-timeout@$dsh_version" \
+            "@deepseek-ai/dsh-workspace@$dsh_version" \
+            "@testing-library/dom@^10.4.0"
 
       - name: Run tests
         run: npm test
