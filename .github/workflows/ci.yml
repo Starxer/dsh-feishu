@@ -39,11 +39,14 @@ jobs:
         run: |
           dsh_version="$(npm view @deepseek-ai/dsh@latest version)"
           echo "Testing against Harness $dsh_version"
-          # The latest dsh-* packages share peer constraints that the package
-          # lockfile (rc.7) cannot satisfy (e.g. dsh-system-prompt@rc.8 pulls
-          # in dsh-llm@^rc.8 but the lockfile pins rc.7). Tolerate the
-          # mismatched peer set so the latest-harness matrix entry keeps
-          # running its typecheck and tests against current dsh HEAD.
+          # Drop the rc.7 lockfile and resolve everything from scratch against
+          # the latest dsh-* packages. Plain `npm install --no-save` rewrites
+          # node_modules from the lockfile and strips transitive peers (e.g.
+          # @testing-library/dom, @deepseek-ai/dsh-scope) that the latest
+          # dsh-llm / dsh-agent now need; legacy-peer-deps is also required
+          # because the latest dsh-system-prompt pulls in dsh-llm@^rc.8 while
+          # the devDependency set still pins rc.7.
+          rm -f package-lock.json
           npm install --no-save --legacy-peer-deps \
             "@deepseek-ai/dsh-agent@$dsh_version" \
             "@deepseek-ai/dsh-agent-default-model@$dsh_version" \
