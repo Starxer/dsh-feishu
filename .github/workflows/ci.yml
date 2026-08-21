@@ -54,6 +54,7 @@ jobs:
             "@deepseek-ai/dsh-agent@$dsh_version" \
             "@deepseek-ai/dsh-agent-default-model@$dsh_version" \
             "@deepseek-ai/dsh-agent-presets@$dsh_version" \
+            "@deepseek-ai/dsh-attachment@$dsh_version" \
             "@deepseek-ai/dsh-client-ui-primitives@$dsh_version" \
             "@deepseek-ai/dsh-credentials@$dsh_version" \
             "@deepseek-ai/dsh-host-webserver@$dsh_version" \
