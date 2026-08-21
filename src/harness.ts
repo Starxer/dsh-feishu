@@ -1,5 +1,6 @@
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { conversationKey, summarizeTurn, toSessionId } from './conversation.ts'
 import type { ConversationMessage } from './conversation.ts'
@@ -67,7 +68,7 @@ export interface HarnessBridgeConfig {
   model?: string
 }
 
-export interface InboundMessage extends ConversationMessage { content: string }
+export interface InboundMessage extends ConversationMessage { content: string; imageBlocks?: readonly ImageAttachmentRef[] }
 
 export class HarnessConversationService {
   private readonly handles = new Map<string, Promise<AgentHandleLike>>()
@@ -94,8 +95,20 @@ export class HarnessConversationService {
     const agent = handle.agent
     await agent.whenIdle()
     const firstSeq = agent.session.seq
+    const text = message.content
+    const imageBlocks = message.imageBlocks ?? []
+    const hasText = text.length > 0
+    const hasImages = imageBlocks.length > 0
+    if (!hasText && !hasImages) {
+      // An inbound message must carry either text or at least one image; the
+      // channel layer filters empties out, so this is defensive.
+      throw new Error('dsh-lark: cannot submit an empty user turn')
+    }
+    const content: Array<{ type: 'text'; text: string } | { type: 'image'; attachment: ImageAttachmentRef }> = []
+    if (hasText) content.push({ type: 'text', text })
+    for (const attachment of imageBlocks) content.push({ type: 'image', attachment })
     agent.followup(createUserMessage({
-      content: [{ type: 'text', text: message.content }],
+      content,
       source: { kind: 'user' },
     }))
     await agent.whenIdle()

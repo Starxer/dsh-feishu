@@ -5,6 +5,7 @@ import type {} from '@deepseek-ai/dsh-agent-presets'
 import type { CommandRuntime, CommandResult } from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
+import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-workspace'
@@ -27,7 +28,7 @@ import { handleProvisionRequest, handleSettingsRequest, PROVISION_PATH, SETTINGS
 export const name = 'lark-channel'
 export const inject = [
   'agents', 'sessions', 'sessionPersistence', 'agentDefaultModel', 'agentPresets', 'workspaceRegistry',
-  'settings', 'credentials', 'webServer', 'commands', 'llm',
+  'settings', 'credentials', 'webServer', 'commands', 'llm', 'attachments',
 ]
 export const Config = ConfigSchema
 export type { PluginConfig }
@@ -45,11 +46,15 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   const webServer = ctx.get('webServer')
   const commands = ctx.get('commands')
   const llm = ctx.get('llm') as LlmRuntime | undefined
+  const attachments = ctx.get('attachments')
   if (agents === undefined || sessions === undefined || sessionPersistence === undefined || defaultModel === undefined || agentPresets === undefined || workspaceRegistry === undefined || settings === undefined || credentials === undefined || webServer === undefined) {
     throw new Error('dsh-lark requires Harness agent, settings, credentials, workspace, and webServer services')
   }
   if (commands === undefined || llm === undefined) {
     throw new Error('dsh-lark requires commands and llm services for /model support')
+  }
+  if (attachments === undefined) {
+    throw new Error('dsh-lark requires the attachments service for inbound image messages')
   }
 
   const settingsScope = settings.register(
@@ -114,6 +119,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         ctx.logger,
         console,
         message => executeSlashCommand(message, bridge, commands, bridgeHolder),
+        attachments,
       )
     },
   })
