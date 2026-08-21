@@ -102,13 +102,15 @@ function fakeBridge(overrides?: {
 }
 
 function fakeInvocation(rawInput: string): CommandInvocation {
+  // The published `^0.1.0-rc.7` ABI does not carry an `attachments` slot on
+  // `CommandInvocation`; later dsh versions added it. The fake stays
+  // compatible with both by avoiding the field entirely.
   return {
     commandId: 'cmd-test' as never,
     agent: fakeAgent(),
     rawInput,
     signal: new AbortController().signal,
-    attachments: [],
-  }
+  } as unknown as CommandInvocation
 }
 
 function fakeDefaultModel(): AgentDefaultModelConfig {
