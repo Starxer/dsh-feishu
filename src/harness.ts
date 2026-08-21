@@ -104,8 +104,15 @@ export class HarnessConversationService {
       // channel layer filters empties out, so this is defensive.
       throw new Error('dsh-lark: cannot submit an empty user turn')
     }
+    // Tag every Feishu user turn with a leading `[Feishu] ` marker so the
+    // model and any later session-log reader can tell the message originated
+    // from the Lark channel rather than the webui composer. Image-only
+    // messages get the tag as a standalone text block because there is no
+    // caption to attach it to.
+    const tag = '[Feishu] '
     const content: Array<{ type: 'text'; text: string } | { type: 'image'; attachment: ImageAttachmentRef }> = []
-    if (hasText) content.push({ type: 'text', text })
+    if (hasText) content.push({ type: 'text', text: `${tag}${text}` })
+    else content.push({ type: 'text', text: tag })
     for (const attachment of imageBlocks) content.push({ type: 'image', attachment })
     agent.followup(createUserMessage({
       content,
