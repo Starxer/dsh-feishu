@@ -30,12 +30,29 @@ function fakeAttachments(overrides: { saveImage?: (input: any) => Promise<ImageA
 
 function fakeChannel() {
   const handlers = new Map<string, Function>()
+  // Minimal SDK download-response shape: the wrapper exposes a readable stream.
+  const fakeReadable = (bytes: Buffer): { getReadableStream: () => unknown; writeFile: unknown; headers: unknown } => ({
+    getReadableStream: () => {
+      const { Readable } = require('node:stream') as typeof import('node:stream')
+      return Readable.from(bytes)
+    },
+    writeFile: vi.fn(async () => undefined),
+    headers: {},
+  })
   return {
     handlers,
     connect: vi.fn(async () => undefined), disconnect: vi.fn(async () => undefined),
     send: vi.fn(async () => ({ messageId: 'out' })),
     addReaction: vi.fn(async () => 'reaction-id'),
-    downloadResource: vi.fn(async () => Buffer.from([0xff, 0xd8, 0xff, 0xe0])),
+    rawClient: {
+      im: {
+        v1: {
+          messageResource: {
+            get: vi.fn(async () => fakeReadable(Buffer.from([0xff, 0xd8, 0xff, 0xe0]))),
+          },
+        },
+      },
+    },
     on: vi.fn((name: string, handler: Function) => { handlers.set(name, handler); return () => handlers.delete(name) }),
   }
 }
@@ -188,7 +205,10 @@ describe('startChannel', () => {
       messageId: 'om_2', chatId: 'oc_2', chatType: 'p2p', content: '',
       resources: [{ type: 'image', fileKey: 'img_abc' }],
     })
-    expect(channel.downloadResource).toHaveBeenCalledWith('img_abc', 'image')
+    expect(channel.rawClient.im.v1.messageResource.get).toHaveBeenCalledWith({
+      params: { type: 'image' },
+      path: { message_id: 'om_2', file_key: 'img_abc' },
+    })
     expect(attachments.saveImage).toHaveBeenCalledOnce()
     expect(bridge.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: '',
