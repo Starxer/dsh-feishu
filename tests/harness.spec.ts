@@ -191,4 +191,79 @@ describe('HarnessConversationService', () => {
     expect(service.switchToSession(chatMessage, 'gone-1')).toBe(false)
     expect(service.switchToSession(chatMessage, 'kept-1')).toBe(true)
   })
+
+  it('forwards image blocks into the user-turn content array', async () => {
+    const f = fixture()
+    let captured: any
+    const original = f.create.getMockImplementation()
+    f.create.mockImplementationOnce(async (input: any) => {
+      const handle = await original!(input)
+      handle.agent.followup = vi.fn((message: any) => {
+        captured = message
+        const seq = handle.agent.session.events.length
+        handle.agent.session.events.push(
+          { seq, type: 'turn/start', data: {} },
+          { seq: seq + 1, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: `answer:${message.content[0].text}` }] } } },
+          { seq: seq + 2, type: 'turn/end', data: { reason: { kind: 'completed' } } },
+        )
+      })
+      return handle
+    })
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu', workspace: '/work' })
+    const ref = {
+      attachmentId: 'att_1' as never,
+      mediaType: 'image/jpeg' as const,
+      bytes: 4,
+      width: 1,
+      height: 1,
+    }
+    await expect(service.reply({
+      chatId: 'oc_1', chatType: 'p2p',
+      content: 'describe this',
+      imageBlocks: [ref],
+    })).resolves.toBe('answer:describe this')
+    expect(captured).toMatchObject({
+      content: [
+        { type: 'text', text: 'describe this' },
+        { type: 'image', attachment: ref },
+      ],
+    })
+  })
+
+  it('submits image-only messages without a text payload', async () => {
+    const f = fixture()
+    const original = f.create.getMockImplementation()
+    f.create.mockImplementationOnce(async (input: any) => {
+      const handle = await original!(input)
+      handle.agent.followup = vi.fn((message: any) => {
+        const seq = handle.agent.session.events.length
+        const images = message.content.filter((c: any) => c.type === 'image').length
+        handle.agent.session.events.push(
+          { seq, type: 'turn/start', data: {} },
+          { seq: seq + 1, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: `images:${images}` }] } } },
+          { seq: seq + 2, type: 'turn/end', data: { reason: { kind: 'completed' } } },
+        )
+      })
+      return handle
+    })
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu', workspace: '/work' })
+    const ref = {
+      attachmentId: 'att_2' as never,
+      mediaType: 'image/png' as const,
+      bytes: 8,
+      width: 2,
+      height: 2,
+    }
+    await expect(service.reply({
+      chatId: 'oc_2', chatType: 'p2p',
+      content: '',
+      imageBlocks: [ref, ref],
+    })).resolves.toBe('images:2')
+  })
+
+  it('rejects an inbound message that carries neither text nor images', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu', workspace: '/work' })
+    await expect(service.reply({ chatId: 'oc_3', chatType: 'p2p', content: '' })).rejects.toThrow(/empty user turn/)
+  })
 })

@@ -1,5 +1,32 @@
 import { describe, expect, it, vi } from 'vitest'
 import { startChannel } from '../src/channel.ts'
+import type { AttachmentId, ImageAttachmentRef, ImageMediaType, ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'
+
+const IMAGE_LIMITS: ImageAttachmentLimits = {
+  maxImageBytes: 10_000_000,
+  maxImagesPerMessage: 20,
+  maxMessageImageBytes: 100_000_000,
+  maxImagePixels: 40_000_000,
+  mediaTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'] as const,
+}
+
+function fakeImageRef(input: { data: Uint8Array; mediaType: string; name?: string }): ImageAttachmentRef {
+  return {
+    attachmentId: `att_${input.data.byteLength}` as AttachmentId,
+    mediaType: input.mediaType as ImageMediaType,
+    bytes: input.data.byteLength,
+    width: 1,
+    height: 1,
+    ...input.name === undefined ? {} : { name: input.name },
+  }
+}
+
+function fakeAttachments(overrides: { saveImage?: (input: any) => Promise<ImageAttachmentRef> } = {}) {
+  return {
+    saveImage: vi.fn(overrides.saveImage ?? (async input => fakeImageRef(input))),
+    imageLimits: IMAGE_LIMITS,
+  }
+}
 
 function fakeChannel() {
   const handlers = new Map<string, Function>()
@@ -8,6 +35,7 @@ function fakeChannel() {
     connect: vi.fn(async () => undefined), disconnect: vi.fn(async () => undefined),
     send: vi.fn(async () => ({ messageId: 'out' })),
     addReaction: vi.fn(async () => 'reaction-id'),
+    downloadResource: vi.fn(async () => Buffer.from([0xff, 0xd8, 0xff, 0xe0])),
     on: vi.fn((name: string, handler: Function) => { handlers.set(name, handler); return () => handlers.delete(name) }),
   }
 }
@@ -146,5 +174,66 @@ describe('startChannel', () => {
     expect(bridge.reply).not.toHaveBeenCalled()
     expect(terminal.error).toHaveBeenCalledWith('dsh-lark: slash command failed: boom')
     expect(channel.send).toHaveBeenCalledWith('oc_1', { text: 'safe error' }, { replyTo: 'om_1', replyInThread: false })
+  })
+
+  it('downloads image resources and attaches ImageBlocks to the bridge call', async () => {
+    const channel = fakeChannel()
+    const bridge = { reply: vi.fn(async () => 'described image'), dispose: vi.fn(async () => undefined) }
+    const attachments = fakeAttachments()
+    const stop = await startChannel({
+      appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
+      groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: 'THUMBSUP',
+    }, bridge, () => channel as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, undefined, undefined, attachments)
+    await channel.handlers.get('message')!({
+      messageId: 'om_2', chatId: 'oc_2', chatType: 'p2p', content: '',
+      resources: [{ type: 'image', fileKey: 'img_abc' }],
+    })
+    expect(channel.downloadResource).toHaveBeenCalledWith('img_abc', 'image')
+    expect(attachments.saveImage).toHaveBeenCalledOnce()
+    expect(bridge.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: '',
+      imageBlocks: [expect.objectContaining({ mediaType: 'image/jpeg', bytes: 4 })],
+    }))
+    expect(channel.send).toHaveBeenCalledWith('oc_2', { markdown: 'described image' }, { replyTo: 'om_2', replyInThread: false })
+    await stop()
+  })
+
+  it('rejects image-bearing messages when no attachment service is composed', async () => {
+    const channel = fakeChannel()
+    const bridge = { reply: vi.fn(async () => 'should not happen'), dispose: vi.fn(async () => undefined) }
+    await startChannel({
+      appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
+      groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: 'THUMBSUP',
+    }, bridge, () => channel as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() })
+    await channel.handlers.get('message')!({
+      messageId: 'om_3', chatId: 'oc_3', chatType: 'p2p', content: '',
+      resources: [{ type: 'image', fileKey: 'img_no_store' }],
+    })
+    expect(channel.send).toHaveBeenCalledWith(
+      'oc_3',
+      { text: 'Image messages are not supported because the deployment has no attachment service composed.' },
+      { replyTo: 'om_3', replyInThread: false },
+    )
+    expect(bridge.reply).not.toHaveBeenCalled()
+  })
+
+  it('reports image-admission failures with the safe fallback and skips the bridge', async () => {
+    const channel = fakeChannel()
+    const bridge = { reply: vi.fn(async () => 'should not happen'), dispose: vi.fn(async () => undefined) }
+    const terminal = { error: vi.fn() }
+    const attachments = fakeAttachments({
+      saveImage: async () => { throw new Error('storage full') },
+    })
+    await startChannel({
+      appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
+      groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: 'THUMBSUP',
+    }, bridge, () => channel as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, terminal, undefined, attachments)
+    await channel.handlers.get('message')!({
+      messageId: 'om_4', chatId: 'oc_4', chatType: 'p2p', content: '',
+      resources: [{ type: 'image', fileKey: 'img_fail' }],
+    })
+    expect(terminal.error).toHaveBeenCalledWith('dsh-lark: image admission failed: storage full')
+    expect(bridge.reply).not.toHaveBeenCalled()
+    expect(channel.send).toHaveBeenCalledWith('oc_4', { text: 'safe error' }, { replyTo: 'om_4', replyInThread: false })
   })
 })

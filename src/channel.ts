@@ -1,7 +1,8 @@
 import { Domain, LoggerLevel, createLarkChannel } from '@larksuiteoapi/node-sdk'
-import type { LarkChannel, LarkChannelOptions, NormalizedMessage } from '@larksuiteoapi/node-sdk'
+import type { LarkChannel, LarkChannelOptions, NormalizedMessage, ResourceDescriptor } from '@larksuiteoapi/node-sdk'
+import type { AttachmentStore, ImageAttachmentRef, SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
 import type { RuntimeConfig } from './config.ts'
-import type { HarnessConversationService } from './harness.ts'
+import type { HarnessConversationService, InboundMessage } from './harness.ts'
 
 export type ChannelFactory = (options: LarkChannelOptions) => LarkChannel
 export interface PluginLogger {
@@ -19,6 +20,64 @@ export type SlashCommandHandler = (
   message: NormalizedMessage,
 ) => Promise<{ kind: 'success' | 'error'; text: string } | undefined>
 
+/** Narrow attachment-store view needed for image admission. */
+type AttachmentLike = Pick<AttachmentStore, 'saveImage' | 'imageLimits'>
+
+/** Feishu media type -> MIME type. Returns undefined when unsupported. */
+const FEISHU_IMAGE_MIME = new Map<string, 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif'>([
+  ['image/jpeg', 'image/jpeg'],
+  ['image/jpg', 'image/jpeg'],
+  ['image/png', 'image/png'],
+  ['image/webp', 'image/webp'],
+  ['image/gif', 'image/gif'],
+])
+
+function pickImageMime(descriptor: ResourceDescriptor): 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif' | undefined {
+  const hint = descriptor.fileName?.toLowerCase() ?? ''
+  if (hint.endsWith('.png')) return 'image/png'
+  if (hint.endsWith('.jpg') || hint.endsWith('.jpeg')) return 'image/jpeg'
+  if (hint.endsWith('.webp')) return 'image/webp'
+  if (hint.endsWith('.gif')) return 'image/gif'
+  // Feishu only tags `image` for image-only messages; there is no MIME hint
+  // in the descriptor itself. Default to JPEG because Feishu mobile captures
+  // are commonly JPEG; the validator re-checks against decoded magic bytes.
+  return FEISHU_IMAGE_MIME.get('image/jpeg')
+}
+
+/**
+ * Pull every image resource off one normalized message, decode it through the
+ * channel's HTTP client, and durably commit the bytes via the attachment
+ * store. Returns an empty array when the message carries no images so the
+ * caller can keep the same code for text-only messages.
+ */
+async function admitImagesForMessage(
+  channel: LarkChannel,
+  message: NormalizedMessage,
+  attachments: AttachmentLike,
+  signal: AbortSignal,
+): Promise<readonly ImageAttachmentRef[]> {
+  const resources = (message.resources ?? []).filter(resource => resource.type === 'image')
+  if (resources.length === 0) return []
+  const accepted = attachments.imageLimits.mediaTypes
+  const inputs: SaveImageAttachment[] = []
+  for (const resource of resources) {
+    const mediaType = pickImageMime(resource)
+    if (mediaType === undefined || !accepted.includes(mediaType)) {
+      throw new Error(`dsh-lark: image type "${mediaType ?? 'unknown'}" is not accepted by the deployment`)
+    }
+    const bytes = await channel.downloadResource(resource.fileKey, 'image')
+    if (signal.aborted) throw new Error('dsh-lark: image admission aborted')
+    inputs.push({
+      data: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+      mediaType,
+      ...resource.fileName === undefined ? {} : { name: resource.fileName },
+    })
+  }
+  const refs: ImageAttachmentRef[] = []
+  for (const input of inputs) refs.push(await attachments.saveImage(input))
+  return refs
+}
+
 export async function startChannel(
   config: Omit<RuntimeConfig, 'appSecretRef'>,
   bridge: Pick<HarnessConversationService, 'reply' | 'dispose'>,
@@ -26,6 +85,7 @@ export async function startChannel(
   logger: PluginLogger = console,
   terminalLogger?: Pick<PluginLogger, 'error'>,
   slashCommand?: SlashCommandHandler,
+  attachments?: AttachmentLike,
 ): Promise<() => Promise<void>> {
   const logError = (message: string) => {
     logger.error(message)
@@ -87,8 +147,38 @@ export async function startChannel(
           return
         }
       }
+      // Admit any image resources on the inbound message through the
+      // attachment store so the bridge can attach durable ImageBlocks to
+      // the user turn. Without an attachment service we reject image-bearing
+      // messages so the bridge never falls back to a text-only user turn
+      // that would silently drop the image.
+      let inboundMessage: InboundMessage = {
+        chatId: message.chatId,
+        chatType: message.chatType,
+        ...message.threadId === undefined ? {} : { threadId: message.threadId },
+        content: message.content,
+      }
+      if ((message.resources ?? []).some(resource => resource.type === 'image')) {
+        if (attachments === undefined) {
+          await channel.send(message.chatId, {
+            text: 'Image messages are not supported because the deployment has no attachment service composed.',
+          }, { replyTo: message.messageId, replyInThread }).catch(() => undefined)
+          return
+        }
+        try {
+          const imageBlocks = await admitImagesForMessage(channel, message, attachments, new AbortController().signal)
+          inboundMessage = { ...inboundMessage, imageBlocks }
+        } catch (error: unknown) {
+          logError(`dsh-lark: image admission failed: ${error instanceof Error ? error.message : String(error)}`)
+          await channel.send(message.chatId, { text: config.errorMessage }, {
+            replyTo: message.messageId,
+            replyInThread,
+          }).catch(() => undefined)
+          return
+        }
+      }
       try {
-        const text = await bridge.reply(message)
+        const text = await bridge.reply(inboundMessage)
         await channel.send(message.chatId, { markdown: text }, {
           replyTo: message.messageId,
           replyInThread,
