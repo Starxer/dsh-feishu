@@ -11,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-workspace'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
-import type { NormalizedMessage } from '@larksuiteoapi/node-sdk'
+import type { LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk'
 import { createLarkChannel } from '@larksuiteoapi/node-sdk'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { ConfigSchema, LARK_SETTINGS_NAMESPACE, resolveSettingsConfig } from './config.ts'
@@ -28,11 +28,14 @@ import { handleProvisionRequest, handleSettingsRequest, PROVISION_PATH, SETTINGS
 export const name = 'lark-channel'
 export const inject = [
   'agents', 'sessions', 'sessionPersistence', 'agentDefaultModel', 'agentPresets', 'workspaceRegistry',
-  'settings', 'credentials', 'webServer', 'commands', 'llm', 'attachments',
+  'settings', 'credentials', 'webServer', 'commands', 'llm', 'attachments', 'apiProxy',
 ]
 export const Config = ConfigSchema
 export type { PluginConfig }
 export { ConfigSchema } from './config.ts'
+
+import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
+import { startFeishuQuestions } from './feishu-questions.ts'
 
 export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void> {
   const agents = ctx.get('agents')
@@ -40,6 +43,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   const sessionPersistence = ctx.get('sessionPersistence')
   const defaultModel = ctx.get('agentDefaultModel')
   const agentPresets = ctx.get('agentPresets')
+  const apiProxy = ctx.get('apiProxy') as ApiProxy | undefined
   const workspaceRegistry = ctx.get('workspaceRegistry')
   const settings = ctx.get('settings')
   const credentials = ctx.get('credentials')
@@ -55,6 +59,14 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   }
   if (attachments === undefined) {
     throw new Error('dsh-lark requires the attachments service for inbound image messages')
+  }
+  // apiProxy is optional: when absent (Feishu-only deployments without the
+  // web-app bundle), we simply skip the questions listener. The harness's own
+  // user-questions provider still runs, so an answer via the WebUI is the
+  // only path in that case — the Feishu chat gets no card. We log the gap so
+  // operators see why a deployment loses the option UI.
+  if (apiProxy === undefined) {
+    ctx.logger('dsh-lark').warn('dsh-lark: apiProxy unavailable — ask_user_question cards will not render in Feishu')
   }
 
   const settingsScope = settings.register(
@@ -123,6 +135,48 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       )
     },
   })
+  // The questions listener is created here (once per `apply()` lifetime) and
+  // re-pinned to whichever channel LarkRuntime is currently holding. The SSE
+  // iterator and cardAction subscription both live for the whole plugin
+  // lifetime; only their *targets* (the channel) change on reconcile.
+  let stopQuestions: () => void = () => undefined
+  const channelHolder: { current: LarkChannel | undefined } = { current: undefined }
+  if (apiProxy !== undefined) {
+    stopQuestions = startFeishuQuestions({
+      apiProxy,
+      channel: {
+        send: (to, input, opts) => {
+          const ch = channelHolder.current
+          if (ch === undefined) return Promise.reject(new Error('dsh-lark: channel not connected'))
+          return ch.send(to, input, opts) as Promise<unknown>
+        },
+        onCardAction: handler => {
+          // Subscribe to whatever channel is currently connected and rebind
+          // automatically on reconcile. The previous listener is dropped with
+          // the old channel — its dispatcher dies with the WS connection.
+          const attach = (ch: LarkChannel): (() => void) => ch.on('cardAction', handler as never)
+          const unsubList: Array<() => void> = []
+          if (channelHolder.current !== undefined) unsubList.push(attach(channelHolder.current))
+          const previous = runtime.onChannelChange
+          runtime.onChannelChange = (ch) => {
+            previous?.(ch)
+            unsubList.push(attach(ch))
+          }
+          return () => {
+            for (const u of unsubList) u()
+          }
+        },
+      },
+      bridgeHolder,
+      logger: ctx.logger('dsh-lark'),
+    })
+  }
+  ctx.effect(() => () => {
+    stopQuestions()
+  }, 'dsh-lark: feishu questions listener')
+  runtime.onChannelChange = channel => {
+    channelHolder.current = channel
+  }
 
   let lastPrintedQrUrl: string | undefined
   const provisionManager = new ProvisionManager({

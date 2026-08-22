@@ -57,6 +57,7 @@ jobs:
             "@deepseek-ai/dsh-attachment@$dsh_version" \
             "@deepseek-ai/dsh-client-ui-primitives@$dsh_version" \
             "@deepseek-ai/dsh-credentials@$dsh_version" \
+            "@deepseek-ai/dsh-host-apiproxy@$dsh_version" \
             "@deepseek-ai/dsh-host-webserver@$dsh_version" \
             "@deepseek-ai/dsh-llm@$dsh_version" \
             "@deepseek-ai/dsh-scope@$dsh_version" \
@@ -64,6 +65,7 @@ jobs:
             "@deepseek-ai/dsh-session-persistence@$dsh_version" \
             "@deepseek-ai/dsh-settings@$dsh_version" \
             "@deepseek-ai/dsh-timeout@$dsh_version" \
+            "@deepseek-ai/dsh-user-questions@$dsh_version" \
             "@deepseek-ai/dsh-workspace@$dsh_version" \
             "@testing-library/dom@^10.4.0"
 

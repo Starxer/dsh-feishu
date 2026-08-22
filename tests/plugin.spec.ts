@@ -7,6 +7,7 @@ const IMAGE_LIMITS: ImageAttachmentLimits = {
   maxImagesPerMessage: 20,
   maxMessageImageBytes: 100_000_000,
   maxImagePixels: 40_000_000,
+  maxImageDimension: 4096,
   mediaTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'] as const,
 }
 
@@ -63,7 +64,7 @@ describe('startChannel', () => {
     const factory = vi.fn(() => channel as any)
     const bridge = { reply: vi.fn(async () => 'Hello **Lark**'), dispose: vi.fn(async () => undefined) }
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
-    const stop = await startChannel({
+    const { stop } = await startChannel({
       appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
       groupAllowlist: [], dmAllowlist: [], workspace: '/work', errorMessage: 'safe error', reactEmoji: 'THUMBSUP',
     }, bridge, factory, logger)
@@ -83,7 +84,7 @@ describe('startChannel', () => {
     const channel = fakeChannel()
     const bridge = { reply: vi.fn(async () => 'ok'), dispose: vi.fn(async () => undefined) }
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
-    const stop = await startChannel({
+    const { stop } = await startChannel({
       appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
       groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: '',
     }, bridge, () => channel as any, logger)
@@ -98,7 +99,7 @@ describe('startChannel', () => {
     channel.addReaction.mockRejectedValueOnce(new Error('reaction denied'))
     const bridge = { reply: vi.fn(async () => 'ok'), dispose: vi.fn(async () => undefined) }
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
-    const stop = await startChannel({
+    const { stop } = await startChannel({
       appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
       groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: 'THUMBSUP',
     }, bridge, () => channel as any, logger)
@@ -122,7 +123,7 @@ describe('startChannel', () => {
     const channel = fakeChannel()
     channel.disconnect.mockRejectedValueOnce(new Error('disconnect failed'))
     const bridge = { reply: vi.fn(async () => ''), dispose: vi.fn(async () => undefined) }
-    const stop = await startChannel({
+    const { stop } = await startChannel({
       appId: 'id', appSecret: 'secret', domain: 'lark', requireMention: true, dmMode: 'open',
       groupAllowlist: [], dmAllowlist: [], workspace: '/work', errorMessage: 'safe error', reactEmoji: 'THUMBSUP',
     }, bridge, () => channel as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() })
@@ -152,7 +153,7 @@ describe('startChannel', () => {
     const bridge = { reply: vi.fn(async () => 'agent answer'), dispose: vi.fn(async () => undefined) }
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const slashCommand = vi.fn(async () => ({ kind: 'success' as const, text: 'command answer' }))
-    const stop = await startChannel({
+    const { stop } = await startChannel({
       appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
       groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: 'THUMBSUP',
     }, bridge, () => channel as any, logger, undefined, slashCommand)
@@ -197,7 +198,7 @@ describe('startChannel', () => {
     const channel = fakeChannel()
     const bridge = { reply: vi.fn(async () => 'described image'), dispose: vi.fn(async () => undefined) }
     const attachments = fakeAttachments()
-    const stop = await startChannel({
+    const { stop } = await startChannel({
       appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
       groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: 'THUMBSUP',
     }, bridge, () => channel as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, undefined, undefined, attachments)

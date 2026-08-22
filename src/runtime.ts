@@ -1,5 +1,6 @@
 import { resolveRuntimeConfig } from './config.ts'
 import type { RuntimeConfig, SettingsConfig } from './config.ts'
+import type { LarkChannel } from '@larksuiteoapi/node-sdk'
 
 export type RuntimeStatus =
   | { state: 'unconfigured'; message: string }
@@ -8,17 +9,26 @@ export type RuntimeStatus =
   | { state: 'error'; message: string }
   | { state: 'stopped' }
 
+export interface LarkRuntimeStart {
+  stop: () => Promise<void>
+  channel: LarkChannel
+}
+
 export interface LarkRuntimeDependencies {
   settings(): SettingsConfig
   resolveSecret(ref: string): Promise<string | undefined>
-  start(config: RuntimeConfig): Promise<() => Promise<void>>
+  start(config: RuntimeConfig): Promise<LarkRuntimeStart>
 }
 
 export class LarkRuntime {
-  private current: { fingerprint: string; stop: () => Promise<void> } | undefined
+  private current: { fingerprint: string; start: LarkRuntimeStart } | undefined
   private snapshot: RuntimeStatus = { state: 'unconfigured', message: 'App ID and App Secret are required' }
   private operations = Promise.resolve()
   private disposed = false
+  /** Notified whenever the active Lark channel changes (initial connect or
+   *  post-reconcile reconnect). The Feishu questions listener subscribes
+   *  here so it always uses the channel's card send + cardAction handler. */
+  onChannelChange?: (channel: LarkChannel) => void
 
   constructor(private readonly deps: LarkRuntimeDependencies) {}
 
@@ -45,13 +55,14 @@ export class LarkRuntime {
         if (this.current?.fingerprint === fingerprint) return
         await this.stopCurrent()
         this.snapshot = { state: 'connecting' }
-        const stop = await this.deps.start(config)
+        const start = await this.deps.start(config)
         if (this.disposed) {
-          await stop()
+          await start.stop()
           return
         }
-        this.current = { fingerprint, stop }
+        this.current = { fingerprint, start }
         this.snapshot = { state: 'connected' }
+        this.onChannelChange?.(start.channel)
       } catch (error) {
         let failure = error
         if (invalidConfig) {
@@ -88,6 +99,6 @@ export class LarkRuntime {
   private async stopCurrent(): Promise<void> {
     const current = this.current
     this.current = undefined
-    if (current !== undefined) await current.stop()
+    if (current !== undefined) await current.start.stop()
   }
 }

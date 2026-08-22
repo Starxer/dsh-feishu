@@ -170,6 +170,32 @@ export class HarnessConversationService {
   }
 
   /**
+   * Reverse-lookup: given a session id, return the chat coordinates that own
+   * it (honoring any active `/new` or `/thread` override). Used by the
+   * Feishu questions listener, which receives session-keyed `question/requested`
+   * frames from the apiproxy mux stream and needs to know which chat to render
+   * the option card in. Returns `undefined` when the session is owned by no
+   * chat — for example, a session created by the WebUI directly, which the
+   * Lark channel has no business messaging.
+   */
+  resolveChat(sessionId: string): ConversationMessage | undefined {
+    for (const [key, mapped] of this.chatToSession) {
+      if (mapped === sessionId) return this.messageFromKey(key)
+    }
+    // No override: the session id is the deterministic hash of some chat key.
+    // Hash prefixes are `lark-v2-<domain>:<key-hash>` (see `toSessionId`); we
+    // cannot reverse the hash, but we can iterate the currently live agents
+    // this bridge manages and find the one whose deterministic session id
+    // matches. The bridge's `handles` keys are the chat keys themselves, so
+    // we read them directly.
+    for (const key of this.handles.keys()) {
+      const derived = toSessionId(this.config.domain, key)
+      if (derived === sessionId) return this.messageFromKey(key)
+    }
+    return undefined
+  }
+
+  /**
    * Reconstruct a {@link ConversationMessage} from the chat key produced by
    * {@link conversationKey}. The key is sufficient for `resolveSessionId`
    * because only `chatId` and (optionally) `threadId` participate in the

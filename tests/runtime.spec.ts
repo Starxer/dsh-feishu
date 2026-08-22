@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
-import { LarkRuntime } from '../src/runtime.ts'
+import type { LarkChannel } from '@larksuiteoapi/node-sdk'
+import { LarkRuntime, type LarkRuntimeStart } from '../src/runtime.ts'
 import { resolveSettingsConfig } from '../src/config.ts'
+
+function fakeStart(stop: () => Promise<void>): LarkRuntimeStart {
+  // The channel field is opaque to LarkRuntime; tests never read it. Returning
+  // an empty stub keeps the surface narrow while satisfying the type.
+  return { stop, channel: {} as LarkChannel }
+}
 
 describe('LarkRuntime', () => {
   it('stays idle until both application credentials are configured', async () => {
@@ -21,7 +28,7 @@ describe('LarkRuntime', () => {
     const start = vi.fn(async () => {
       const stop = vi.fn(async () => undefined)
       stops.push(stop)
-      return stop
+      return fakeStart(stop)
     })
     const runtime = new LarkRuntime({ settings: () => config, resolveSecret: async () => 'secret', start })
     await runtime.reconcile()
@@ -37,7 +44,7 @@ describe('LarkRuntime', () => {
   it('replaces the channel after the credential value changes', async () => {
     let secret = 'first'
     const stop = vi.fn(async () => undefined)
-    const start = vi.fn(async () => stop)
+    const start = vi.fn(async () => fakeStart(stop))
     const runtime = new LarkRuntime({
       settings: () => resolveSettingsConfig({ appId: 'id' }),
       resolveSecret: async () => secret,
@@ -55,7 +62,7 @@ describe('LarkRuntime', () => {
     const runtime = new LarkRuntime({
       settings: () => resolveSettingsConfig({ appId: 'id' }),
       resolveSecret: async () => 'secret',
-      start: async () => stop,
+      start: async () => fakeStart(stop),
     })
     await runtime.reconcile()
     await runtime.dispose()
@@ -89,7 +96,7 @@ describe('LarkRuntime', () => {
     const runtime = new LarkRuntime({
       settings: () => config,
       resolveSecret: async () => 'secret',
-      start: async () => async () => { throw new Error('disconnect failed') },
+      start: async () => fakeStart(async () => { throw new Error('disconnect failed') }),
     })
     await runtime.reconcile()
     config = { ...config, requireMention: false }

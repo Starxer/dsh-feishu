@@ -114,7 +114,7 @@ export async function startChannel(
   terminalLogger?: Pick<PluginLogger, 'error'>,
   slashCommand?: SlashCommandHandler,
   attachments?: AttachmentLike,
-): Promise<() => Promise<void>> {
+): Promise<{ stop: () => Promise<void>; channel: LarkChannel }> {
   const logError = (message: string) => {
     logger.error(message)
     terminalLogger?.error(message)
@@ -237,13 +237,16 @@ export async function startChannel(
   }
   logger.info('dsh-lark: WebSocket connected')
 
-  return async () => {
-    for (const unsubscribe of unsubscribers) unsubscribe()
-    try {
-      await channel.disconnect()
-      logger.info('dsh-lark: WebSocket disconnected')
-    } finally {
-      await bridge.dispose()
-    }
+  return {
+    channel,
+    stop: async () => {
+      for (const unsubscribe of unsubscribers) unsubscribe()
+      try {
+        await channel.disconnect()
+        logger.info('dsh-lark: WebSocket disconnected')
+      } finally {
+        await bridge.dispose()
+      }
+    },
   }
 }
