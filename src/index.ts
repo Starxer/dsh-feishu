@@ -22,8 +22,9 @@ import { LarkRuntime } from './runtime.ts'
 import { createSettingsApi } from './settings-api.ts'
 import { renderTerminalQr } from './provision.ts'
 import { ProvisionManager } from './provision-manager.ts'
-import { registerLarkCommands, type CommandTranslations } from './commands.ts'
+import { registerLarkCommands, type ApprovalControl, type CommandTranslations } from './commands.ts'
 import { handleProvisionRequest, handleSettingsRequest, PROVISION_PATH, SETTINGS_PATH } from './web.ts'
+import { settleApprovalBySlash, startFeishuApprovals, type PendingApprovalView } from './feishu-approvals.ts'
 
 export const name = 'lark-channel'
 export const inject = [
@@ -89,28 +90,73 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     current: HarnessConversationService | undefined
     lastChatMessage: { chatId: string; chatType: 'p2p' | 'group'; threadId?: string } | undefined
   } = { current: undefined, lastChatMessage: undefined }
-  registerLarkCommands(
-    ctx,
-    llm,
-    defaultModel,
-    {
-      setCurrentSelection: (chatMessage, next) => bridgeHolder.current?.setCurrentSelection(chatMessage, next),
-      currentSelectionFor: chatMessage => bridgeHolder.current?.currentSelectionFor(chatMessage),
-      startNewSession: (chatMessage, salt) => bridgeHolder.current?.startNewSession(chatMessage, salt) ?? '',
-      switchToSession: (chatMessage, sessionId) => bridgeHolder.current?.switchToSession(chatMessage, sessionId) ?? false,
-      listSessions: async () => bridgeHolder.current?.listSessions() ?? [],
+  // Channel adapter and listener registry live above `registerLarkCommands`
+  // so the approval-control adapter they produce is available when the
+  // command handlers register. The actual SSE iteration starts only after
+  // the runtime reconnects (see the `runtime.onChannelChange` hook).
+  let stopQuestions: () => void = () => undefined
+  let stopApprovals: () => void = () => undefined
+  const channelHolder: { current: LarkChannel | undefined } = { current: undefined }
+  const buildApprovalControl = (apiProxy: ApiProxy): ApprovalControl => {
+    const approvalsHandle = startFeishuApprovals({
+      apiProxy,
+      channel: cardChannel,
+      bridgeHolder,
+      logger: ctx.logger('dsh-lark'),
+    })
+    stopApprovals = approvalsHandle.stop
+    return {
+      pendingForSession: approvalsHandle.pendingForSession,
+      findPending: approvalsHandle.findPending,
+      async settle(view: PendingApprovalView, outcome: 'allowed-once' | 'rejected') {
+        await settleApprovalBySlash(apiProxy, view, outcome, ctx.logger('dsh-lark'))
+      },
+    }
+  }
+  type CardActionEvent = {
+    messageId?: string
+    chatId?: string
+    operator?: { openId?: string }
+    action?: { value?: unknown; tag?: string; option?: string }
+  }
+  const cardActionHandlers = new Set<(evt: CardActionEvent) => void | Promise<void>>()
+  const attachedChannels = new Set<LarkChannel>()
+  const cardChannel = {
+    send: (to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<unknown> => {
+      const ch = channelHolder.current
+      if (ch === undefined) return Promise.reject(new Error('dsh-lark: channel not connected'))
+      return ch.send(to, input, opts) as Promise<unknown>
     },
-    () => {
-      const last = bridgeHolder.lastChatMessage
-      if (last === undefined) {
-        throw new Error('dsh-lark: chat coordinates missing for /model command — send a regular message first')
+    onCardAction: (handler: (evt: CardActionEvent) => void | Promise<void>): (() => void) => {
+      cardActionHandlers.add(handler)
+      const attach = (ch: LarkChannel): (() => void) => {
+        if (attachedChannels.has(ch)) return () => undefined
+        attachedChannels.add(ch)
+        return ch.on('cardAction', (...args) => {
+          for (const h of cardActionHandlers) void h(args[0] as CardActionEvent)
+        })
       }
-      return last
+      const unsubList: Array<() => void> = []
+      if (channelHolder.current !== undefined) {
+        const u = attach(channelHolder.current)
+        if (u !== undefined) unsubList.push(u)
+      }
+      const previous = runtime.onChannelChange
+      runtime.onChannelChange = (ch) => {
+        previous?.(ch)
+        const u = attach(ch)
+        if (u !== undefined) unsubList.push(u)
+      }
+      return () => {
+        cardActionHandlers.delete(handler)
+        for (const u of unsubList) u()
+      }
     },
-    larkCommandTranslations,
-    commands,
-  )
-
+  }
+  // The questions listener is paired with the approvals listener: they share
+  // the cardChannel adapter so a single cardAction dispatcher feeds both.
+  // When apiProxy is missing, both no-op (slash commands fall back to
+  // errors explaining no pending approvals / questions).
   const runtime = new LarkRuntime({
     settings: currentSettings,
     resolveSecret: async ref => (await credentials.resolve(credentialRef(ref)))?.value,
@@ -135,48 +181,52 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       )
     },
   })
-  // The questions listener is created here (once per `apply()` lifetime) and
-  // re-pinned to whichever channel LarkRuntime is currently holding. The SSE
-  // iterator and cardAction subscription both live for the whole plugin
-  // lifetime; only their *targets* (the channel) change on reconcile.
-  let stopQuestions: () => void = () => undefined
-  const channelHolder: { current: LarkChannel | undefined } = { current: undefined }
+  // Pin the channel holder so the card adapter's `send`/`onCardAction` always
+  // reach the live channel. The questions/approvals listeners wrap this
+  // callback to also attach their cardAction handlers on reconnect.
+  runtime.onChannelChange = channel => {
+    channelHolder.current = channel
+  }
   if (apiProxy !== undefined) {
     stopQuestions = startFeishuQuestions({
       apiProxy,
-      channel: {
-        send: (to, input, opts) => {
-          const ch = channelHolder.current
-          if (ch === undefined) return Promise.reject(new Error('dsh-lark: channel not connected'))
-          return ch.send(to, input, opts) as Promise<unknown>
-        },
-        onCardAction: handler => {
-          // Subscribe to whatever channel is currently connected and rebind
-          // automatically on reconcile. The previous listener is dropped with
-          // the old channel — its dispatcher dies with the WS connection.
-          const attach = (ch: LarkChannel): (() => void) => ch.on('cardAction', handler as never)
-          const unsubList: Array<() => void> = []
-          if (channelHolder.current !== undefined) unsubList.push(attach(channelHolder.current))
-          const previous = runtime.onChannelChange
-          runtime.onChannelChange = (ch) => {
-            previous?.(ch)
-            unsubList.push(attach(ch))
-          }
-          return () => {
-            for (const u of unsubList) u()
-          }
-        },
-      },
+      channel: cardChannel,
       bridgeHolder,
       logger: ctx.logger('dsh-lark'),
     })
   }
+  registerLarkCommands(
+    ctx,
+    llm,
+    defaultModel,
+    {
+      setCurrentSelection: (chatMessage, next) => bridgeHolder.current?.setCurrentSelection(chatMessage, next),
+      currentSelectionFor: chatMessage => bridgeHolder.current?.currentSelectionFor(chatMessage),
+      startNewSession: (chatMessage, salt) => bridgeHolder.current?.startNewSession(chatMessage, salt) ?? '',
+      switchToSession: (chatMessage, sessionId) => bridgeHolder.current?.switchToSession(chatMessage, sessionId) ?? false,
+      listSessions: async () => bridgeHolder.current?.listSessions() ?? [],
+    },
+    () => {
+      const last = bridgeHolder.lastChatMessage
+      if (last === undefined) {
+        throw new Error('dsh-lark: chat coordinates missing for /model command — send a regular message first')
+      }
+      return last
+    },
+    larkCommandTranslations,
+    commands,
+    apiProxy === undefined
+      ? {
+          pendingForSession: () => [],
+          findPending: () => undefined,
+          async settle() { /* noop when apiProxy is absent */ },
+        }
+      : buildApprovalControl(apiProxy),
+  )
   ctx.effect(() => () => {
     stopQuestions()
-  }, 'dsh-lark: feishu questions listener')
-  runtime.onChannelChange = channel => {
-    channelHolder.current = channel
-  }
+    stopApprovals()
+  }, 'dsh-lark: feishu questions + approvals listeners')
 
   let lastPrintedQrUrl: string | undefined
   const provisionManager = new ProvisionManager({
@@ -282,6 +332,23 @@ const larkCommandTranslations: CommandTranslations = {
     ? `• \`/${name}\` — ${description}`
     : `• \`/${name}\` — ${description} \`[${hint}]\``,
   helpEmpty: 'No slash commands are available right now.',
+  approveDescription: 'Approve the most recent (or `<shortCode>`) pending approval in this chat',
+  approveApproveHint: '[shortCode]',
+  approveApprovedNoPending: 'No pending approvals on this session — nothing to approve.',
+  approveApproved: (shortCode, toolName) => `✅ Approved \`${toolName}\` (\`${shortCode}\`). The agent continues.`,
+  approveUnknownShort: shortCode => `No pending approval with id \`${shortCode}\` on this session.`,
+  denyDescription: 'Reject the most recent (or `<shortCode>`) pending approval in this chat',
+  denyHint: '[shortCode]',
+  denyDenied: (shortCode, toolName) => `❌ Rejected \`${toolName}\` (\`${shortCode}\`). The agent stops.`,
+  approveDenyUsage: 'Usage: `/approve` or `/approve <shortCode>` (and `/deny` likewise). Run `/approvals` to see the short codes.',
+  approvalsDescription: 'List every pending approval for this chat with its short code',
+  approvalsEmpty: 'No pending approvals on this session.',
+  approvalsHeader: 'Pending approvals (newest first):',
+  approvalsEntry: (index, shortCode, toolName, age) => `${index}. \`${shortCode}\` — \`${toolName}\` — ${age}`,
+  approvalsAgeJustNow: 'just now',
+  approvalsAgeSeconds: n => `${n}s ago`,
+  approvalsAgeMinutes: n => `${n}m ago`,
+  approvalsAgeHours: n => `${n}h ago`,
 }
 
 /**
@@ -317,15 +384,16 @@ async function executeSlashCommand(
   }
   const controller = new AbortController()
   const line = `/${parsed.name}${parsed.rawInput}`
-  // `commands.execute` takes `(agent, line, signal)` in the published
-  // `^0.1.0-rc.7` ABI; later dsh versions added an `images` argument between
-  // `line` and `signal`. Branch by arity so the plugin compiles against both
-  // shapes — the Feishu channel has no image path so we pass nothing either
-  // way.
-  const execute = commands.execute as unknown as (...args: unknown[]) => Promise<CommandExecution | undefined>
-  const execution = execute.length >= 4
-    ? await execute(agent, line, [], controller.signal)
-    : await execute(agent, line, controller.signal)
+  // `commands.execute` is reached through Cordis's traceable Proxy, which
+  // shadows every method call's `thisArg` (see vendor/cordis `createShadowMethod`).
+  // Extracting it to a local `execute` and invoking as a free function would
+  // detach `this`, causing `this.view(agent)` inside the runtime to throw
+  // "Cannot read properties of undefined (reading 'view')". Call it as a
+  // method on `commands` so the proxy sees the correct receiver.
+  //
+  // The 4-arg shape `(agent, line, images, signal)` matches `^0.1.0-rc.7`
+  // and later; the plugin has no image-attachment path so we pass `[]`.
+  const execution = await commands.execute(agent, line, [], controller.signal) as CommandExecution | undefined
   if (execution === undefined) return undefined
   const result: CommandResult = execution.result
   return { kind: result.kind, text: result.text ?? `Command /${parsed.name} produced no output.` }

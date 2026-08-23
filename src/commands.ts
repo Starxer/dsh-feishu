@@ -1,9 +1,11 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult, CommandRuntime } from '@deepseek-ai/dsh-commands'
 import type { AgentDefaultModelConfig } from '@deepseek-ai/dsh-agent-default-model'
+import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import type { LlmProviderInfo, LlmModelInfo } from '@deepseek-ai/dsh-llm'
 import type { HarnessConversationService } from './harness.ts'
 import type { ConversationMessage } from './conversation.ts'
+import type { PendingApprovalView } from './feishu-approvals.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -84,6 +86,26 @@ export interface CommandTranslations {
   readonly helpUsage: string
   readonly helpEntry: (name: string, description: string, hint: string | undefined) => string
   readonly helpEmpty: string
+  /** Approval-flavored slash command translations. Feishu users without a
+   *  clickable card can answer the most recent (or `<shortCode>`-targeted)
+   *  pending approval with `/approve` / `/deny`. */
+  readonly approveDescription: string
+  readonly approveApproveHint: string
+  readonly approveApprovedNoPending: string
+  readonly approveApproved: (shortCode: string, toolName: string) => string
+  readonly approveUnknownShort: (shortCode: string) => string
+  readonly denyDescription: string
+  readonly denyHint: string
+  readonly denyDenied: (shortCode: string, toolName: string) => string
+  readonly approveDenyUsage: string
+  readonly approvalsDescription: string
+  readonly approvalsEmpty: string
+  readonly approvalsHeader: string
+  readonly approvalsEntry: (index: number, shortCode: string, toolName: string, age: string) => string
+  readonly approvalsAgeJustNow: string
+  readonly approvalsAgeSeconds: (n: number) => string
+  readonly approvalsAgeMinutes: (n: number) => string
+  readonly approvalsAgeHours: (n: number) => string
 }
 
 /**
@@ -104,6 +126,18 @@ function formatRelativeTime(timestamp: number, t: CommandTranslations, now: numb
   return t.threadLastActiveDaysAgo(days)
 }
 
+/** Format the age of a pending approval as a short relative-time string. */
+function formatApprovalAge(createdAt: number, t: Pick<CommandTranslations, 'approvalsAgeJustNow' | 'approvalsAgeSeconds' | 'approvalsAgeMinutes' | 'approvalsAgeHours'>, now: number = Date.now()): string {
+  const delta = Math.max(0, now - createdAt)
+  const seconds = Math.floor(delta / 1000)
+  if (seconds < 5) return t.approvalsAgeJustNow
+  if (seconds < 60) return t.approvalsAgeSeconds(seconds)
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return t.approvalsAgeMinutes(minutes)
+  const hours = Math.floor(minutes / 60)
+  return t.approvalsAgeHours(hours)
+}
+
 /** Parse `provider/model` or `provider/model:reasoning-effort` from the raw input. */
 function parseModelRoute(rawInput: string): { provider: string; model: string; reasoningEffort?: string } | undefined {
   const trimmed = rawInput.trim()
@@ -120,6 +154,18 @@ function parseModelRoute(rawInput: string): { provider: string; model: string; r
   return reasoningEffort === undefined || reasoningEffort === ''
     ? { provider, model }
     : { provider, model, reasoningEffort }
+}
+
+/**
+ * Surface that backs the approval slash commands. Held by `index.ts` so the
+ * approvals listener owns the registry; the command handlers receive only
+ * read access plus a `settle` callback that mirrors the card-click path
+ * (so the card-click and slash-command paths share one apiproxy call site).
+ */
+export interface ApprovalControl {
+  pendingForSession(sessionId: string): PendingApprovalView[]
+  findPending(sessionId: string, rpcIdOrShort: string): PendingApprovalView | undefined
+  settle(view: PendingApprovalView, outcome: 'allowed-once' | 'rejected'): Promise<void>
 }
 
 /**
@@ -143,6 +189,7 @@ export function registerLarkCommands(
   chatMessageFor: (invocation: CommandInvocation) => ConversationMessage,
   t: CommandTranslations,
   commands: Pick<CommandRuntime, 'list'>,
+  approvals: ApprovalControl,
 ): void {
   ctx.effect(function* () {
     yield ctx.commands.register({
@@ -182,7 +229,22 @@ export function registerLarkCommands(
       description: t.helpDescription,
       handler: invocation => handleHelpCommand(invocation, commands, t),
     })
-  }, 'dsh-lark: /model /new /thread /help commands')
+    yield ctx.commands.register({
+      name: 'approve',
+      description: t.approveDescription,
+      handler: invocation => handleApprovalCommand(invocation, approvals, 'allowed-once', t),
+    })
+    yield ctx.commands.register({
+      name: 'deny',
+      description: t.denyDescription,
+      handler: invocation => handleApprovalCommand(invocation, approvals, 'rejected', t),
+    })
+    yield ctx.commands.register({
+      name: 'approvals',
+      description: t.approvalsDescription,
+      handler: invocation => handleListApprovalsCommand(invocation, approvals, t),
+    })
+  }, 'dsh-lark: /model /new /thread /help /approve /deny /approvals commands')
 }
 
 async function handleModelCommand(
@@ -322,5 +384,68 @@ async function handleHelpCommand(
     ))
   }
   lines.push(t.helpUsage)
+  return { kind: 'success', text: lines.join('\n') }
+}
+
+/**
+ * Handle `/approve` and `/deny`. With no input, targets the most-recent
+ * pending approval in the receiving agent's session; with a shortCode
+ * argument, targets the matching pending approval. Replies with a short
+ * human-readable summary the user can verify in the chat log.
+ */
+async function handleApprovalCommand(
+  invocation: CommandInvocation,
+  approvals: ApprovalControl,
+  outcome: 'allowed-once' | 'rejected',
+  t: CommandTranslations,
+): Promise<CommandResult> {
+  const sessionId = invocation.agent.session.id as unknown as string
+  const rawInput = invocation.rawInput.trim()
+  const list = approvals.pendingForSession(sessionId)
+  if (list.length === 0) {
+    // Either nothing is pending, or the matching session belongs to a
+    // chat that is not this Feishu chat (an in-flight webui approval on
+    // the same session would still be on the list — but webui users would
+    // have answered it themselves before this command fires). Surface a
+    // clear error so the user does not assume the slash command succeeded.
+    return { kind: 'error', text: t.approveApprovedNoPending }
+  }
+  const target = rawInput === ''
+    ? list[0]
+    : approvals.findPending(sessionId, rawInput)
+  if (target === undefined) {
+    return { kind: 'error', text: `${t.approveUnknownShort(rawInput)}\n${t.approveDenyUsage}` }
+  }
+  await approvals.settle(target, outcome)
+  return {
+    kind: 'success',
+    text: outcome === 'allowed-once'
+      ? t.approveApproved(target.shortCode, target.toolName)
+      : t.denyDenied(target.shortCode, target.toolName),
+  }
+}
+
+/**
+ * Handle `/approvals`. Lists every pending approval for the receiving
+ * agent's session so the user can identify the shortCode to feed back
+ * into `/approve<short>` / `/deny<short>`.
+ */
+async function handleListApprovalsCommand(
+  invocation: CommandInvocation,
+  approvals: ApprovalControl,
+  t: CommandTranslations,
+): Promise<CommandResult> {
+  const sessionId = invocation.agent.session.id as unknown as string
+  const list = approvals.pendingForSession(sessionId)
+  if (list.length === 0) {
+    return { kind: 'success', text: t.approvalsEmpty }
+  }
+  const now = Date.now()
+  const lines = [t.approvalsHeader]
+  list.forEach((view, index) => {
+    const age = formatApprovalAge(view.createdAt, t, now)
+    lines.push(t.approvalsEntry(index + 1, view.shortCode, view.toolName, age))
+  })
+  lines.push(t.approveDenyUsage)
   return { kind: 'success', text: lines.join('\n') }
 }
