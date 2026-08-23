@@ -7,7 +7,7 @@
 5. Add the event `im.message.receive_v1`.
 6. Create and publish an app version, then install the app in the tenant or test tenant.
 7. Copy App ID and App Secret into `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in the environment that starts DSH.
-8. Enable the plugin entry and start the Harness profile. A successful startup logs `dsh-lark: WebSocket connected`.
+8. Enable the plugin entry and start the Harness profile. A successful startup logs `dsh-feishu: WebSocket connected`.
 9. In a direct chat, send a message to the bot. In a group, mention the bot unless `requireMention` is intentionally disabled and the broader group-message permission has been approved.
 
 ## Troubleshooting

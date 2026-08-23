@@ -53,13 +53,13 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   const llm = ctx.get('llm') as LlmRuntime | undefined
   const attachments = ctx.get('attachments')
   if (agents === undefined || sessions === undefined || sessionPersistence === undefined || defaultModel === undefined || agentPresets === undefined || workspaceRegistry === undefined || settings === undefined || credentials === undefined || webServer === undefined) {
-    throw new Error('dsh-lark requires Harness agent, settings, credentials, workspace, and webServer services')
+    throw new Error('dsh-feishu requires Harness agent, settings, credentials, workspace, and webServer services')
   }
   if (commands === undefined || llm === undefined) {
-    throw new Error('dsh-lark requires commands and llm services for /model support')
+    throw new Error('dsh-feishu requires commands and llm services for /model support')
   }
   if (attachments === undefined) {
-    throw new Error('dsh-lark requires the attachments service for inbound image messages')
+    throw new Error('dsh-feishu requires the attachments service for inbound image messages')
   }
   // apiProxy is optional: when absent (Feishu-only deployments without the
   // web-app bundle), we simply skip the questions listener. The harness's own
@@ -67,7 +67,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   // only path in that case — the Feishu chat gets no card. We log the gap so
   // operators see why a deployment loses the option UI.
   if (apiProxy === undefined) {
-    ctx.logger('dsh-lark').warn('dsh-lark: apiProxy unavailable — ask_user_question cards will not render in Feishu')
+    ctx.logger('dsh-feishu').warn('dsh-feishu: apiProxy unavailable — ask_user_question cards will not render in Feishu')
   }
 
   const settingsScope = settings.register(
@@ -102,14 +102,14 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       apiProxy,
       channel: cardChannel,
       bridgeHolder,
-      logger: ctx.logger('dsh-lark'),
+      logger: ctx.logger('dsh-feishu'),
     })
     stopApprovals = approvalsHandle.stop
     return {
       pendingForSession: approvalsHandle.pendingForSession,
       findPending: approvalsHandle.findPending,
       async settle(view: PendingApprovalView, outcome: 'allowed-once' | 'rejected') {
-        await settleApprovalBySlash(apiProxy, view, outcome, ctx.logger('dsh-lark'))
+        await settleApprovalBySlash(apiProxy, view, outcome, ctx.logger('dsh-feishu'))
       },
     }
   }
@@ -124,7 +124,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   const cardChannel = {
     send: (to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<unknown> => {
       const ch = channelHolder.current
-      if (ch === undefined) return Promise.reject(new Error('dsh-lark: channel not connected'))
+      if (ch === undefined) return Promise.reject(new Error('dsh-feishu: channel not connected'))
       return ch.send(to, input, opts) as Promise<unknown>
     },
     onCardAction: (handler: (evt: CardActionEvent) => void | Promise<void>): (() => void) => {
@@ -192,7 +192,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       apiProxy,
       channel: cardChannel,
       bridgeHolder,
-      logger: ctx.logger('dsh-lark'),
+      logger: ctx.logger('dsh-feishu'),
     })
   }
   registerLarkCommands(
@@ -209,7 +209,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     () => {
       const last = bridgeHolder.lastChatMessage
       if (last === undefined) {
-        throw new Error('dsh-lark: chat coordinates missing for /model command — send a regular message first')
+        throw new Error('dsh-feishu: chat coordinates missing for /model command — send a regular message first')
       }
       return last
     },
@@ -226,7 +226,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   ctx.effect(() => () => {
     stopQuestions()
     stopApprovals()
-  }, 'dsh-lark: feishu questions + approvals listeners')
+  }, 'dsh-feishu: feishu questions + approvals listeners')
 
   let lastPrintedQrUrl: string | undefined
   const provisionManager = new ProvisionManager({
@@ -280,16 +280,16 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     kind: 'exact',
     path: SETTINGS_PATH,
     handler: (req, res) => handleSettingsRequest(req, res, api),
-  }), 'dsh-lark: settings page')
+  }), 'dsh-feishu: settings page')
   ctx.effect(() => webServer.register({
     kind: 'exact',
     path: PROVISION_PATH,
     handler: (req, res) => handleProvisionRequest(req, res, api),
-  }), 'dsh-lark: provision endpoint')
+  }), 'dsh-feishu: provision endpoint')
   ctx.effect(() => () => {
     provisionManager.dispose()
     return runtime.dispose()
-  }, 'dsh-lark: runtime')
+  }, 'dsh-feishu: runtime')
   await runtime.reconcile()
 }
 

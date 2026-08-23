@@ -207,7 +207,7 @@ Profile patch 是基础配置，Settings 页面保存的普通参数是覆盖层
 连接成功后，终端会出现：
 
 ```text
-dsh-lark: WebSocket connected
+dsh-feishu: WebSocket connected
 ```
 
 运行期间如果网络中断，官方 SDK 会尝试重新连接，并输出 `WebSocket reconnecting` 和 `WebSocket reconnected`。

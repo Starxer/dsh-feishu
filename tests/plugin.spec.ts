@@ -68,7 +68,7 @@ describe('startChannel', () => {
       appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
       groupAllowlist: [], dmAllowlist: [], workspace: '/work', errorMessage: 'safe error', reactEmoji: 'THUMBSUP',
     }, bridge, factory, logger)
-    expect(logger.info).toHaveBeenCalledWith('dsh-lark: WebSocket connected')
+    expect(logger.info).toHaveBeenCalledWith('dsh-feishu: WebSocket connected')
     expect(factory).toHaveBeenCalledWith(expect.objectContaining({ transport: 'websocket', policy: expect.objectContaining({ requireMention: true, dmMode: 'open' }) }))
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'p2p', content: 'hi' })
     expect(channel.addReaction).toHaveBeenCalledWith('om_1', 'THUMBSUP')
@@ -77,7 +77,7 @@ describe('startChannel', () => {
     await stop()
     expect(channel.disconnect).toHaveBeenCalledOnce()
     expect(bridge.dispose).toHaveBeenCalledOnce()
-    expect(logger.info).toHaveBeenCalledWith('dsh-lark: WebSocket disconnected')
+    expect(logger.info).toHaveBeenCalledWith('dsh-feishu: WebSocket disconnected')
   })
 
   it('skips the reaction when reactEmoji is empty', async () => {
@@ -104,7 +104,7 @@ describe('startChannel', () => {
       groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: 'THUMBSUP',
     }, bridge, () => channel as any, logger)
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'p2p', content: 'hi' })
-    expect(logger.warn).toHaveBeenCalledWith('dsh-lark: reaction failed: reaction denied')
+    expect(logger.warn).toHaveBeenCalledWith('dsh-feishu: reaction failed: reaction denied')
     expect(channel.send).toHaveBeenCalledWith('oc_1', { markdown: 'ok' }, { replyTo: 'om_1', replyInThread: false })
     await stop()
   })
@@ -115,7 +115,7 @@ describe('startChannel', () => {
     const terminal = { error: vi.fn() }
     await startChannel({ appId: 'id', appSecret: 'secret', domain: 'lark', requireMention: true, dmMode: 'open', groupAllowlist: [], dmAllowlist: [], workspace: '/work', errorMessage: 'safe error', reactEmoji: 'THUMBSUP' }, bridge, () => channel as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, terminal)
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'group', threadId: 'omt_1', content: 'hi' })
-    expect(terminal.error).toHaveBeenCalledWith('dsh-lark: message handling failed: secret stack')
+    expect(terminal.error).toHaveBeenCalledWith('dsh-feishu: message handling failed: secret stack')
     expect(channel.send).toHaveBeenCalledWith('oc_1', { text: 'safe error' }, { replyTo: 'om_1', replyInThread: true })
   })
 
@@ -143,8 +143,8 @@ describe('startChannel', () => {
       groupAllowlist: [], dmAllowlist: [], workspace: '/work', errorMessage: 'safe error', reactEmoji: 'THUMBSUP',
     }, bridge, () => channel as any, logger, terminal)).rejects.toThrow('authentication failed for secret')
 
-    expect(logger.error).toHaveBeenCalledWith('dsh-lark: WebSocket connection failed: authentication failed for [redacted]')
-    expect(terminal.error).toHaveBeenCalledWith('dsh-lark: WebSocket connection failed: authentication failed for [redacted]')
+    expect(logger.error).toHaveBeenCalledWith('dsh-feishu: WebSocket connection failed: authentication failed for [redacted]')
+    expect(terminal.error).toHaveBeenCalledWith('dsh-feishu: WebSocket connection failed: authentication failed for [redacted]')
     expect(bridge.dispose).toHaveBeenCalledOnce()
   })
 
@@ -190,7 +190,7 @@ describe('startChannel', () => {
     }, bridge, () => channel as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, terminal, slashCommand)
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'p2p', content: '/model' })
     expect(bridge.reply).not.toHaveBeenCalled()
-    expect(terminal.error).toHaveBeenCalledWith('dsh-lark: slash command failed: boom')
+    expect(terminal.error).toHaveBeenCalledWith('dsh-feishu: slash command failed: boom')
     expect(channel.send).toHaveBeenCalledWith('oc_1', { text: 'safe error' }, { replyTo: 'om_1', replyInThread: false })
   })
 
@@ -253,7 +253,7 @@ describe('startChannel', () => {
       messageId: 'om_4', chatId: 'oc_4', chatType: 'p2p', content: '',
       resources: [{ type: 'image', fileKey: 'img_fail' }],
     })
-    expect(terminal.error).toHaveBeenCalledWith('dsh-lark: image admission failed: storage full')
+    expect(terminal.error).toHaveBeenCalledWith('dsh-feishu: image admission failed: storage full')
     expect(bridge.reply).not.toHaveBeenCalled()
     expect(channel.send).toHaveBeenCalledWith('oc_4', { text: 'safe error' }, { replyTo: 'om_4', replyInThread: false })
   })

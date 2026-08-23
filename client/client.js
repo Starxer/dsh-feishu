@@ -1265,7 +1265,7 @@ function LarkSettingsSection({ t, loadModels }) {
 	}, []);
 	const loadSettings = react.useCallback(async () => {
 		try {
-			const response = await fetch("/dsh-lark/settings", {
+			const response = await fetch("/dsh-feishu/settings", {
 				headers: { accept: "application/json" },
 				cache: "no-store"
 			});
@@ -1298,7 +1298,7 @@ function LarkSettingsSection({ t, loadModels }) {
 		provisionPoll.current = setInterval(() => {
 			(async () => {
 				try {
-					const response = await fetch("/dsh-lark/provision", {
+					const response = await fetch("/dsh-feishu/provision", {
 						headers: { accept: "application/json" },
 						cache: "no-store"
 					});
@@ -1323,7 +1323,7 @@ function LarkSettingsSection({ t, loadModels }) {
 		setProvisionBusy(true);
 		setNotice("");
 		try {
-			const response = await fetch("/dsh-lark/provision", {
+			const response = await fetch("/dsh-feishu/provision", {
 				method: "POST",
 				headers: { accept: "application/json" }
 			});
@@ -1365,7 +1365,7 @@ function LarkSettingsSection({ t, loadModels }) {
 		]) body[key] = form[key].trim() === "" ? null : form[key].trim();
 		if (form.appSecret !== "") body.appSecret = form.appSecret;
 		try {
-			const response = await fetch("/dsh-lark/settings", {
+			const response = await fetch("/dsh-feishu/settings", {
 				method: "POST",
 				headers: {
 					accept: "application/json",
@@ -1387,7 +1387,7 @@ function LarkSettingsSection({ t, loadModels }) {
 		setBusy(true);
 		setNotice(t("removing"));
 		try {
-			const response = await fetch("/dsh-lark/settings", {
+			const response = await fetch("/dsh-feishu/settings", {
 				method: "DELETE",
 				headers: { accept: "application/json" }
 			});
@@ -1408,16 +1408,16 @@ function LarkSettingsSection({ t, loadModels }) {
 	const modelIsUnknown = form.model !== "" && modelCatalog !== null && providerGroup?.models.some((model) => model.id === form.model) !== true;
 	const useModelSelects = loadModels !== void 0 && !modelCatalogFailed;
 	return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
-		className: "dsh-lark-settings",
-		"aria-labelledby": "dsh-lark-title",
+		className: "dsh-feishu-settings",
+		"aria-labelledby": "dsh-feishu-title",
 		children: [
 			/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
-				className: "dsh-lark-header",
+				className: "dsh-feishu-header",
 				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h2", {
-					id: "dsh-lark-title",
+					id: "dsh-feishu-title",
 					children: t("title")
 				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", { children: t("subtitle") })] }), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					className: "dsh-lark-runtime",
+					className: "dsh-feishu-runtime",
 					"aria-label": t("runtimeStatus"),
 					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(__deepseek_ai_dsh_client_ui_primitives.StateDot, {
 						state: dotState,
@@ -1426,18 +1426,18 @@ function LarkSettingsSection({ t, loadModels }) {
 				})]
 			}),
 			payload === null && notice === "" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-				className: "dsh-lark-loading",
+				className: "dsh-feishu-loading",
 				children: t("loading")
 			}) : null,
 			payload !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("form", {
 				onSubmit: save,
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: "dsh-lark-card",
+						className: "dsh-feishu-card",
 						children: [
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h3", { children: t("application") }),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-								className: "dsh-lark-provision",
+								className: "dsh-feishu-provision",
 								children: [
 									/* @__PURE__ */ (0, react_jsx_runtime.jsx)(__deepseek_ai_dsh_client_ui_primitives.Button, {
 										variant: "outline",
@@ -1447,7 +1447,7 @@ function LarkSettingsSection({ t, loadModels }) {
 										children: provisionBusy ? t("provisionStarting") : t("scanToConfigure")
 									}),
 									provision?.phase === "waiting" && provision.qrUrl !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-										className: "dsh-lark-qr",
+										className: "dsh-feishu-qr",
 										children: [
 											/* @__PURE__ */ (0, react_jsx_runtime.jsx)(QRCodeSVG, {
 												value: provision.qrUrl,
@@ -1456,23 +1456,23 @@ function LarkSettingsSection({ t, loadModels }) {
 											}),
 											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", { children: t("scanHint") }),
 											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
-												className: "dsh-lark-qr-link",
+												className: "dsh-feishu-qr-link",
 												children: provision.qrUrl
 											})
 										]
 									}) : null,
 									provision?.phase === "configuring" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-										className: "dsh-lark-detail",
+										className: "dsh-feishu-detail",
 										children: t("provisioning")
 									}) : null,
 									provision?.phase === "error" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("p", {
-										className: "dsh-lark-detail dsh-lark-error",
+										className: "dsh-feishu-detail dsh-feishu-error",
 										children: [t("provisionFailed"), provision.message !== void 0 ? `: ${provision.message}` : ""]
 									}) : null
 								]
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-								className: "dsh-lark-grid",
+								className: "dsh-feishu-grid",
 								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t("appId") }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(__deepseek_ai_dsh_client_ui_primitives.Input, {
 									"aria-label": "appId",
 									value: form.appId,
@@ -1501,14 +1501,14 @@ function LarkSettingsSection({ t, loadModels }) {
 								placeholder: t("secretPlaceholder")
 							})] }),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-								className: "dsh-lark-credential",
+								className: "dsh-feishu-credential",
 								"aria-label": payload.credential.configured ? t("credentialConfigured") : t("credentialMissing"),
 								"data-state": payload.credential.configured ? "configured" : "missing",
 								children: [
 									/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-										className: "dsh-lark-credential-badge",
+										className: "dsh-feishu-credential-badge",
 										children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-											className: "dsh-lark-credential-dot",
+											className: "dsh-feishu-credential-dot",
 											"aria-hidden": "true"
 										}), payload.credential.configured ? t("credentialConfigured") : t("credentialMissing")]
 									}),
@@ -1519,11 +1519,11 @@ function LarkSettingsSection({ t, loadModels }) {
 						]
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: "dsh-lark-card",
+						className: "dsh-feishu-card",
 						children: [
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h3", { children: t("access") }),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
-								className: "dsh-lark-check",
+								className: "dsh-feishu-check",
 								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
 									type: "checkbox",
 									checked: form.requireMention,
@@ -1549,7 +1549,7 @@ function LarkSettingsSection({ t, loadModels }) {
 								]
 							})] }),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-								className: "dsh-lark-grid",
+								className: "dsh-feishu-grid",
 								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t("groupAllowlist") }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("textarea", {
 									value: form.groupAllowlist,
 									onChange: (event) => update("groupAllowlist", event.target.value),
@@ -1569,11 +1569,11 @@ function LarkSettingsSection({ t, loadModels }) {
 						]
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: "dsh-lark-card",
+						className: "dsh-feishu-card",
 						children: [
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h3", { children: t("agent") }),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-								className: "dsh-lark-grid",
+								className: "dsh-feishu-grid",
 								children: [
 									/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t("provider") }), useModelSelects ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("select", {
 										"aria-label": t("provider"),
@@ -1655,7 +1655,7 @@ function LarkSettingsSection({ t, loadModels }) {
 						]
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("footer", {
-						className: "dsh-lark-actions",
+						className: "dsh-feishu-actions",
 						children: [
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(__deepseek_ai_dsh_client_ui_primitives.Button, {
 								variant: "primary",
@@ -1678,7 +1678,7 @@ function LarkSettingsSection({ t, loadModels }) {
 						]
 					}),
 					payload.runtime.message !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-						className: "dsh-lark-detail",
+						className: "dsh-feishu-detail",
 						children: payload.runtime.message
 					}) : null
 				]
@@ -1690,21 +1690,21 @@ function LarkSettingsSection({ t, loadModels }) {
 //#endregion
 //#region src/client/styles.ts
 const CLIENT_CSS = `
-.dsh-lark-settings{max-width:880px;padding:8px 2px 36px;color:var(--text-primary,#16181d)}
-.dsh-lark-header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:20px}.dsh-lark-header h2{margin:0;font-size:22px}.dsh-lark-header p{margin:6px 0 0;color:var(--text-secondary,#586174)}
-.dsh-lark-runtime{display:flex;align-items:center;gap:8px;border:1px solid var(--border-subtle,#dfe3ea);border-radius:999px;padding:7px 12px;font-size:13px;font-weight:600;white-space:nowrap}
-.dsh-lark-card{display:grid;gap:16px;margin:0 0 14px;padding:20px;border:1px solid var(--border-subtle,#dfe3ea);border-radius:12px;background:var(--surface-primary,#fff)}.dsh-lark-card h3{margin:0;font-size:15px}
-.dsh-lark-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}.dsh-lark-card label{display:grid;gap:7px;font-size:13px;font-weight:600}.dsh-lark-card select,.dsh-lark-card textarea{box-sizing:border-box;width:100%;border:1px solid var(--border-default,#cbd1dc);border-radius:8px;background:var(--surface-primary,#fff);color:inherit;font:inherit;padding:9px 11px}.dsh-lark-card textarea{min-height:82px;resize:vertical}.dsh-lark-card select:focus-visible,.dsh-lark-card textarea:focus-visible{outline:2px solid var(--accent-primary,#3b72e8);outline-offset:2px}
-.dsh-lark-check{display:flex!important;align-items:center;gap:9px}.dsh-lark-check input{width:16px;height:16px}.dsh-lark-credential{display:flex;align-items:center;gap:9px;color:var(--text-secondary,#586174);font-size:12px}.dsh-lark-credential-badge{display:inline-flex;align-items:center;gap:7px;border:1px solid currentColor;border-radius:999px;padding:4px 9px;font-weight:700}.dsh-lark-credential[data-state=configured] .dsh-lark-credential-badge{color:var(--success-text,#137333);background:var(--success-surface,#e8f5e9)}.dsh-lark-credential[data-state=missing] .dsh-lark-credential-badge{color:var(--warning-text,#9a6700);background:var(--warning-surface,#fff4ce)}.dsh-lark-credential-dot{width:7px;height:7px;border-radius:50%;background:currentColor}.dsh-lark-credential code{padding:2px 6px;border-radius:5px;background:var(--surface-secondary,#f2f4f7)}
-.dsh-lark-actions{display:flex;align-items:center;gap:10px;min-height:36px}.dsh-lark-actions [role=status]{font-size:13px;color:var(--text-secondary,#586174)}.dsh-lark-detail,.dsh-lark-loading{color:var(--text-secondary,#586174);font-size:13px}
-.dsh-lark-provision{display:grid;gap:12px;align-items:start}.dsh-lark-provision>button{justify-self:start}.dsh-lark-qr{display:grid;gap:8px;justify-items:center;padding:14px;border:1px dashed var(--border-default,#cbd1dc);border-radius:10px;background:var(--surface-secondary,#f2f4f7)}.dsh-lark-qr svg{display:block}.dsh-lark-qr p{margin:0;color:var(--text-secondary,#586174);font-size:13px}.dsh-lark-qr-link{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--text-secondary,#586174)}.dsh-lark-error{color:var(--danger-text,#b3261e)}
-@media(max-width:680px){.dsh-lark-header{align-items:stretch;flex-direction:column}.dsh-lark-runtime{align-self:flex-start}.dsh-lark-grid{grid-template-columns:1fr}.dsh-lark-actions{align-items:stretch;flex-direction:column}.dsh-lark-actions button{width:100%}}
-@media(prefers-reduced-motion:reduce){.dsh-lark-settings *{scroll-behavior:auto!important;transition:none!important}}
+.dsh-feishu-settings{max-width:880px;padding:8px 2px 36px;color:var(--text-primary,#16181d)}
+.dsh-feishu-header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:20px}.dsh-feishu-header h2{margin:0;font-size:22px}.dsh-feishu-header p{margin:6px 0 0;color:var(--text-secondary,#586174)}
+.dsh-feishu-runtime{display:flex;align-items:center;gap:8px;border:1px solid var(--border-subtle,#dfe3ea);border-radius:999px;padding:7px 12px;font-size:13px;font-weight:600;white-space:nowrap}
+.dsh-feishu-card{display:grid;gap:16px;margin:0 0 14px;padding:20px;border:1px solid var(--border-subtle,#dfe3ea);border-radius:12px;background:var(--surface-primary,#fff)}.dsh-feishu-card h3{margin:0;font-size:15px}
+.dsh-feishu-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}.dsh-feishu-card label{display:grid;gap:7px;font-size:13px;font-weight:600}.dsh-feishu-card select,.dsh-feishu-card textarea{box-sizing:border-box;width:100%;border:1px solid var(--border-default,#cbd1dc);border-radius:8px;background:var(--surface-primary,#fff);color:inherit;font:inherit;padding:9px 11px}.dsh-feishu-card textarea{min-height:82px;resize:vertical}.dsh-feishu-card select:focus-visible,.dsh-feishu-card textarea:focus-visible{outline:2px solid var(--accent-primary,#3b72e8);outline-offset:2px}
+.dsh-feishu-check{display:flex!important;align-items:center;gap:9px}.dsh-feishu-check input{width:16px;height:16px}.dsh-feishu-credential{display:flex;align-items:center;gap:9px;color:var(--text-secondary,#586174);font-size:12px}.dsh-feishu-credential-badge{display:inline-flex;align-items:center;gap:7px;border:1px solid currentColor;border-radius:999px;padding:4px 9px;font-weight:700}.dsh-feishu-credential[data-state=configured] .dsh-feishu-credential-badge{color:var(--success-text,#137333);background:var(--success-surface,#e8f5e9)}.dsh-feishu-credential[data-state=missing] .dsh-feishu-credential-badge{color:var(--warning-text,#9a6700);background:var(--warning-surface,#fff4ce)}.dsh-feishu-credential-dot{width:7px;height:7px;border-radius:50%;background:currentColor}.dsh-feishu-credential code{padding:2px 6px;border-radius:5px;background:var(--surface-secondary,#f2f4f7)}
+.dsh-feishu-actions{display:flex;align-items:center;gap:10px;min-height:36px}.dsh-feishu-actions [role=status]{font-size:13px;color:var(--text-secondary,#586174)}.dsh-feishu-detail,.dsh-feishu-loading{color:var(--text-secondary,#586174);font-size:13px}
+.dsh-feishu-provision{display:grid;gap:12px;align-items:start}.dsh-feishu-provision>button{justify-self:start}.dsh-feishu-qr{display:grid;gap:8px;justify-items:center;padding:14px;border:1px dashed var(--border-default,#cbd1dc);border-radius:10px;background:var(--surface-secondary,#f2f4f7)}.dsh-feishu-qr svg{display:block}.dsh-feishu-qr p{margin:0;color:var(--text-secondary,#586174);font-size:13px}.dsh-feishu-qr-link{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--text-secondary,#586174)}.dsh-feishu-error{color:var(--danger-text,#b3261e)}
+@media(max-width:680px){.dsh-feishu-header{align-items:stretch;flex-direction:column}.dsh-feishu-runtime{align-self:flex-start}.dsh-feishu-grid{grid-template-columns:1fr}.dsh-feishu-actions{align-items:stretch;flex-direction:column}.dsh-feishu-actions button{width:100%}}
+@media(prefers-reduced-motion:reduce){.dsh-feishu-settings *{scroll-behavior:auto!important;transition:none!important}}
 `;
 
 //#endregion
 //#region src/client/index.ts
-const NS = "dsh-lark";
+const NS = "dsh-feishu";
 const dictionaries = {
 	zh: {
 		nav: "飞书与 Lark",
@@ -1807,21 +1807,21 @@ const dictionaries = {
 		removeFailed: "Remove failed"
 	}
 };
-const name = "dsh-lark";
+const name = "dsh-feishu";
 const inject = [
 	"slots",
 	"locale",
 	"connection"
 ];
 function apply(ctx) {
-	ctx.effect(() => ctx.locale.register(NS, dictionaries), "dsh-lark: client dictionaries");
+	ctx.effect(() => ctx.locale.register(NS, dictionaries), "dsh-feishu: client dictionaries");
 	ctx.effect(() => {
 		const style = document.createElement("style");
 		style.dataset.plugin = NS;
 		style.textContent = CLIENT_CSS;
 		document.head.appendChild(style);
 		return () => style.remove();
-	}, "dsh-lark: client styles");
+	}, "dsh-feishu: client styles");
 	const t = ctx.locale.bind(NS);
 	const loadModels = async () => {
 		const response = await ctx.connection.api.llm.models({});

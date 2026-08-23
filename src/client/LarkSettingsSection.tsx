@@ -118,7 +118,7 @@ export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps)
 
   const loadSettings = React.useCallback(async () => {
     try {
-      const response = await fetch('/dsh-lark/settings', { headers: { accept: 'application/json' }, cache: 'no-store' })
+      const response = await fetch('/dsh-feishu/settings', { headers: { accept: 'application/json' }, cache: 'no-store' })
       const value = await response.json() as SettingsPayload & { error?: string }
       if (!response.ok) throw new Error(value.error ?? t('loadFailed'))
       adopt(value)
@@ -152,7 +152,7 @@ export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps)
     provisionPoll.current = setInterval(() => {
       void (async () => {
         try {
-          const response = await fetch('/dsh-lark/provision', { headers: { accept: 'application/json' }, cache: 'no-store' })
+          const response = await fetch('/dsh-feishu/provision', { headers: { accept: 'application/json' }, cache: 'no-store' })
           const value = await response.json() as ProvisionState & { error?: string }
           if (!response.ok) throw new Error(value.error ?? t('provisionFailed'))
           setProvision(value)
@@ -171,7 +171,7 @@ export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps)
     setProvisionBusy(true)
     setNotice('')
     try {
-      const response = await fetch('/dsh-lark/provision', { method: 'POST', headers: { accept: 'application/json' } })
+      const response = await fetch('/dsh-feishu/provision', { method: 'POST', headers: { accept: 'application/json' } })
       const value = await response.json() as ProvisionState & { error?: string }
       if (!response.ok) throw new Error(value.error ?? t('provisionFailed'))
       setProvision(value)
@@ -201,7 +201,7 @@ export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps)
     }
     if (form.appSecret !== '') body.appSecret = form.appSecret
     try {
-      const response = await fetch('/dsh-lark/settings', {
+      const response = await fetch('/dsh-feishu/settings', {
         method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(body),
       })
       const value = await response.json() as SettingsPayload & { error?: string }
@@ -219,7 +219,7 @@ export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps)
     setBusy(true)
     setNotice(t('removing'))
     try {
-      const response = await fetch('/dsh-lark/settings', { method: 'DELETE', headers: { accept: 'application/json' } })
+      const response = await fetch('/dsh-feishu/settings', { method: 'DELETE', headers: { accept: 'application/json' } })
       const value = await response.json() as SettingsPayload & { error?: string }
       if (!response.ok) throw new Error(value.error ?? t('removeFailed'))
       adopt(value)
@@ -238,48 +238,48 @@ export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps)
   const modelIsUnknown = form.model !== '' && modelCatalog !== null && providerGroup?.models.some(model => model.id === form.model) !== true
   const useModelSelects = loadModels !== undefined && !modelCatalogFailed
 
-  return <section className="dsh-lark-settings" aria-labelledby="dsh-lark-title">
-    <header className="dsh-lark-header">
+  return <section className="dsh-feishu-settings" aria-labelledby="dsh-feishu-title">
+    <header className="dsh-feishu-header">
       <div>
-        <h2 id="dsh-lark-title">{t('title')}</h2>
+        <h2 id="dsh-feishu-title">{t('title')}</h2>
         <p>{t('subtitle')}</p>
       </div>
-      <div className="dsh-lark-runtime" aria-label={t('runtimeStatus')}>
+      <div className="dsh-feishu-runtime" aria-label={t('runtimeStatus')}>
         <StateDot state={dotState} size={8} />
         <span>{runtimeState}</span>
       </div>
     </header>
 
-    {payload === null && notice === '' ? <p className="dsh-lark-loading">{t('loading')}</p> : null}
+    {payload === null && notice === '' ? <p className="dsh-feishu-loading">{t('loading')}</p> : null}
     {payload !== null ? <form onSubmit={save}>
-      <div className="dsh-lark-card">
+      <div className="dsh-feishu-card">
         <h3>{t('application')}</h3>
-        <div className="dsh-lark-provision">
+        <div className="dsh-feishu-provision">
           <Button variant="outline" type="button" disabled={provisionBusy || provision?.phase === 'waiting' || provision?.phase === 'configuring'} onClick={startProvision}>
             {provisionBusy ? t('provisionStarting') : t('scanToConfigure')}
           </Button>
           {provision?.phase === 'waiting' && provision.qrUrl !== undefined ? (
-            <div className="dsh-lark-qr">
+            <div className="dsh-feishu-qr">
               <QRCodeSVG value={provision.qrUrl} size={220} marginSize={1} />
               <p>{t('scanHint')}</p>
-              <code className="dsh-lark-qr-link">{provision.qrUrl}</code>
+              <code className="dsh-feishu-qr-link">{provision.qrUrl}</code>
             </div>
           ) : null}
-          {provision?.phase === 'configuring' ? <p className="dsh-lark-detail">{t('provisioning')}</p> : null}
-          {provision?.phase === 'error' ? <p className="dsh-lark-detail dsh-lark-error">{t('provisionFailed')}{provision.message !== undefined ? `: ${provision.message}` : ''}</p> : null}
+          {provision?.phase === 'configuring' ? <p className="dsh-feishu-detail">{t('provisioning')}</p> : null}
+          {provision?.phase === 'error' ? <p className="dsh-feishu-detail dsh-feishu-error">{t('provisionFailed')}{provision.message !== undefined ? `: ${provision.message}` : ''}</p> : null}
         </div>
-        <div className="dsh-lark-grid">
+        <div className="dsh-feishu-grid">
           <label><span>{t('appId')}</span><Input aria-label="appId" value={form.appId} onChange={event => update('appId', event.target.value)} autoComplete="off" /></label>
           <label><span>{t('domain')}</span><select aria-label="domain" value={form.domain} onChange={event => update('domain', event.target.value as FormState['domain'])}><option value="feishu">Feishu</option><option value="lark">Lark</option></select></label>
         </div>
         <label><span>{t('appSecret')}</span><Input aria-label="appSecret" type="password" disabled={!payload.credential.writable} value={form.appSecret} onChange={event => update('appSecret', event.target.value)} autoComplete="new-password" placeholder={t('secretPlaceholder')} /></label>
         <div
-          className="dsh-lark-credential"
+          className="dsh-feishu-credential"
           aria-label={payload.credential.configured ? t('credentialConfigured') : t('credentialMissing')}
           data-state={payload.credential.configured ? 'configured' : 'missing'}
         >
-          <span className="dsh-lark-credential-badge">
-            <span className="dsh-lark-credential-dot" aria-hidden="true" />
+          <span className="dsh-feishu-credential-badge">
+            <span className="dsh-feishu-credential-dot" aria-hidden="true" />
             {payload.credential.configured ? t('credentialConfigured') : t('credentialMissing')}
           </span>
           {payload.credential.source !== undefined ? <code>{payload.credential.source}</code> : null}
@@ -287,20 +287,20 @@ export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps)
         </div>
       </div>
 
-      <div className="dsh-lark-card">
+      <div className="dsh-feishu-card">
         <h3>{t('access')}</h3>
-        <label className="dsh-lark-check"><input type="checkbox" checked={form.requireMention} onChange={event => update('requireMention', event.target.checked)} /><span>{t('requireMention')}</span></label>
+        <label className="dsh-feishu-check"><input type="checkbox" checked={form.requireMention} onChange={event => update('requireMention', event.target.checked)} /><span>{t('requireMention')}</span></label>
         <label><span>{t('dmMode')}</span><select value={form.dmMode} onChange={event => update('dmMode', event.target.value as FormState['dmMode'])}><option value="open">{t('open')}</option><option value="allowlist">{t('allowlist')}</option><option value="disabled">{t('disabled')}</option></select></label>
-        <div className="dsh-lark-grid">
+        <div className="dsh-feishu-grid">
           <label><span>{t('groupAllowlist')}</span><textarea value={form.groupAllowlist} onChange={event => update('groupAllowlist', event.target.value)} placeholder={t('onePerLine')} /></label>
           <label><span>{t('dmAllowlist')}</span><textarea value={form.dmAllowlist} onChange={event => update('dmAllowlist', event.target.value)} placeholder={t('onePerLine')} /></label>
         </div>
         <label><span>{t('reactEmoji')}</span><Input aria-label="reactEmoji" value={form.reactEmoji} onChange={event => update('reactEmoji', event.target.value)} placeholder={t('reactEmojiHint')} /></label>
       </div>
 
-      <div className="dsh-lark-card">
+      <div className="dsh-feishu-card">
         <h3>{t('agent')}</h3>
-        <div className="dsh-lark-grid">
+        <div className="dsh-feishu-grid">
           <label><span>{t('provider')}</span>{useModelSelects ? <select aria-label={t('provider')} disabled={modelCatalog === null} value={form.provider} onChange={event => setForm(current => ({ ...current, provider: event.target.value, model: '' }))}>
             <option value="">{modelCatalog === null ? t('modelCatalogLoading') : t('harnessDefault')}</option>
             {providerIsUnknown ? <option value={form.provider}>{form.provider} ({t('notInCatalog')})</option> : null}
@@ -317,12 +317,12 @@ export function LarkSettingsSection({ t, loadModels }: LarkSettingsSectionProps)
         <label><span>{t('errorMessage')}</span><textarea maxLength={500} value={form.errorMessage} onChange={event => update('errorMessage', event.target.value)} /></label>
       </div>
 
-      <footer className="dsh-lark-actions">
+      <footer className="dsh-feishu-actions">
         <Button variant="primary" type="submit" disabled={busy}>{busy ? t('saving') : t('save')}</Button>
         <Button variant="outline" type="button" disabled={busy || !payload.credential.configured || !payload.credential.writable} onClick={removeSecret}>{t('removeSecret')}</Button>
         <span role="status" aria-live="polite">{notice}</span>
       </footer>
-      {payload.runtime.message !== undefined ? <p className="dsh-lark-detail">{payload.runtime.message}</p> : null}
+      {payload.runtime.message !== undefined ? <p className="dsh-feishu-detail">{payload.runtime.message}</p> : null}
     </form> : null}
   </section>
 }

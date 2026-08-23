@@ -7,7 +7,7 @@ Feishu/Lark user
 Official Lark Channel (WebSocket, reconnect, dedup, policy, chat queue)
       │ NormalizedMessage
       ▼
-dsh-lark conversation adapter
+dsh-feishu conversation adapter
       │ chat/thread → opaque SessionId
       ▼
 Workspace selection + Agent Preset composition

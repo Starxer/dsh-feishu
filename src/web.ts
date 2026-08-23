@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-export const SETTINGS_PATH = '/dsh-lark/settings'
-export const PROVISION_PATH = '/dsh-lark/provision'
+export const SETTINGS_PATH = '/dsh-feishu/settings'
+export const PROVISION_PATH = '/dsh-feishu/provision'
 
 export interface SettingsApiLike {
   describe(): Promise<unknown>

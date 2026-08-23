@@ -55,12 +55,12 @@ async function readDownloadStream(raw: unknown): Promise<Buffer> {
   if (raw instanceof Uint8Array) return Buffer.from(raw)
   if (raw !== null && typeof raw === 'object' && typeof (raw as { getReadableStream?: () => unknown }).getReadableStream === 'function') {
     const stream = (raw as { getReadableStream: () => unknown }).getReadableStream()
-    if (!(stream instanceof Readable)) throw new Error('dsh-lark: unexpected stream type from messageResource.get')
+    if (!(stream instanceof Readable)) throw new Error('dsh-feishu: unexpected stream type from messageResource.get')
     const chunks: Buffer[] = []
     for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array))
     return Buffer.concat(chunks)
   }
-  throw new Error('dsh-lark: unsupported download response shape')
+  throw new Error('dsh-feishu: unsupported download response shape')
 }
 
 /**
@@ -82,9 +82,9 @@ async function admitImagesForMessage(
   for (const resource of resources) {
     const mediaType = pickImageMime(resource)
     if (mediaType === undefined || !accepted.includes(mediaType)) {
-      throw new Error(`dsh-lark: image type "${mediaType ?? 'unknown'}" is not accepted by the deployment`)
+      throw new Error(`dsh-feishu: image type "${mediaType ?? 'unknown'}" is not accepted by the deployment`)
     }
-    if (signal.aborted) throw new Error('dsh-lark: image admission aborted')
+    if (signal.aborted) throw new Error('dsh-feishu: image admission aborted')
     // `LarkChannel.downloadResource(fileKey, 'image')` resolves the wrong
     // endpoint (`im.v1.image.get`) which 400s for user-sent keys. The
     // `im.v1.messageResource.get` endpoint takes the message id plus the file
@@ -93,7 +93,7 @@ async function admitImagesForMessage(
       params: { type: 'image' },
       path: { message_id: message.messageId, file_key: resource.fileKey },
     })
-    if (signal.aborted) throw new Error('dsh-lark: image admission aborted')
+    if (signal.aborted) throw new Error('dsh-feishu: image admission aborted')
     const bytes = await readDownloadStream(raw)
     inputs.push({
       data: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
@@ -124,7 +124,7 @@ export async function startChannel(
     appSecret: config.appSecret,
     transport: 'websocket',
     domain: config.domain === 'lark' ? Domain.Lark : Domain.Feishu,
-    source: 'dsh-lark',
+    source: 'dsh-feishu',
     loggerLevel: LoggerLevel.info,
     handshakeTimeoutMs: 15_000,
     policy: {
@@ -148,7 +148,7 @@ export async function startChannel(
         try {
           await channel.addReaction(message.messageId, config.reactEmoji)
         } catch (error: unknown) {
-          logger.warn(`dsh-lark: reaction failed: ${error instanceof Error ? error.message : String(error)}`)
+          logger.warn(`dsh-feishu: reaction failed: ${error instanceof Error ? error.message : String(error)}`)
         }
       }
       // Slash commands bypass the agent loop entirely; the registered
@@ -165,12 +165,12 @@ export async function startChannel(
             return
           }
         } catch (error: unknown) {
-          logError(`dsh-lark: slash command failed: ${error instanceof Error ? error.message : String(error)}`)
+          logError(`dsh-feishu: slash command failed: ${error instanceof Error ? error.message : String(error)}`)
           await channel.send(message.chatId, { text: config.errorMessage }, {
             replyTo: message.messageId,
             replyInThread,
           }).catch((sendError: unknown) => {
-            logError(`dsh-lark: fallback reply failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`)
+            logError(`dsh-feishu: fallback reply failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`)
           })
           return
         }
@@ -197,7 +197,7 @@ export async function startChannel(
           const imageBlocks = await admitImagesForMessage(channel, message, attachments, new AbortController().signal)
           inboundMessage = { ...inboundMessage, imageBlocks }
         } catch (error: unknown) {
-          logError(`dsh-lark: image admission failed: ${error instanceof Error ? error.message : String(error)}`)
+          logError(`dsh-feishu: image admission failed: ${error instanceof Error ? error.message : String(error)}`)
           await channel.send(message.chatId, { text: config.errorMessage }, {
             replyTo: message.messageId,
             replyInThread,
@@ -212,30 +212,30 @@ export async function startChannel(
           replyInThread,
         })
       } catch (error: unknown) {
-        logError(`dsh-lark: message handling failed: ${error instanceof Error ? error.message : String(error)}`)
+        logError(`dsh-feishu: message handling failed: ${error instanceof Error ? error.message : String(error)}`)
         await channel.send(message.chatId, { text: config.errorMessage }, {
           replyTo: message.messageId,
           replyInThread,
         }).catch((sendError: unknown) => {
-          logError(`dsh-lark: fallback reply failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`)
+          logError(`dsh-feishu: fallback reply failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`)
         })
       }
     }),
-    channel.on('reconnecting', () => { logger.warn('dsh-lark: WebSocket reconnecting') }),
-    channel.on('reconnected', () => { logger.info('dsh-lark: WebSocket reconnected') }),
-    channel.on('error', (error) => { logError(`dsh-lark: channel error: ${String(error)}`) }),
+    channel.on('reconnecting', () => { logger.warn('dsh-feishu: WebSocket reconnecting') }),
+    channel.on('reconnected', () => { logger.info('dsh-feishu: WebSocket reconnected') }),
+    channel.on('error', (error) => { logError(`dsh-feishu: channel error: ${String(error)}`) }),
   ]
   try {
     await channel.connect()
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     const redacted = config.appSecret === '' ? detail : detail.split(config.appSecret).join('[redacted]')
-    logError(`dsh-lark: WebSocket connection failed: ${redacted}`)
+    logError(`dsh-feishu: WebSocket connection failed: ${redacted}`)
     for (const unsubscribe of unsubscribers) unsubscribe()
     await bridge.dispose()
     throw error
   }
-  logger.info('dsh-lark: WebSocket connected')
+  logger.info('dsh-feishu: WebSocket connected')
 
   return {
     channel,
@@ -243,7 +243,7 @@ export async function startChannel(
       for (const unsubscribe of unsubscribers) unsubscribe()
       try {
         await channel.disconnect()
-        logger.info('dsh-lark: WebSocket disconnected')
+        logger.info('dsh-feishu: WebSocket disconnected')
       } finally {
         await bridge.dispose()
       }

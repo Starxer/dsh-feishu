@@ -37,9 +37,9 @@
 
 ### 命名与仓库迁移
 
-- GitHub 仓库：`Starxer/dsh-lark`（fork）→ `Starxer/dsh-feishu`（独立仓库）
+- GitHub 仓库：`Starxer/dsh-feishu`（fork）→ `Starxer/dsh-feishu`（独立仓库）
 - npm 包名：`@starxer/ds-feishu` → `@starxer/dsh-feishu`
-- 本地目录保留 `workspace/dsh-lark`（不改名，避免影响 `~/.dsh/profiles/web/package.json` 的 pnpm link 路径）
+- 本地目录保留 `workspace/dsh-feishu`（不改名，避免影响 `~/.dsh/profiles/web/package.json` 的 pnpm link 路径）
 - 与上游分叉：移除 `/compact` 命令与上游设计哲学冲突，无法反向合并回 upstream
 
 ### Bug 修复

@@ -114,10 +114,10 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
     try {
       const receipt = await apiProxy.respond(response)
       if (!receipt.accepted) {
-        logger.warn(`dsh-lark: question response rejected by apiproxy: ${receipt.reason}`)
+        logger.warn(`dsh-feishu: question response rejected by apiproxy: ${receipt.reason}`)
       }
     } catch (error: unknown) {
-      logger.warn(`dsh-lark: failed to deliver question answer to apiproxy: ${error instanceof Error ? error.message : String(error)}`)
+      logger.warn(`dsh-feishu: failed to deliver question answer to apiproxy: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -169,7 +169,7 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
       }
     } catch (error: unknown) {
       if (controller.signal.aborted) return
-      logger.warn(`dsh-lark: question stream interrupted: ${error instanceof Error ? error.message : String(error)}`)
+      logger.warn(`dsh-feishu: question stream interrupted: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
   void iterate()

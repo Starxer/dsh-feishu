@@ -2,7 +2,7 @@ import { createElement as h } from 'react'
 import { LarkSettingsSection, type ModelCatalog } from './LarkSettingsSection.tsx'
 import { CLIENT_CSS } from './styles.ts'
 
-const NS = 'dsh-lark'
+const NS = 'dsh-feishu'
 const dictionaries = {
   zh: {
     nav: '飞书与 Lark', title: '飞书与 Lark', subtitle: '配置消息渠道，保存后无需重启 Harness', runtimeStatus: '运行状态', loading: '正在读取配置......',
@@ -44,18 +44,18 @@ interface ClientContext {
   }
 }
 
-export const name = 'dsh-lark'
+export const name = 'dsh-feishu'
 export const inject = ['slots', 'locale', 'connection']
 
 export function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.locale.register(NS, dictionaries), 'dsh-lark: client dictionaries')
+  ctx.effect(() => ctx.locale.register(NS, dictionaries), 'dsh-feishu: client dictionaries')
   ctx.effect(() => {
     const style = document.createElement('style')
     style.dataset.plugin = NS
     style.textContent = CLIENT_CSS
     document.head.appendChild(style)
     return () => style.remove()
-  }, 'dsh-lark: client styles')
+  }, 'dsh-feishu: client styles')
   const t = ctx.locale.bind(NS)
   const loadModels = async (): Promise<ModelCatalog> => {
     const response = await ctx.connection.api.llm.models({})

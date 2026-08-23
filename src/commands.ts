@@ -244,7 +244,7 @@ export function registerLarkCommands(
       description: t.approvalsDescription,
       handler: invocation => handleListApprovalsCommand(invocation, approvals, t),
     })
-  }, 'dsh-lark: /model /new /thread /help /approve /deny /approvals commands')
+  }, 'dsh-feishu: /model /new /thread /help /approve /deny /approvals commands')
 }
 
 async function handleModelCommand(

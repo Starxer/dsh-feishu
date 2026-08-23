@@ -102,7 +102,7 @@ export class HarnessConversationService {
     if (!hasText && !hasImages) {
       // An inbound message must carry either text or at least one image; the
       // channel layer filters empties out, so this is defensive.
-      throw new Error('dsh-lark: cannot submit an empty user turn')
+      throw new Error('dsh-feishu: cannot submit an empty user turn')
     }
     // Tag every Feishu user turn with a leading `[Feishu] ` marker so the
     // model and any later session-log reader can tell the message originated
@@ -366,7 +366,7 @@ export class HarnessConversationService {
     if (liveAgent !== undefined) {
       // Reuse the live agent. The original setup path only ran `installModelSelection`
       // when we created this session; a restart that loses the bridge's `selections`
-      // cache leaves the live agent with no dsh-lark-side ref to mutate. Re-attach a
+      // cache leaves the live agent with no dsh-feishu-side ref to mutate. Re-attach a
       // fresh ref to the live agent's ctx so subsequent `/model` commands can flip
       // `ref.current` and have the next `system-prompt/assemble` pick it up.
       const existing = this.selections.get(sessionId)

@@ -58,7 +58,7 @@ export interface ProvisionLogger {
  */
 export async function provisionApp(options: ProvisionOptions): Promise<ProvisionResult> {
   const registered = await registerApp({
-    source: options.source ?? 'dsh-lark-scan',
+    source: options.source ?? 'dsh-feishu-scan',
     signal: options.signal,
     appPreset: {
       name: 'DSH 助手',
@@ -88,7 +88,7 @@ export async function enableWebsocketLongConnection(appId: string, appSecret: st
     appId,
     appSecret,
     domain: domain === 'lark' ? Domain.Lark : Domain.Feishu,
-    source: 'dsh-lark-scan',
+    source: 'dsh-feishu-scan',
   })
   const response = await client.application.v7.applicationConfig.patch({
     data: {

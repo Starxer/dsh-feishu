@@ -129,10 +129,10 @@ export function startFeishuApprovals(deps: FeishuApprovalsDeps): {
     try {
       const receipt = await apiProxy.respond(response)
       if (!receipt.accepted) {
-        logger.warn(`dsh-lark: approval response rejected by apiproxy: ${receipt.reason}`)
+        logger.warn(`dsh-feishu: approval response rejected by apiproxy: ${receipt.reason}`)
       }
     } catch (error: unknown) {
-      logger.warn(`dsh-lark: failed to deliver approval answer: ${error instanceof Error ? error.message : String(error)}`)
+      logger.warn(`dsh-feishu: failed to deliver approval answer: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -196,12 +196,12 @@ export function startFeishuApprovals(deps: FeishuApprovalsDeps): {
           // Sending failed; abandon so the agent isn't blocked on a user
           // who never sees the prompt.
           pending.delete(entry.rpcId)
-          logger.warn(`dsh-lark: approval card send failed: ${error instanceof Error ? error.message : String(error)}`)
+          logger.warn(`dsh-feishu: approval card send failed: ${error instanceof Error ? error.message : String(error)}`)
         }
       }
     } catch (error: unknown) {
       if (controller.signal.aborted) return
-      logger.warn(`dsh-lark: approval stream interrupted: ${error instanceof Error ? error.message : String(error)}`)
+      logger.warn(`dsh-feishu: approval stream interrupted: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
   void iterate()
@@ -331,9 +331,9 @@ export async function settleApprovalBySlash(
   try {
     const receipt = await apiProxy.respond(response)
     if (!receipt.accepted) {
-      logger.warn(`dsh-lark: ${outcome} response rejected by apiproxy: ${receipt.reason}`)
+      logger.warn(`dsh-feishu: ${outcome} response rejected by apiproxy: ${receipt.reason}`)
     }
   } catch (error: unknown) {
-    logger.warn(`dsh-lark: failed to deliver ${outcome}: ${error instanceof Error ? error.message : String(error)}`)
+    logger.warn(`dsh-feishu: failed to deliver ${outcome}: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
