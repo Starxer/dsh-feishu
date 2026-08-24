@@ -236,7 +236,9 @@ export async function startChannel(
             const meta = await replyCardMeta?.({ chatId, chatType, ...(threadId !== undefined ? { threadId } : {}) })
             // Cards don't support tables or headings in markdown; fall back
             // to a plain text message when the reply contains them.
-            if (needsPlainTextFallback(text)) {
+            const fallback = needsPlainTextFallback(text)
+            logReplyDiagnostic(text, fallback)
+            if (fallback) {
               const footer = buildFooterText(meta)
               const plainText = footer !== '' ? `${text}\n\n---\n${footer}` : text
               await channel.send(chatId, { text: plainText }, {
@@ -313,6 +315,12 @@ function needsPlainTextFallback(text: string): boolean {
     if (/^#{1,6}\s/.test(trimmed)) return true
   }
   return false
+}
+
+// Diagnostic: log the first 200 chars of reply text and fallback decision
+function logReplyDiagnostic(text: string, fallback: boolean): void {
+  const preview = text.slice(0, 200).replace(/\n/g, '\\n')
+  console.log(`dsh-feishu: reply preview="${preview}" fallback=${fallback}`)
 }
 
 /** Build a one-line footer string for plain-text fallback messages. */
