@@ -101,14 +101,30 @@
 - **修复**：将 `lark_md` + `div` 改为 `{ tag: 'markdown', content }`（同 reply card 的做法）。涉及文件：`feishu-toolcalls.ts`（4 处）、`feishu-todos.ts`（2 处）、`feishu-questions.ts`（3 处）、`feishu-approvals.ts`（2 处）。`channel.ts:305` 的 note 区域保持 `lark_md`（note 只支持 lark_md）。
 - **验收**：tool call 卡片中的代码块、标题、列表正确渲染。
 
-## 13. Agent 运行中即时执行纯查询命令 —— `待实现`
+## 13. 卡片 Markdown 渲染不稳定 —— `待解决`
+
+- **问题**：飞书 interactive card 的 `{ tag: 'markdown', content }` 组件对不同 Markdown 语法的渲染支持不一致。
+- **实测结果**：
+  - **列表**（`- item` / `1. item`）：✅ 稳定渲染
+  - **标题**（`# H1` / `## H2`）：❌ 不稳定，有时渲染有时不渲染
+  - **表格**（`| col | col |`）：❌ 几乎不能正常渲染
+- **对比**：飞书**普通消息**（非卡片）的表格完全可以正常渲染。说明是卡片 markdown 组件的限制，不是飞书整体的 markdown 支持问题。
+- **可能原因**：飞书卡片的 markdown 组件是 [lark_md](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/card-components/content-components/rich-text) 的增强版，但对复杂语法（标题、表格）的支持仍不完整，与普通消息的 markdown 渲染引擎不同。
+- **影响范围**：所有使用 `{ tag: 'markdown', content }` 的卡片——reply card、tool call card、todo card、streaming card。
+- **可能的缓解方案**：
+  - 表格：改用 `div` + `column_set` 布局组件模拟表格（手动拼 JSON，不依赖 markdown 语法）
+  - 标题：改用 `div` + `lark_md` 的 `**粗体**` 模拟标题样式
+  - 或者：对复杂内容用普通消息（`{ text }`）而非卡片发送，但会失去卡片的 header/footer/样式
+- **验收**：agent 回复中的表格和标题在飞书侧正确展示（可用降级方案）。
+
+## 14. Agent 运行中即时执行纯查询命令 —— `待实现`
 
 - **问题**：`/status`、`/help`、`/approvals` 等命令不需要 LLM 响应、不改变任何设置，但当前实现需要 `await agent.whenIdle()` 后才能处理。Agent 忙时用户发 `/status` 会被排队，等到当前 turn 结束才响应。
 - **现状分析**：飞书 SDK 的 `chatQueue` 按 chat 串行化消息投递（`src/channel.ts:153`），`on('message')` handler 内部是 `await slashCommand(message)`。即使 slash command 本身很快返回，它也要等前一条消息（agent turn）的 handler 完成后才被调用。
 - **解决方案**：在 `channel.ts` 的 `on('message')` handler 中，先检测是否为纯查询命令（`/status` `/help` `/approvals`），如果是则**立即处理并返回**，不进入 `bridge.reply()` 的 await 链。需要将命令分类为「需要 agent」和「不需要 agent」两类。
 - **验收**：Agent 忙碌时发 `/status` 立即返回结果，不等待当前 turn 结束。
 
-## 14. DSH Agent 消息队列机制 —— `已完成调研` ✅
+## 15. DSH Agent 消息队列机制 —— `已完成调研` ✅
 
 - **调研结论**（已确认，记录备查）：
   - **两层队列**：(1) Lark SDK 的 `chatQueue`（per-chat 串行化投递）；(2) DSH Agent 的 `Inbox`（per-agent 应用层队列）。
@@ -118,7 +134,7 @@
   - **`chatQueue` 行为**：Lark SDK 级别的 per-chat 串行化。同一 chat 的消息按序投递到 `on('message')` handler，不同 chat 并行。防止同一 chat 内的消息竞争。
   - **关键结论**：消息不会丢失。Agent 忙时新消息进入 Inbox 队列，当前 turn 完成后自动处理。但飞书侧用户需要等当前 turn 完成才能看到响应。
 
-## 15. 权限系统接入飞书命令 —— `待实现`
+## 16. 权限系统接入飞书命令 —— `待实现`
 
 - **目标**：将 DSH WebUI 的权限设定功能接入飞书，对齐 WebUI 的 permission chip 和 `/permission` 命令。
 - **DSH 权限系统**：
@@ -142,13 +158,14 @@
 
 1. ~~**#1 卡片化 + footer**~~ ✅ + ~~**#4 `/status`**~~ ✅ —— 本轮核心，纯插件层收尾，无 DSH 改动，立即提升飞书体验。
 2. **#12 tool call markdown 修复** —— 简单修复，改 `lark_md` → `markdown`，立即改善可读性。
-3. **#11 非流式中间消息** —— 需要诊断 `enabled()` + 事件流，可能涉及 settings 持久化。
-4. **#13 纯查询命令即时返回** —— 改 channel handler 逻辑，Agent 忙时 `/status` 不排队。
-5. **#15 权限系统接入** —— 新增 `/permission` `/sandbox` 命令，需调研 DSH 权限 API。
-6. **#2 `/new` 带参数** + **#3 目录候选补全** —— 配合 #1 的 footer，让用户能把会话正确落到目标 workspace/preset。
-7. **#9 流式输出 → CardKit 迁移** —— 解决 5 QPS 瓶颈，需调研 CardKit API + 权限。
-8. **#8 文档一致性** —— 顺手清理。
-9. **#7 多 thread 话题导航** —— 工作量更大，底层已在。
+3. **#13 卡片 Markdown 渲染不稳定** —— 表格和标题渲染问题，可能需要降级方案。
+4. **#11 非流式中间消息** —— 需要诊断 `enabled()` + 事件流，可能涉及 settings 持久化。
+5. **#14 纯查询命令即时返回** —— 改 channel handler 逻辑，Agent 忙时 `/status` 不排队。
+6. **#16 权限系统接入** —— 新增 `/permission` `/sandbox` 命令，需调研 DSH 权限 API。
+7. **#2 `/new` 带参数** + **#3 目录候选补全** —— 配合 #1 的 footer，让用户能把会话正确落到目标 workspace/preset。
+8. **#9 流式输出 → CardKit 迁移** —— 解决 5 QPS 瓶颈，需调研 CardKit API + 权限。
+9. **#8 文档一致性** —— 顺手清理。
+10. **#7 多 thread 话题导航** —— 工作量更大，底层已在。
 
 > 每完成一项，更新本清单状态 + 同步更新 AGENTS.md 的「与 DSH Web UI 功能对齐」表。
 
