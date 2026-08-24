@@ -256,6 +256,6 @@ function renderQuestionCard(
       title: { tag: 'plain_text', content: question.header ?? 'Question' },
       template: options.length > 0 ? 'blue' : 'grey',
     },
-    body: { elements: body },
+    elements: body,
   }
 }

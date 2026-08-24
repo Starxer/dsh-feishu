@@ -4,6 +4,54 @@
 
 本仓库基于 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark) HEAD（`ee639df`）独立维护，**不再跟踪 upstream 同步**。所有改动仅修改本仓库文件，**未对 DSH 源码（`DSH 源码/packages/*`、`vendor/*`）做任何改动**。上游 LICENSE（MIT, Copyright (c) 2026 sugarforever）保留以满足 MIT modified-work 声明。
 
+### 工具调用展示（`src/feishu-toolcalls.ts`）
+
+- 订阅 apiproxy mux 的 `tool/call` + `tool/result` 事件，在飞书侧展示模型的工具调用过程。
+- 调用开始时发送蓝色卡片（工具名 + 参数摘要），调用结束时发送绿色/红色卡片（结果或错误 + 耗时）。
+- 200ms 批量 debounce，避免高频工具调用刷屏。
+
+### Todo 展示（`src/feishu-todos.ts`）
+
+- 订阅 apiproxy mux 的 `todo/write` 事件，展示 agent 的任务进度。
+- 绿色卡片，含进度条（完成数/总数）和状态图标（⬜ 待办 / 🔄 进行中 / ✅ 完成）。
+- 500ms debounce。
+
+### 回复卡片消息（`src/channel.ts`）
+
+- 每轮最终结果渲染为飞书 interactive card（蓝色 header "Assistant"），替代原来的纯文本消息。
+- 使用 `{ tag: 'markdown', content: ... }` 组件（非 `div + lark_md`），完整支持标题、代码块、有序/无序列表等 markdown 语法。
+- 底部 note footer 自动注入当前 session 的 workspace + agent preset 信息。
+- 空回复显示 `(empty response)` 占位。
+
+### Session 映射持久化（`src/harness.ts`）
+
+- `/new` 和 `/thread` 的 chat→session 映射现在持久化到 `~/.dsh/lark-session-map.json`，dsh 重启后自动恢复。
+- 之前映射仅存内存，重启后 `/new` 创建的新 session 会丢失，回退到确定性 hash（旧 session）。
+
+### 卡片结构修复
+
+- **所有飞书卡片**（回复、工具调用、todo、审批、问题）统一使用顶层 `elements` 数组，移除错误的 `body: { elements }` 嵌套。飞书解析器不识别 `body.elements`，导致卡片显示为空。
+- `feishu-approvals.ts` 审批卡片同步修复。
+
+### `harness.ts` — persisted session 跳过 `attachSession`
+
+- 已持久化的 session（在 `sessionPersistence.list()` 中）resume 时跳过 `workspace.attachSession()`。
+- 之前 `attachSession` 会因 session 的 `cwd` 与当前 workspace 不匹配而失败（例如旧 session 在父 workspace 下创建），导致整个 `bridge.reply()` 崩溃。
+
+### `conversation.ts` — `summarizeTurn` 健壮性
+
+- turn 成功完成但只有 tool calls 没有文本时，返回 `{ text: '(no text response)', ok: true }` 而非失败。
+- `event.data?.message` 和 `event.data?.reason` 增加 null safety。
+
+### 定位与范围（2026-08-23）
+
+- **定位变更**：从"飞书 channel 插件"改为 **"把 DSH 的原生特性接入飞书，而非再造一个 agent 平台/助手"**（详见 AGENTS.md「定位」）。不做 openclaw / hermes 式 24h 常驻助手；DSH 才是 agent 本体，本插件只做"DSH 原生特性 → 飞书聊天"这层接入。
+- **本轮需求决策**（对应 TODO.md「本轮需求决策」）：
+  - workspace / agent preset **只在创建新 session 时设定**（`/new --workspace / --preset`，persisted），不运行时热切，全部按 WebUI 原生行为。
+  - **每轮最终结果渲染为飞书卡片**，底部注明当前 session 的 workspace + preset；该 footer **不调用 LLM**，插件从 session meta 自动注入。
+  - 工作区选择用 **cd 式候选补全**（列子目录候选供选，只目录不文件）。
+  - 新增 **`/status`** 命令，展示 WebUI 的 session 全部状态。
+
 ### `ask_user_question` 飞书卡片支持
 
 之前模型调 `ask_user_question` 时，问题只在 WebUI 弹出，飞书聊天完全看不到，体验像是“卡住了”。本次让飞书侧也能看见选项并选择：

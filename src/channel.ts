@@ -106,6 +106,12 @@ async function admitImagesForMessage(
   return refs
 }
 
+/** Metadata for the reply card footer. */
+export interface ReplyCardMeta {
+  workspace?: string
+  agentPreset?: string
+}
+
 export async function startChannel(
   config: Omit<RuntimeConfig, 'appSecretRef'>,
   bridge: Pick<HarnessConversationService, 'reply' | 'dispose'>,
@@ -114,6 +120,7 @@ export async function startChannel(
   terminalLogger?: Pick<PluginLogger, 'error'>,
   slashCommand?: SlashCommandHandler,
   attachments?: AttachmentLike,
+  replyCardMeta?: () => ReplyCardMeta,
 ): Promise<{ stop: () => Promise<void>; channel: LarkChannel }> {
   const logError = (message: string) => {
     logger.error(message)
@@ -207,7 +214,9 @@ export async function startChannel(
       }
       try {
         const text = await bridge.reply(inboundMessage)
-        await channel.send(message.chatId, { markdown: text }, {
+        const meta = replyCardMeta?.()
+        const card = renderReplyCard(text, meta)
+        await channel.send(message.chatId, { card }, {
           replyTo: message.messageId,
           replyInThread,
         })
@@ -248,5 +257,49 @@ export async function startChannel(
         await bridge.dispose()
       }
     },
+  }
+}
+
+/**
+ * Render an assistant reply as a Feishu interactive card with optional
+ * workspace/preset footer metadata. The card uses markdown for the main
+ * content and a note block at the bottom for session context.
+ */
+function renderReplyCard(text: string, meta?: ReplyCardMeta): object {
+  // Ensure content is never empty - use a placeholder if needed
+  const displayText = text.trim() === '' ? '(empty response)' : text
+  const elements: object[] = [
+    {
+      tag: 'markdown',
+      content: displayText,
+    },
+  ]
+  // Add footer with workspace/preset info when available
+  const footerParts: string[] = []
+  if (meta?.workspace !== undefined && meta.workspace !== '') {
+    footerParts.push(`📂 ${meta.workspace}`)
+  }
+  if (meta?.agentPreset !== undefined && meta.agentPreset !== '') {
+    footerParts.push(`🤖 ${meta.agentPreset}`)
+  }
+  if (footerParts.length > 0) {
+    elements.push({ tag: 'hr' })
+    elements.push({
+      tag: 'note',
+      elements: [
+        {
+          tag: 'lark_md',
+          content: footerParts.join(' · '),
+        },
+      ],
+    })
+  }
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: 'Assistant' },
+      template: 'blue',
+    },
+    elements,
   }
 }

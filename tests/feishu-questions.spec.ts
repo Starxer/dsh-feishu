@@ -16,7 +16,7 @@ const QUESTION: AskUserQuestionItem = {
 
 interface Harness {
   respondCalls: Array<{ rpcId: string; questionId: string; selected: string[]; custom?: string }>
-  sentCards: Array<{ to: string; card: { header?: { title?: { content?: string } }; body?: { elements?: unknown[] } } }>
+  sentCards: Array<{ to: string; card: { header?: { title?: { content?: string } }; elements?: unknown[] } }>
   cardActionHandler: ((evt: unknown) => void | Promise<void>) | undefined
   resolveChatCalls: string[]
 }
@@ -88,7 +88,7 @@ interface ChannelHandle {
 function buildChannel(harness: Harness): ChannelHandle {
   const cardUnsubFns: Array<() => void> = []
   const channel = {
-    send: vi.fn(async (to: string, input: { card: { header?: { title?: { content?: string } }; body?: { elements?: unknown[] } } }) => {
+    send: vi.fn(async (to: string, input: { card: { header?: { title?: { content?: string } }; elements?: unknown[] } }) => {
       harness.sentCards.push({ to, card: input.card })
     }),
     onCardAction: (handler: (evt: unknown) => void | Promise<void>) => {
@@ -131,7 +131,7 @@ describe('startFeishuQuestions', () => {
       await new Promise(resolve => setImmediate(resolve))
       expect(harness.sentCards).toHaveLength(1)
       expect(harness.sentCards[0]!.to).toBe('oc_chat')
-      expect(harness.sentCards[0]!.card.body?.elements).toBeDefined()
+      expect(harness.sentCards[0]!.card.elements).toBeDefined()
       await harness.cardActionHandler!({
         action: {
           tag: 'button',

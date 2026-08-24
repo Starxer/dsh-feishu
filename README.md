@@ -2,11 +2,11 @@
 
 > **历史来源**：本插件基于 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark)（commit `ee639df`，fork 时上游 HEAD）独立维护。**已与上游分叉**，不再跟踪 upstream 同步。本仓库保留上游 LICENSE（`Copyright (c) 2026 sugarforever`，MIT）以满足 MIT 协议 modified-work 声明要求。
 >
-> **本仓库改动记录见 [CHANGELOG.md](./CHANGELOG.md) 的「Unreleased」段**。当前主要差异：DSH `0.1.0-rc.7` 适配（移除 `/compact` 命令避免与 DSH 自带 `command-compact` 冲突、`inject` 清理）、provision 流程改进。
->
+> **本仓库改动记录见 [CHANGELOG.md](./CHANGELOG.md) 的「Unreleased」段**。当前方向与主要差异见 [AGENTS.md](./AGENTS.md)「定位」：**把 DSH 的原生特性接入飞书，而非再造一个 agent 平台/助手**；workspace / agent preset 只在创建新 session 时设定（`/new --workspace / --preset`），每轮最终结果渲染成飞书卡片（底部标注 workspace + preset，不调 LLM），工作区选择用目录候选补全，新增 `/status`。`/compact` 已移除（与 DSH 自带 `command-compact` 冲突）。
+
 > **dsh 配置路径**（非本仓库）：`~/.dsh/profiles/web/cordis.patch.yml`（已设置 `lark-channel` 启用 + 配合 `compaction-basic`/`command-compact` 拉回 host plane）。
 
-`@starxer/dsh-feishu` 是一个 DeepSeek Harness Host 插件。安装后，用户可以直接从飞书或 Lark 与 Harness Agent 对话，并继续使用 Harness 中配置的模型、工具、系统提示和会话存储。
+`@starxer/dsh-feishu` 是 DeepSeek Harness Host 插件，把 DSH 的 agent 能力接入飞书/Lark 聊天。安装后，用户直接从飞书或 Lark 与 Harness Agent 对话，并继续使用 Harness 中配置的模型、工具、系统提示、工作区和会话存储。它只在 DSH 之上做"飞书聊天端口"这一层，DSH 本身才是 agent 本体。
 
 插件使用飞书官方 `@larksuiteoapi/node-sdk` 的 Channel API，通过 WebSocket 长连接接收消息，不需要公网服务器、域名或 Webhook 回调地址。官方 SDK 负责连接、自动重连、消息去重、过期事件过滤、同一聊天的串行处理、消息格式转换和发送回复；插件负责把飞书会话映射到 Harness Session，再把消息交给 Agent。
 
@@ -18,7 +18,9 @@
 - 话题群按线程使用独立 Harness Session。
 - 回复会关联原始消息，并保留在原来的话题线程中。
 - 收到消息时会先给该消息添加一个表情回应（默认 👍 `THUMBSUP`），作为已收到信号的即时确认；可配置为空字符串关闭。
-- 支持飞书聊天内的斜杠命令：`/model` 查看、列出或切换当前模型，`/compact` 立即压缩当前会话历史，`/stop` 立即中止正在运行的 Agent 轮次。
+- 支持飞书聊天内的斜杠命令：`/model`（查看/列出/切换模型）、`/new [--workspace --preset]`（新建会话并指定工作区/模式）、`/thread`（列出/切换会话）、`/help`、`/status`（展示 WebUI 会话状态）、`/approve` `/deny` `/approvals`（处理审批）、`/stop`（中止当前轮次）。`/compact` 已移除（与 DSH 自带 command-compact 冲突，请用 WebUI 的 `/compact`）。
+- 每轮最终结果渲染成飞书交互卡片，底部固定标注该会话的 workspace + agent 模式（preset）；该标注由插件从 session 元数据自动注入，**不调用 LLM**。
+- 指定工作区时支持 cd 式候选补全：列出匹配的子目录候选供用户选择，只列目录、不列文件。
 - 群聊默认需要 @机器人，单聊默认开放。
 - 可以通过白名单限制群聊和单聊用户。
 - 可以沿用 Harness 默认模型，也可以为飞书渠道指定模型。
@@ -289,14 +291,18 @@ Harness 重启后，插件会恢复对应的持久化 Session；如果该 Sessio
 | `/model list` | 列出可用 Provider/Model | 枚举当前 Harness 中已注册的 Provider 与每个 Provider 的可用 Model |
 | `/model <provider>/<model>[:reasoning]` | 切换默认模型 | 把 Harness 默认选择写为 `<provider>/<model>`，可选附 `reasoning` 段（如 `high`），下次创建 Agent 即生效 |
 | `/model <keyword>` | 模糊搜索 | 在所有 Provider/Model 名称中做不区分大小写的子串匹配，列出候选并标记当前选择；用 `/model <provider>/<model>` 完成切换 |
-| `/compact` | 无参数 | 对当前聊天对应的 Agent 立即执行一次手动压缩 |
+| `/new [--workspace <path>] [--preset <id>]` | 新建会话 | 在当前 chat 内创建全新 session；可指定 workspace 与 agent preset（persisted，仅对新 session 生效） |
+| `/thread [N]` | 无参数 / 数字 | 列出已持久化的 session（含标题+相对时间），或用 `/thread N` 切换到第 N 个 |
+| `/help` | 无参数 | 列出当前 agent 可用的全部斜杠命令（含 DSH 自带的 compact / goal / feedback / export） |
+| `/status` | 无参数 | 展示 WebUI 的会话状态：id/标题/最近活动、workspace、agent preset、当前模型、running、archived |
+| `/approve` `/deny` `/approvals` | 无参数 / `<shortCode>` | 处理挂起的工具审批（与飞书审批卡片同一份 pending） |
 | `/stop` | 无参数 | 立即中止当前聊天里正在运行的 Agent 轮次（聊天本身保持可用，下条消息会开新轮次） |
 
-命令在发送给飞书/Lark 之前完全在 Harness 内解析，不会走模型。`/model` 只读取和写入 Harness Settings；`/compact` 调用 `ctx.compaction.compactNow()`，所以挂载了 `@deepseek-ai/dsh-compaction-basic` 后端时同样能跑。在某个聊天中第一次发送斜杠命令前，请先在该聊天发过至少一条普通消息，以便插件创建对应的 Harness Agent。
+命令在发送给飞书/Lark 之前完全在 Harness 内解析，不会走模型。`/status`、`/help`、`/new`、`/thread` 等同样不产生模型调用（纯命令路径）。`/compact` 已移除（与 DSH 自带 `command-compact` 同名冲突）——请用 WebUI 的 `/compact`。在某个聊天中第一次发送斜杠命令前，请先在该聊天发过至少一条普通消息，以便插件创建对应的 Harness Agent。
 
 ### Workspace 和 Agent Preset
 
-飞书会话创建 Agent 时会沿用 Harness Web 客户端的两项关键行为：挂载 Agent Preset，并把 Session 关联到 Workspace。Preset 提供该会话的工具、系统提示和其他 Agent 级能力；Workspace 提供 `cwd`，并让会话出现在对应工作区中。
+workspace 与 agent preset **只在创建新 session 时设定**（对齐 DSH Web UI 原生行为）；运行中的会话不会因这些配置变动而改变，要换工作区/模式就新建会话。飞书会话创建 Agent 时会沿用 Harness Web 客户端的两项关键行为：挂载 Agent Preset，并把 Session 关联到 Workspace。Preset 提供该会话的工具、系统提示和其他 Agent 级能力；Workspace 提供 `cwd`，并让会话出现在对应工作区中。通过 `/new --workspace <path> --preset <id>` 可为新会话单独指定；指定 workspace 时支持 cd 式候选补全（列出匹配子目录候选，只列目录、不列文件）。
 
 - 未配置 `workspace`：使用 Harness Workspace 列表中的第一个工作区。
 - 已配置 `workspace`：始终使用该路径；如果它已经注册为 Workspace，Session 同时关联到该 Workspace。
@@ -312,6 +318,8 @@ agentPreset: coding
 ```
 
 升级到包含 Workspace/Preset 关联的版本后，同一飞书聊天会创建新的 v2 Session；旧版本产生的未关联 Session 不会被继续复用。
+
+> **运行时不可热切**：DSH 的 workspace 按 session 的 `cwd` 归组（`cwd` 在 session header 创建时冻结、immutable），`attachSession` 强校验 `cwd === workspace.path`，且没有平移 cwd 的接口——因此要换工作区只能新建会话。agent preset 虽可通过 `agentPresets.recompose()` 运行中切换，但会重建该 agent 的工具/系统提示/skill 目录组合，代价大；本项目**不做运行时切换**（用户决策 2026-08-23，见 AGENTS.md「本轮需求决策」）。
 
 ## 访问控制
 

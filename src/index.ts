@@ -25,6 +25,8 @@ import { ProvisionManager } from './provision-manager.ts'
 import { registerLarkCommands, type ApprovalControl, type CommandTranslations } from './commands.ts'
 import { handleProvisionRequest, handleSettingsRequest, PROVISION_PATH, SETTINGS_PATH } from './web.ts'
 import { settleApprovalBySlash, startFeishuApprovals, type PendingApprovalView } from './feishu-approvals.ts'
+import { startFeishuToolCalls } from './feishu-toolcalls.ts'
+import { startFeishuTodos } from './feishu-todos.ts'
 
 export const name = 'lark-channel'
 export const inject = [
@@ -96,6 +98,8 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   // the runtime reconnects (see the `runtime.onChannelChange` hook).
   let stopQuestions: () => void = () => undefined
   let stopApprovals: () => void = () => undefined
+  let stopToolCalls: () => void = () => undefined
+  let stopTodos: () => void = () => undefined
   const channelHolder: { current: LarkChannel | undefined } = { current: undefined }
   const buildApprovalControl = (apiProxy: ApiProxy): ApprovalControl => {
     const approvalsHandle = startFeishuApprovals({
@@ -161,6 +165,8 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     settings: currentSettings,
     resolveSecret: async ref => (await credentials.resolve(credentialRef(ref)))?.value,
     start: async config => {
+      const dshHome = process.env.DSH_HOME
+      const statePath = dshHome !== undefined && dshHome !== '' ? `${dshHome}/lark-session-map.json` : undefined
       const bridge = new HarnessConversationService({
         agents,
         sessions,
@@ -168,7 +174,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         selection: () => defaultModel.currentSelection(),
         agentPresets,
         workspaceRegistry,
-      }, config)
+      }, statePath !== undefined ? { ...config, statePath } : config)
       bridgeHolder.current = bridge
       return startChannel(
         config,
@@ -178,6 +184,10 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         console,
         message => executeSlashCommand(message, bridge, commands, bridgeHolder),
         attachments,
+        () => ({
+          workspace: config.workspace ?? '',
+          agentPreset: config.agentPreset ?? '',
+        }),
       )
     },
   })
@@ -189,6 +199,18 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   }
   if (apiProxy !== undefined) {
     stopQuestions = startFeishuQuestions({
+      apiProxy,
+      channel: cardChannel,
+      bridgeHolder,
+      logger: ctx.logger('dsh-feishu'),
+    })
+    stopToolCalls = startFeishuToolCalls({
+      apiProxy,
+      channel: cardChannel,
+      bridgeHolder,
+      logger: ctx.logger('dsh-feishu'),
+    })
+    stopTodos = startFeishuTodos({
       apiProxy,
       channel: cardChannel,
       bridgeHolder,
@@ -226,7 +248,9 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   ctx.effect(() => () => {
     stopQuestions()
     stopApprovals()
-  }, 'dsh-feishu: feishu questions + approvals listeners')
+    stopToolCalls()
+    stopTodos()
+  }, 'dsh-feishu: feishu questions + approvals + toolcalls + todos listeners')
 
   let lastPrintedQrUrl: string | undefined
   const provisionManager = new ProvisionManager({

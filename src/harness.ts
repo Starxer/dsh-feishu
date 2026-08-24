@@ -2,6 +2,8 @@ import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { conversationKey, summarizeTurn, toSessionId } from './conversation.ts'
 import type { ConversationMessage } from './conversation.ts'
 import type { DomainName } from './config.ts'
@@ -66,6 +68,8 @@ export interface HarnessBridgeConfig {
   agentPreset?: string
   provider?: string
   model?: string
+  /** Path to persist the chat→session override map across restarts. */
+  statePath?: string
 }
 
 export interface InboundMessage extends ConversationMessage { content: string; imageBlocks?: readonly ImageAttachmentRef[] }
@@ -87,7 +91,34 @@ export class HarnessConversationService {
    */
   private readonly chatToSession = new Map<string, string>()
 
-  constructor(private readonly deps: HarnessDependencies, private readonly config: HarnessBridgeConfig) {}
+  constructor(private readonly deps: HarnessDependencies, private readonly config: HarnessBridgeConfig) {
+    this.loadSessionMap()
+  }
+
+  /** Load persisted chat→session map from disk (if the file exists). */
+  private loadSessionMap(): void {
+    const path = this.config.statePath
+    if (path === undefined || path === '') return
+    try {
+      const raw = readFileSync(path, 'utf-8')
+      const data = JSON.parse(raw) as Record<string, string>
+      for (const [k, v] of Object.entries(data)) this.chatToSession.set(k, v)
+    } catch {
+      // File missing or corrupt — start with an empty map
+    }
+  }
+
+  /** Persist the current chat→session map to disk (best-effort). */
+  private saveSessionMap(): void {
+    const path = this.config.statePath
+    if (path === undefined || path === '') return
+    try {
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, JSON.stringify(Object.fromEntries(this.chatToSession)), 'utf-8')
+    } catch {
+      // Best-effort: log nothing, the map is still in memory
+    }
+  }
 
   async reply(message: InboundMessage): Promise<string> {
     const key = conversationKey(message)
@@ -260,6 +291,7 @@ export class HarnessConversationService {
     const key = conversationKey(message)
     const newSessionId = toSessionId(this.config.domain, `${key}\0${salt}`)
     this.chatToSession.set(key, newSessionId)
+    this.saveSessionMap()
     this.handles.delete(key)
     this.selections.delete(newSessionId)
     return newSessionId
@@ -279,6 +311,7 @@ export class HarnessConversationService {
     if (this.deps.workspaceRegistry.archivedSessionIds.includes(sessionId)) return false
     const key = conversationKey(message)
     this.chatToSession.set(key, sessionId)
+    this.saveSessionMap()
     this.handles.delete(key)
     this.selections.delete(sessionId)
     return true
@@ -395,7 +428,9 @@ export class HarnessConversationService {
     const workspace = this.config.workspace === undefined
       ? this.deps.workspaceRegistry.list()[0]
       : await this.deps.workspaceRegistry.resolveByPath(this.config.workspace)
-    const cwd = this.config.workspace ?? workspace?.path ?? process.cwd()
+    // Use the workspace's actual path as cwd to ensure consistency
+    // When no workspace is configured, use the first workspace's path
+    const cwd = workspace?.path ?? this.config.workspace ?? process.cwd()
     const agentPreset = (await this.deps.agentPresets.resolve(this.config.agentPreset)).id
     const setup = async (agentCtx: Parameters<typeof installModelSelection>[0]) => {
       installModelSelection(agentCtx, selection)
@@ -410,11 +445,17 @@ export class HarnessConversationService {
         agentOptions: initial,
         setup,
       })
-    try {
-      await workspace?.attachSession(sessionId)
-    } catch (error: unknown) {
-      await handle.dispose()
-      throw error
+    // Only attach workspace for newly created sessions. Persisted sessions
+    // are already attached to their original workspace and re-attaching
+    // fails when the cwd stored in the session header doesn't match the
+    // current config's workspace path.
+    if (!persisted) {
+      try {
+        await workspace?.attachSession(sessionId)
+      } catch (error: unknown) {
+        await handle.dispose()
+        throw error
+      }
     }
     return handle
   }

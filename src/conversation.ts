@@ -34,18 +34,33 @@ export function summarizeTurn(events: readonly EventLike[], firstSeq: number): T
   let text = ''
   let completed = false
   let failed = false
+  let hasAssistantMessage = false
   for (const event of events) {
     if (event.seq < firstSeq) continue
     if (event.type === 'assistant/message') {
-      const message = event.data.message as { content?: Array<{ type: string; text?: string }> } | undefined
-      const next = message?.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('') ?? ''
-      if (next !== '') text = next
+      hasAssistantMessage = true
+      const message = event.data?.message
+      if (message !== undefined && message !== null) {
+        const content = message.content
+        if (Array.isArray(content)) {
+          const next = content
+            .filter((block: any) => block.type === 'text' && typeof block.text === 'string')
+            .map((block: any) => block.text)
+            .join('')
+          if (next !== '') text = next
+        }
+      }
     }
     if (event.type === 'turn/end') {
-      const reason = event.data.reason as { kind?: string } | undefined
-      completed = reason?.kind === 'completed'
-      failed = reason?.kind === 'error' || reason?.kind === 'cancelled'
+      const reason = event.data?.reason
+      if (reason !== undefined && reason !== null) {
+        completed = reason.kind === 'completed'
+        failed = reason.kind === 'error' || reason.kind === 'cancelled'
+      }
     }
+  }
+  if (completed && !failed && text === '' && hasAssistantMessage) {
+    return { text: '(no text response)', ok: true }
   }
   return { text, ok: completed && !failed && text !== '' }
 }
