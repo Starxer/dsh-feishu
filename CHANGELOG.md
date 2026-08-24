@@ -27,6 +27,18 @@
 
 - `/new` 和 `/thread` 的 chat→session 映射现在持久化到 `~/.dsh/lark-session-map.json`，dsh 重启后自动恢复。
 - 之前映射仅存内存，重启后 `/new` 创建的新 session 会丢失，回退到确定性 hash（旧 session）。
+- 使用 `os.homedir()` + `/.dsh` 作为 `DSH_HOME` 的 fallback，解决 systemd 用户服务不继承 shell 环境变量的问题。
+
+### `/status` 命令
+
+- 新增 `/status` 命令，直接在 `executeSlashCommand` 中处理（不需要 live agent），返回飞书 interactive card。
+- 显示字段：session id、title、workspace、preset、model、activity（turns/steps/tool calls）、tokens（input/output）、context 使用率。
+- 数据从 `sessionPersistence.readFrom()` 读取 session header + events，不经过 LLM。
+
+### `/new` 和 `/thread` 不再依赖已有对话
+
+- `/new` 和 `/thread` 现在可以在没有 live agent 的情况下使用（直接在 `executeSlashCommand` 中处理）。
+- 之前需要先发一条普通消息创建 session 才能用 `/new`，现在可以直接用。
 
 ### 卡片结构修复
 

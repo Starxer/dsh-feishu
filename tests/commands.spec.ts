@@ -54,6 +54,8 @@ const translations: CommandTranslations = {
   approvalsAgeSeconds: n => `${n}s`,
   approvalsAgeMinutes: n => `${n}m`,
   approvalsAgeHours: n => `${n}h`,
+  statusDescription: 'Show session status',
+  statusOutput: (meta) => `Session: ${meta.sessionId} | Title: ${meta.title} | Workspace: ${meta.workspace} | Preset: ${meta.agentPreset} | Model: ${meta.model}`,
 }
 
 const stubApprovalControl: ApprovalControl = {
@@ -103,11 +105,13 @@ function fakeBridge(overrides?: {
   startNewSession?: ReturnType<typeof vi.fn>
   switchToSession?: ReturnType<typeof vi.fn>
   listSessions?: ReturnType<typeof vi.fn>
+  getSessionMeta?: ReturnType<typeof vi.fn>
 }) {
   const setCurrentSelection = overrides?.setCurrentSelection ?? vi.fn(() => undefined)
   const startNewSession = overrides?.startNewSession ?? vi.fn(() => 'new-session-id')
   const switchToSession = overrides?.switchToSession ?? vi.fn(() => true)
   const listSessions = overrides?.listSessions ?? vi.fn(async () => [])
+  const getSessionMeta = overrides?.getSessionMeta ?? vi.fn(async () => ({ sessionId: 'test-session', workspace: '/test/ws', agentPreset: 'default', model: 'openai/gpt-4o', title: 'Test Session', turns: 5, steps: 8, toolCalls: 3, inputTokens: 1200, outputTokens: 450, contextWindow: 128000, lastInputTokens: 800 }))
   return {
     bridge: {
       setCurrentSelection,
@@ -115,11 +119,13 @@ function fakeBridge(overrides?: {
       startNewSession,
       switchToSession,
       listSessions,
+      getSessionMeta,
     },
     setCurrentSelection,
     startNewSession,
     switchToSession,
     listSessions,
+    getSessionMeta,
     chatMessageFor: () => ({ chatId: 'oc_1', chatType: 'p2p' as const }),
   }
 }
@@ -165,7 +171,7 @@ describe('registerLarkCommands', () => {
   it('registers the /model, /new, /thread, and /help commands on the registry', () => {
     const fake = fakeContext()
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands(), stubApprovalControl)
-    expect(fake.registered.map(item => item.name)).toEqual(['model', 'new', 'thread', 'help', 'approve', 'deny', 'approvals'])
+    expect(fake.registered.map(item => item.name)).toEqual(['model', 'new', 'thread', 'help', 'approve', 'deny', 'approvals', 'status'])
     fake.dispose()
   })
 })

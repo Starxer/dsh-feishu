@@ -51,18 +51,10 @@
 - **形态**：返回候选列表（如 `/workspace /path/to/<TAB>` 或 `/new --workspace /path/to/` 绑定候选时），用户从列表选一个，填入完整路径。
 - **验收**：输入前缀能列出仅目录候选；文件不在列表中；用户选择后得到可用的 workspace 路径。
 
-## 4. `/status` 命令 —— `待实现` ⭐
+## 4. `/status` 命令 —— `已有` ✅
 
 - **目标**：展示当前 session / chat 的 WebUI 全部状态信息。
-- **现状**：无。
-- **应显示字段**（对齐 WebUI）：
-  - session id、title、最近活动时间（`/thread` 列表已具备，`src/harness.ts:300` `listSessions`）；
-  - workspace（= `meta.cwd`）、agent preset（`meta.agentPreset`）；
-  - 当前 model（provider/model（+reasoning）），来自 `currentSelectionFor` / `agentDefaultModel.currentSelection()`（`src/harness.ts:244`）；
-  - running 状态（`host/session-status running`）、是否 archived（`workspaceRegistry.archivedSessionIds`）。
-- **边界**：纯命令路径，走 `commands.execute`，**不调 LLM**（同 `/help`）。
-- **接缝**：`agent-presets.select({ sessionId, agentPreset })`（`packages/host/apiproxy/src/api/agent-presets.ts:71`）是 WebUI 运行时换 preset 的原生 RPC——**当前不做**，仅在此备注为后续可能接点。
-- **验收**：飞书 `/status` 返回完整状态信息，内容与 WebUI 一致；用户可据此确认当前 session 的工作区、模式、模型。
+- **实现**：`/status` 直接在 `executeSlashCommand` 中处理（不需要 live agent），返回飞书 interactive card。显示字段：session id、title、workspace、preset、model、activity（turns/steps/tool calls）、tokens（input/output）、context 使用率（lastInputTokens / contextWindow）。数据从 `sessionPersistence.readFrom()` 读取 session header + events，不经过 LLM。
 
 ## 5. 工具调用展示 —— `已有` ✅
 
@@ -92,7 +84,7 @@
 
 ## 优先级建议
 
-1. ~~**#1 卡片化 + footer**~~ ✅ + **#4 `/status`** —— 本轮核心，纯插件层收尾，无 DSH 改动，立即提升飞书体验。
+1. ~~**#1 卡片化 + footer**~~ ✅ + ~~**#4 `/status`**~~ ✅ —— 本轮核心，纯插件层收尾，无 DSH 改动，立即提升飞书体验。
 2. **#2 `/new` 带参数** + **#3 目录候选补全** —— 配合 #1 的 footer，让用户能把会话正确落到目标 workspace/preset。
 3. ~~**#5 工具调用展示**~~ ✅ + ~~**#6 todo 展示**~~ ✅ —— 已完成，零改造 DSH，复用 mux 订阅模式。
 4. **#8 文档一致性** —— 顺手清理。

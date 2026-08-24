@@ -15,11 +15,12 @@ export interface PluginLogger {
 /**
  * Dispatch a parsed slash command against the receiving chat.
  * Returning `undefined` means the message is not a command; the bridge
- * falls back to its ordinary agent reply.
+ * falls back to its ordinary agent reply.  When `card` is present the
+ * channel sends it as an interactive card instead of plain text.
  */
 export type SlashCommandHandler = (
   message: NormalizedMessage,
-) => Promise<{ kind: 'success' | 'error'; text: string } | undefined>
+) => Promise<{ kind: 'success' | 'error'; text: string; card?: object } | undefined>
 
 /** Narrow attachment-store view needed for image admission. */
 type AttachmentLike = Pick<AttachmentStore, 'saveImage' | 'imageLimits'>
@@ -112,6 +113,13 @@ export interface ReplyCardMeta {
   agentPreset?: string
 }
 
+/** Chat coordinates passed to the footer callback for session lookup. */
+export interface ChatCoordinates {
+  chatId: string
+  chatType: 'p2p' | 'group'
+  threadId?: string
+}
+
 export async function startChannel(
   config: Omit<RuntimeConfig, 'appSecretRef'>,
   bridge: Pick<HarnessConversationService, 'reply' | 'dispose'>,
@@ -120,7 +128,7 @@ export async function startChannel(
   terminalLogger?: Pick<PluginLogger, 'error'>,
   slashCommand?: SlashCommandHandler,
   attachments?: AttachmentLike,
-  replyCardMeta?: () => ReplyCardMeta,
+  replyCardMeta?: (coords: ChatCoordinates) => ReplyCardMeta | Promise<ReplyCardMeta>,
 ): Promise<{ stop: () => Promise<void>; channel: LarkChannel }> {
   const logError = (message: string) => {
     logger.error(message)
@@ -165,7 +173,8 @@ export async function startChannel(
         try {
           const commandResult = await slashCommand(message)
           if (commandResult !== undefined) {
-            await channel.send(message.chatId, { text: commandResult.text }, {
+            const payload = commandResult.card !== undefined ? { card: commandResult.card } : { text: commandResult.text }
+            await channel.send(message.chatId, payload, {
               replyTo: message.messageId,
               replyInThread,
             })
@@ -214,7 +223,7 @@ export async function startChannel(
       }
       try {
         const text = await bridge.reply(inboundMessage)
-        const meta = replyCardMeta?.()
+        const meta = await replyCardMeta?.({ chatId: message.chatId, chatType: message.chatType, ...(message.threadId !== undefined ? { threadId: message.threadId } : {}) })
         const card = renderReplyCard(text, meta)
         await channel.send(message.chatId, { card }, {
           replyTo: message.messageId,

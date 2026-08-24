@@ -75,6 +75,7 @@ export class LarkRuntime {
         }
         const message = failure instanceof Error ? failure.message : String(failure)
         const redacted = secret === undefined || secret === '' ? message : message.split(secret).join('[redacted]')
+        console.error('dsh-feishu: reconcile failed:', redacted)
         this.snapshot = invalidConfig
           ? { state: 'unconfigured', message: redacted }
           : { state: 'error', message: redacted }

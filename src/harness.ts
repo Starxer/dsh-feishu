@@ -103,8 +103,11 @@ export class HarnessConversationService {
       const raw = readFileSync(path, 'utf-8')
       const data = JSON.parse(raw) as Record<string, string>
       for (const [k, v] of Object.entries(data)) this.chatToSession.set(k, v)
-    } catch {
-      // File missing or corrupt — start with an empty map
+    } catch (error: unknown) {
+      // ENOENT is expected on first run; log other errors
+      if ((error as { code?: string }).code !== 'ENOENT') {
+        console.error('dsh-feishu: loadSessionMap failed:', error instanceof Error ? error.message : String(error))
+      }
     }
   }
 
@@ -115,8 +118,8 @@ export class HarnessConversationService {
     try {
       mkdirSync(dirname(path), { recursive: true })
       writeFileSync(path, JSON.stringify(Object.fromEntries(this.chatToSession)), 'utf-8')
-    } catch {
-      // Best-effort: log nothing, the map is still in memory
+    } catch (error: unknown) {
+      console.error('dsh-feishu: saveSessionMap failed:', error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -378,6 +381,77 @@ export class HarnessConversationService {
     entries.sort((left, right) => right.updatedAt - left.updatedAt)
     return entries
   }
+
+  /**
+   * Read the live metadata for one chat's current session: workspace path,
+   * agent preset id, and current model selection. Used by the reply-card
+   * footer and the `/status` command.
+   *
+   * Reads from the live agent's session events (persisted sessions) or
+   * from the bridge's in-memory creation metadata. Returns empty strings
+   * when the session has not been created yet.
+   */
+  async getSessionMeta(message: ConversationMessage): Promise<{
+    sessionId: string; workspace: string; agentPreset: string; model: string; title: string
+    turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number
+    contextWindow: number; lastInputTokens: number
+  }> {
+    const sessionId = this.resolveSessionId(message)
+    const model = this.selections.get(sessionId)?.current ?? this.deps.selection()
+    const empty = { title: '', turns: 0, steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, contextWindow: 0, lastInputTokens: 0 }
+    // Try reading the session header + events from persistence
+    const readFrom = this.deps.sessionPersistence.readFrom
+    if (typeof readFrom === 'function') {
+      try {
+        const result = await readFrom.call(this.deps.sessionPersistence, sessionId as never, 0)
+        const header = result.meta as { cwd?: string; agentPreset?: string } | undefined
+        const ws = header?.cwd ?? this.config.workspace ?? ''
+        const preset = header?.agentPreset ?? this.config.agentPreset ?? ''
+        const stats = this.deriveSessionStats(result.events as ReadonlyArray<{ type: string; data: any }>)
+        return { sessionId, workspace: ws, agentPreset: preset, model: `${model.provider}/${model.model}`, ...stats }
+      } catch { /* fall through to config defaults */ }
+    }
+    return { sessionId, workspace: this.config.workspace ?? '', agentPreset: this.config.agentPreset ?? '', model: `${model.provider}/${model.model}`, ...empty }
+  }
+
+  /** Derive session statistics from event log, mirroring the WebUI StatsLine. */
+  private deriveSessionStats(events: ReadonlyArray<{ type: string; data: any }>): {
+    title: string; turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number
+    contextWindow: number; lastInputTokens: number
+  } {
+    const turns = new Set<number>()
+    let steps = 0
+    let toolCalls = 0
+    let inputTokens = 0
+    let outputTokens = 0
+    let title = ''
+    let contextWindow = 0
+    let lastInputTokens = 0
+    for (const event of events) {
+      if (event.type === 'turn/start') {
+        turns.add((event.data?.turn as number | undefined) ?? turns.size)
+      } else if (event.type === 'step/start') {
+        steps++
+      } else if (event.type === 'tool/call') {
+        toolCalls++
+      } else if (event.type === 'assistant/message') {
+        const usage = event.data?.usage as { inputTokens?: number; outputTokens?: number } | undefined
+        if (usage?.inputTokens !== undefined) {
+          inputTokens += usage.inputTokens
+          lastInputTokens = usage.inputTokens
+        }
+        if (usage?.outputTokens !== undefined) outputTokens += usage.outputTokens
+      } else if (event.type === 'session/title') {
+        const next = event.data?.title
+        if (typeof next === 'string' && next !== '') title = next
+      } else if (event.type === 'request/context') {
+        const cw = event.data?.contextWindow as number | undefined
+        if (cw !== undefined && cw > 0) contextWindow = cw
+      }
+    }
+    return { title, turns: turns.size, steps, toolCalls, inputTokens, outputTokens, contextWindow, lastInputTokens }
+  }
+
   /** Marker kept to silence trailing whitespace edits. */
   private getOrCreate(key: string): Promise<AgentHandleLike> {
     let pending = this.handles.get(key)

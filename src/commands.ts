@@ -106,6 +106,8 @@ export interface CommandTranslations {
   readonly approvalsAgeSeconds: (n: number) => string
   readonly approvalsAgeMinutes: (n: number) => string
   readonly approvalsAgeHours: (n: number) => string
+  readonly statusDescription: string
+  readonly statusOutput: (meta: { sessionId: string; workspace: string; agentPreset: string; model: string; title: string; turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number; contextWindow: number; lastInputTokens: number }) => string
 }
 
 /**
@@ -113,7 +115,7 @@ export interface CommandTranslations {
  * "just now", "5m ago", "3h ago", "2d ago"). Returns the unknown label
  * when the timestamp is missing or invalid.
  */
-function formatRelativeTime(timestamp: number, t: CommandTranslations, now: number = Date.now()): string {
+export function formatRelativeTime(timestamp: number, t: CommandTranslations, now: number = Date.now()): string {
   if (!Number.isFinite(timestamp) || timestamp <= 0) return t.threadLastActiveUnknown
   const delta = now - timestamp
   if (delta < 0) return t.threadLastActiveJustNow
@@ -184,7 +186,7 @@ export function registerLarkCommands(
   agentDefaultModel: AgentDefaultModelConfig,
   bridge: Pick<
     HarnessConversationService,
-    'setCurrentSelection' | 'currentSelectionFor' | 'startNewSession' | 'switchToSession' | 'listSessions'
+    'setCurrentSelection' | 'currentSelectionFor' | 'startNewSession' | 'switchToSession' | 'listSessions' | 'getSessionMeta'
   >,
   chatMessageFor: (invocation: CommandInvocation) => ConversationMessage,
   t: CommandTranslations,
@@ -244,7 +246,12 @@ export function registerLarkCommands(
       description: t.approvalsDescription,
       handler: invocation => handleListApprovalsCommand(invocation, approvals, t),
     })
-  }, 'dsh-feishu: /model /new /thread /help /approve /deny /approvals commands')
+    yield ctx.commands.register({
+      name: 'status',
+      description: t.statusDescription,
+      handler: invocation => handleStatusCommand(invocation, bridge, chatMessageFor, t),
+    })
+  }, 'dsh-feishu: /model /new /thread /help /approve /deny /approvals /status commands')
 }
 
 async function handleModelCommand(
@@ -448,4 +455,18 @@ async function handleListApprovalsCommand(
   })
   lines.push(t.approveDenyUsage)
   return { kind: 'success', text: lines.join('\n') }
+}
+
+/**
+ * Handle `/status`. Shows the current session's metadata: session id,
+ * workspace, agent preset, and model — matching the reply-card footer.
+ */
+async function handleStatusCommand(
+  invocation: CommandInvocation,
+  bridge: Pick<HarnessConversationService, 'getSessionMeta'>,
+  chatMessageFor: (invocation: CommandInvocation) => ConversationMessage,
+  t: CommandTranslations,
+): Promise<CommandResult> {
+  const meta = await bridge.getSessionMeta(chatMessageFor(invocation))
+  return { kind: 'success', text: t.statusOutput(meta) }
 }

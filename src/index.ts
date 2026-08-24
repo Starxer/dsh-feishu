@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { homedir } from 'node:os'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
@@ -17,12 +18,13 @@ import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { ConfigSchema, LARK_SETTINGS_NAMESPACE, resolveSettingsConfig } from './config.ts'
 import type { Config as PluginConfig, SettingsConfig } from './config.ts'
 import { HarnessConversationService } from './harness.ts'
+import type { ConversationMessage } from './conversation.ts'
 import { startChannel, type SlashCommandHandler } from './channel.ts'
 import { LarkRuntime } from './runtime.ts'
 import { createSettingsApi } from './settings-api.ts'
 import { renderTerminalQr } from './provision.ts'
 import { ProvisionManager } from './provision-manager.ts'
-import { registerLarkCommands, type ApprovalControl, type CommandTranslations } from './commands.ts'
+import { registerLarkCommands, formatRelativeTime, type ApprovalControl, type CommandTranslations } from './commands.ts'
 import { handleProvisionRequest, handleSettingsRequest, PROVISION_PATH, SETTINGS_PATH } from './web.ts'
 import { settleApprovalBySlash, startFeishuApprovals, type PendingApprovalView } from './feishu-approvals.ts'
 import { startFeishuToolCalls } from './feishu-toolcalls.ts'
@@ -165,8 +167,8 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     settings: currentSettings,
     resolveSecret: async ref => (await credentials.resolve(credentialRef(ref)))?.value,
     start: async config => {
-      const dshHome = process.env.DSH_HOME
-      const statePath = dshHome !== undefined && dshHome !== '' ? `${dshHome}/lark-session-map.json` : undefined
+      const dshHome = process.env.DSH_HOME || `${homedir()}/.dsh`
+      const statePath = `${dshHome}/lark-session-map.json`
       const bridge = new HarnessConversationService({
         agents,
         sessions,
@@ -174,7 +176,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         selection: () => defaultModel.currentSelection(),
         agentPresets,
         workspaceRegistry,
-      }, statePath !== undefined ? { ...config, statePath } : config)
+      }, { ...config, statePath })
       bridgeHolder.current = bridge
       return startChannel(
         config,
@@ -184,10 +186,10 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         console,
         message => executeSlashCommand(message, bridge, commands, bridgeHolder),
         attachments,
-        () => ({
-          workspace: config.workspace ?? '',
-          agentPreset: config.agentPreset ?? '',
-        }),
+        async (coords) => {
+          const meta = await bridge.getSessionMeta(coords as ConversationMessage)
+          return { workspace: meta.workspace, agentPreset: meta.agentPreset }
+        },
       )
     },
   })
@@ -227,6 +229,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       startNewSession: (chatMessage, salt) => bridgeHolder.current?.startNewSession(chatMessage, salt) ?? '',
       switchToSession: (chatMessage, sessionId) => bridgeHolder.current?.switchToSession(chatMessage, sessionId) ?? false,
       listSessions: async () => bridgeHolder.current?.listSessions() ?? [],
+      getSessionMeta: async (chatMessage) => bridgeHolder.current?.getSessionMeta(chatMessage) ?? { sessionId: '', workspace: '', agentPreset: '', model: '', title: '', turns: 0, steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, contextWindow: 0, lastInputTokens: 0 },
     },
     () => {
       const last = bridgeHolder.lastChatMessage
@@ -323,6 +326,14 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
  * the strings are owned by the Feishu-facing command handler and rarely
  * change.
  */
+
+/** Compact token count display: 517 / 12.2K / 1.2M */
+function formatTokenCount(n: number): string {
+  if (n < 1_000) return String(n)
+  if (n < 1_000_000) return `${Math.round(n / 100) / 10}K`
+  return `${Math.round(n / 100_000) / 10}M`
+}
+
 const larkCommandTranslations: CommandTranslations = {
   modelDescription: 'Show, list, or switch the active model',
   modelCurrentHeader: 'Current model:',
@@ -373,6 +384,100 @@ const larkCommandTranslations: CommandTranslations = {
   approvalsAgeSeconds: n => `${n}s ago`,
   approvalsAgeMinutes: n => `${n}m ago`,
   approvalsAgeHours: n => `${n}h ago`,
+  statusDescription: 'Show current session status (workspace, preset, model, stats)',
+  statusOutput: (meta) => {
+    const lines = [
+      '**Session Status**',
+      `• Session: \`${meta.sessionId}\``,
+    ]
+    if (meta.title !== '') lines.push(`• Title: ${meta.title}`)
+    lines.push(
+      `• Workspace: \`${meta.workspace || '(default)'}\``,
+      `• Preset: \`${meta.agentPreset || '(default)'}\``,
+      `• Model: \`${meta.model}\``,
+    )
+    if (meta.turns > 0 || meta.steps > 0) {
+      const parts: string[] = [`${meta.turns} turns`, `${meta.steps} steps`]
+      if (meta.toolCalls > 0) parts.push(`${meta.toolCalls} tool calls`)
+      lines.push(`• Activity: ${parts.join(' · ')}`)
+      if (meta.inputTokens > 0 || meta.outputTokens > 0) {
+        lines.push(`• Tokens: ${formatTokenCount(meta.inputTokens)} in · ${formatTokenCount(meta.outputTokens)} out`)
+      }
+    }
+    if (meta.contextWindow > 0) {
+      const pct = Math.min(100, Math.round(meta.lastInputTokens / meta.contextWindow * 100))
+      lines.push(`• Context: ${formatTokenCount(meta.lastInputTokens)} / ${formatTokenCount(meta.contextWindow)} (${pct}%)`)
+    }
+    return lines.join('\n')
+  },
+}
+
+/** Render the /status result as a Feishu interactive card. */
+function renderStatusCard(meta: {
+  sessionId: string; workspace: string; agentPreset: string; model: string; title: string
+  turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number
+  contextWindow: number; lastInputTokens: number
+}): object {
+  const fields: string[] = []
+  fields.push(`**Session:** \`${meta.sessionId}\``)
+  if (meta.title !== '') fields.push(`**Title:** ${meta.title}`)
+  fields.push(`**Workspace:** \`${meta.workspace || '(default)'}\``)
+  fields.push(`**Preset:** \`${meta.agentPreset || '(default)'}\``)
+  fields.push(`**Model:** \`${meta.model}\``)
+  if (meta.turns > 0 || meta.steps > 0) {
+    const parts: string[] = [`${meta.turns} turns`, `${meta.steps} steps`]
+    if (meta.toolCalls > 0) parts.push(`${meta.toolCalls} tool calls`)
+    fields.push(`**Activity:** ${parts.join(' · ')}`)
+    if (meta.inputTokens > 0 || meta.outputTokens > 0) {
+      fields.push(`**Tokens:** ${formatTokenCount(meta.inputTokens)} in · ${formatTokenCount(meta.outputTokens)} out`)
+    }
+  }
+  if (meta.contextWindow > 0) {
+    const pct = Math.min(100, Math.round(meta.lastInputTokens / meta.contextWindow * 100))
+    fields.push(`**Context:** ${formatTokenCount(meta.lastInputTokens)} / ${formatTokenCount(meta.contextWindow)} (${pct}%)`)
+  }
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: '📊 Session Status' },
+      template: 'turquoise',
+    },
+    elements: [{ tag: 'markdown', content: fields.join('\n') }],
+  }
+}
+
+/** Handle /thread directly without needing a live agent. */
+async function handleThreadDirect(
+  rawInput: string,
+  bridge: HarnessConversationService,
+  chatMessage: ConversationMessage,
+): Promise<{ kind: 'success' | 'error'; text: string }> {
+  const t = larkCommandTranslations
+  if (rawInput === '') {
+    const sessions = await bridge.listSessions()
+    if (sessions.length === 0) return { kind: 'success', text: t.threadListEmpty }
+    const lines = [t.threadListHeader]
+    sessions.forEach((entry, index) => {
+      const title = entry.title === '' ? t.threadIdle(entry.id) : entry.title.replace(/\s+/g, ' ').slice(0, 60)
+      const lastActive = formatRelativeTime(entry.updatedAt, t)
+      lines.push(t.threadListEntry(index + 1, entry.id, title, lastActive))
+    })
+    lines.push(t.threadUsage)
+    return { kind: 'success', text: lines.join('\n') }
+  }
+  const index = Number.parseInt(rawInput, 10)
+  if (!Number.isInteger(index) || index < 1) {
+    return { kind: 'error', text: `${t.threadInvalidIndex}\n${t.threadUsage}` }
+  }
+  const sessions = await bridge.listSessions()
+  const entry = sessions[index - 1]
+  if (entry === undefined) {
+    return { kind: 'error', text: `${t.threadInvalidIndex}\n${t.threadUsage}` }
+  }
+  if (!bridge.switchToSession(chatMessage, entry.id)) {
+    return { kind: 'error', text: t.threadArchived }
+  }
+  return { kind: 'success', text: t.threadSwitched(index, entry.id) }
 }
 
 /**
@@ -386,13 +491,26 @@ async function executeSlashCommand(
   bridge: HarnessConversationService,
   commands: CommandRuntime,
   bridgeHolder: { lastChatMessage: { chatId: string; chatType: 'p2p' | 'group'; threadId?: string } | undefined },
-): Promise<{ kind: 'success' | 'error'; text: string } | undefined> {
+): Promise<{ kind: 'success' | 'error'; text: string; card?: object } | undefined> {
   const parsed = parseCommand(message.content)
   if (parsed === undefined) return undefined
   const chatMessage = {
     chatId: message.chatId,
     chatType: message.chatType,
     ...message.threadId === undefined ? {} : { threadId: message.threadId },
+  }
+  // /status, /new, /thread are handled directly — they don't need a live agent.
+  if (parsed.name === 'status') {
+    const meta = await bridge.getSessionMeta(chatMessage)
+    return { kind: 'success', text: '', card: renderStatusCard(meta) }
+  }
+  if (parsed.name === 'new') {
+    const salt = `new-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    const sessionId = bridge.startNewSession(chatMessage, salt)
+    return { kind: 'success', text: larkCommandTranslations.newSessionReady(sessionId) }
+  }
+  if (parsed.name === 'thread') {
+    return await handleThreadDirect(parsed.rawInput.trim(), bridge, chatMessage)
   }
   // Stash the chat coordinates so the registered handler can find them
   // without holding per-invocation state on the agent. The bridge serializes
