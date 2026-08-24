@@ -87,16 +87,68 @@
 - **README 定位未对齐**：README 开头仍是"channel 插件"口径，应按 AGENTS.md 新定位更新。
 - **版本号**：`package.json` 是 `0.1.0`，CHANGELOG 已发布到 `0.2.2`。改名前先厘清。
 
+## 11. 非流式模式下 assistant 中间消息不可见 —— `待实现`
+
+- **问题**：即使 `/stream` 开启，assistant 中间消息在非流式（CardKit）模式下仍不可见。
+- **根因待查**：`feishu-streaming.ts` 的 `enabled()` 回调是否生效？`assistant/message` 事件是否在 agent 多步循环中实际发出？需要在真实 agent 循环中加日志确认事件流。
+- **可能原因**：(a) `enabled()` 返回 false（settings 未持久化）；(b) `resolveChat()` 返回 undefined（session 映射问题）；(c) agent 单步完成即结束，没有中间 assistant/message 事件。
+- **验收**：开启 `/stream` 后，agent 多步循环中的中间 assistant 文本以紫色卡片展示。
+
+## 12. tool call 卡片 markdown 不渲染 —— `待实现`
+
+- **问题**：`feishu-toolcalls.ts` 和 `feishu-todos.ts` 使用 `{ tag: 'div', text: { tag: 'lark_md', content } }` 渲染卡片内容。`lark_md` 只支持 **粗体/斜体/链接**，不支持代码块、标题、列表等。
+- **现状**：tool call 的 Args 和 Result 用 `\`\`\`code\`\`\`` 代码块格式，在飞书侧显示为原始文本而非代码块。
+- **修复**：将 `lark_md` + `div` 改为 `{ tag: 'markdown', content }`（同 reply card 的做法）。涉及文件：`feishu-toolcalls.ts`（4 处）、`feishu-todos.ts`（2 处）、`feishu-questions.ts`（3 处）、`feishu-approvals.ts`（2 处）。`channel.ts:305` 的 note 区域保持 `lark_md`（note 只支持 lark_md）。
+- **验收**：tool call 卡片中的代码块、标题、列表正确渲染。
+
+## 13. Agent 运行中即时执行纯查询命令 —— `待实现`
+
+- **问题**：`/status`、`/help`、`/approvals` 等命令不需要 LLM 响应、不改变任何设置，但当前实现需要 `await agent.whenIdle()` 后才能处理。Agent 忙时用户发 `/status` 会被排队，等到当前 turn 结束才响应。
+- **现状分析**：飞书 SDK 的 `chatQueue` 按 chat 串行化消息投递（`src/channel.ts:153`），`on('message')` handler 内部是 `await slashCommand(message)`。即使 slash command 本身很快返回，它也要等前一条消息（agent turn）的 handler 完成后才被调用。
+- **解决方案**：在 `channel.ts` 的 `on('message')` handler 中，先检测是否为纯查询命令（`/status` `/help` `/approvals`），如果是则**立即处理并返回**，不进入 `bridge.reply()` 的 await 链。需要将命令分类为「需要 agent」和「不需要 agent」两类。
+- **验收**：Agent 忙碌时发 `/status` 立即返回结果，不等待当前 turn 结束。
+
+## 14. DSH Agent 消息队列机制 —— `已完成调研` ✅
+
+- **调研结论**（已确认，记录备查）：
+  - **两层队列**：(1) Lark SDK 的 `chatQueue`（per-chat 串行化投递）；(2) DSH Agent 的 `Inbox`（per-agent 应用层队列）。
+  - **`Inbox` 机制**（`packages/core/agent/src/inbox.ts`）：维护 `next-turn` 和 `next-step` 两个 FIFO 队列。每次插入/删除都持久化为 `agent/inbox/spliced` session event，进程重启后可恢复。
+  - **`followup()` 行为**：agent 忙时，消息插入 `next-turn` 队列，`wakeDriver()` 设置 `wakeRequested = true`（latch）。当前 turn 结束后 `kick()` 循环自动处理下一个 turn。
+  - **`whenIdle()` 行为**：spin-until-stable 模式——等待 `activityDone` promise，如果等待期间有新 work 被调度（`activityDone` 变了），继续等待，直到完全空闲。
+  - **`chatQueue` 行为**：Lark SDK 级别的 per-chat 串行化。同一 chat 的消息按序投递到 `on('message')` handler，不同 chat 并行。防止同一 chat 内的消息竞争。
+  - **关键结论**：消息不会丢失。Agent 忙时新消息进入 Inbox 队列，当前 turn 完成后自动处理。但飞书侧用户需要等当前 turn 完成才能看到响应。
+
+## 15. 权限系统接入飞书命令 —— `待实现`
+
+- **目标**：将 DSH WebUI 的权限设定功能接入飞书，对齐 WebUI 的 permission chip 和 `/permission` 命令。
+- **DSH 权限系统**：
+  - **Sandbox 模式**（3 种）：`read-only`（只读）、`workspace-write`（工作区可写）、`danger-full-access`（完全访问）
+  - **Permission Presets**（`packages/extensions/permission-presets/`）：预设组合 = sandbox mode + approval policy，WebUI 用 `/permission <preset>` 切换
+  - **Session 事件**：`sandbox/mode`（记录模式切换）、`permission/preset`（记录 preset 切换），都在 session log 中持久化
+  - **WebUI 展示**：composer bar 旁的 permission chip，点击展开 preset 列表，选中后提交 `/permission <preset>`
+- **飞书接入方案**：
+  - 新增 `/permission` 命令（列出可用 presets + 当前值，切换指定 preset）
+  - `/sandbox` 命令（直接切换 sandbox mode，不走 preset）
+  - 可选：在 reply card footer 显示当前 sandbox mode（与 workspace/preset 并列）
+- **待调研**：
+  - [ ] `permissionPresets` service 的完整 API（list/get/set）
+  - [ ] sandbox mode 的 session 级切换 API（`setSandboxMode` 在 `packages/sandbox/sandbox-policy/src/session-mode.ts`）
+  - [ ] WebUI 的 `/permission` 命令注册方式（是否与 dsh-feishu 的 slash command 冲突）
+- **验收**：飞书可查看/切换 permission preset 和 sandbox mode，与 WebUI 同步。
+
 ---
 
 ## 优先级建议
 
 1. ~~**#1 卡片化 + footer**~~ ✅ + ~~**#4 `/status`**~~ ✅ —— 本轮核心，纯插件层收尾，无 DSH 改动，立即提升飞书体验。
-2. **#2 `/new` 带参数** + **#3 目录候选补全** —— 配合 #1 的 footer，让用户能把会话正确落到目标 workspace/preset。
-3. ~~**#5 工具调用展示**~~ ✅ + ~~**#6 todo 展示**~~ ✅ —— 已完成，零改造 DSH，复用 mux 订阅模式。
-4. **#9 流式输出 → CardKit 迁移** —— 解决 5 QPS 瓶颈，需调研 CardKit API + 权限。
-5. **#8 文档一致性** —— 顺手清理。
-6. **#7 多 thread 话题导航** —— 工作量更大，底层已在。
+2. **#12 tool call markdown 修复** —— 简单修复，改 `lark_md` → `markdown`，立即改善可读性。
+3. **#11 非流式中间消息** —— 需要诊断 `enabled()` + 事件流，可能涉及 settings 持久化。
+4. **#13 纯查询命令即时返回** —— 改 channel handler 逻辑，Agent 忙时 `/status` 不排队。
+5. **#15 权限系统接入** —— 新增 `/permission` `/sandbox` 命令，需调研 DSH 权限 API。
+6. **#2 `/new` 带参数** + **#3 目录候选补全** —— 配合 #1 的 footer，让用户能把会话正确落到目标 workspace/preset。
+7. **#9 流式输出 → CardKit 迁移** —— 解决 5 QPS 瓶颈，需调研 CardKit API + 权限。
+8. **#8 文档一致性** —— 顺手清理。
+9. **#7 多 thread 话题导航** —— 工作量更大，底层已在。
 
 > 每完成一项，更新本清单状态 + 同步更新 AGENTS.md 的「与 DSH Web UI 功能对齐」表。
 
