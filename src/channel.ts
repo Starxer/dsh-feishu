@@ -232,26 +232,26 @@ export async function startChannel(
         const threadId = message.threadId
         void bridge.reply(inboundMessage).then(async (text) => {
           const sessionId = bridge.resolveSessionIdFor(inboundMessage)
-          if (!bridge.consumeIntermediateSent(sessionId)) {
-            const meta = await replyCardMeta?.({ chatId, chatType, ...(threadId !== undefined ? { threadId } : {}) })
-            // Cards don't support tables or headings in markdown; fall back
-            // to a plain text message when the reply contains them.
-            const fallback = needsPlainTextFallback(text)
-            logReplyDiagnostic(text, fallback)
-            if (fallback) {
-              const footer = buildFooterText(meta)
-              const plainText = footer !== '' ? `${text}\n\n---\n${footer}` : text
-              await channel.send(chatId, { text: plainText }, {
-                replyTo: messageId,
-                replyInThread,
-              })
-            } else {
-              const card = renderReplyCard(text, meta)
-              await channel.send(chatId, { card }, {
-                replyTo: messageId,
-                replyInThread,
-              })
-            }
+          const intermediateSent = bridge.consumeIntermediateSent(sessionId)
+          const fallback = needsPlainTextFallback(text)
+          logReplyDiagnostic(text, fallback)
+          const meta = await replyCardMeta?.({ chatId, chatType, ...(threadId !== undefined ? { threadId } : {}) })
+          if (fallback) {
+            // Tables/headings can't render in cards OR streaming cards.
+            // Always send as plain text, even if intermediate was sent.
+            const footer = buildFooterText(meta)
+            const plainText = footer !== '' ? `${text}\n\n---\n${footer}` : text
+            await channel.send(chatId, { text: plainText }, {
+              replyTo: messageId,
+              replyInThread,
+            })
+          } else if (!intermediateSent) {
+            // Normal card reply — skip if streaming already sent the content.
+            const card = renderReplyCard(text, meta)
+            await channel.send(chatId, { card }, {
+              replyTo: messageId,
+              replyInThread,
+            })
           }
         }).catch((error: unknown) => {
           logError(`dsh-feishu: message handling failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -307,8 +307,16 @@ export async function startChannel(
  * message instead of an interactive card.
  */
 function needsPlainTextFallback(text: string): boolean {
+  let inCodeBlock = false
   for (const line of text.split('\n')) {
     const trimmed = line.trimStart()
+    // Track code block state
+    if (trimmed.startsWith('```')) {
+      inCodeBlock = !inCodeBlock
+      continue
+    }
+    // Skip content inside code blocks
+    if (inCodeBlock) continue
     // Table row: starts with | and has at least one more |
     if (trimmed.startsWith('|') && trimmed.indexOf('|', 1) !== -1) return true
     // Heading: starts with # followed by space
