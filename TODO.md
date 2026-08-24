@@ -1,258 +1,111 @@
 # dsh-feishu TODO
 
-> 定位见 [AGENTS.md](./AGENTS.md)：**把 DSH 的原生特性接入飞书，而非再造一个 agent 平台/助手**。本清单聚焦"与 DSH Web UI 功能对齐"的缺口。状态定义：`已有` / `部分` / `规划中` / `待实现`。
-
-## 本轮需求决策（2026-08-23 已确认）
-
-- **workspace 和 agent preset 只在「创建新 session」时设定**，不运行时热切、不做复杂操作——**全部按 WebUI 原生行为**实现。
-- **每轮最终结果用飞书卡片**，卡片底部注明当前 session 的 **workspace + preset（agent 模式）**。这段 footer **不调用 LLM**，由插件从 session meta 自动注入。
-- **工作区选择用"cd 式候选补全"**：不即时补全，而是**列出匹配的子目录候选让用户选**；**只列目录，不列文件**。
-- 新增 **`/status`** 命令，展示 WebUI 的 session 全部状态信息。
-
-## 可复用的接缝（动手前先读）
-
-工具调用与 todo 展示都能**零改造 DSH** 实现，因为 DSH apiproxy 的 `events.mux()` 流已经把它们透传出来（`packages/host/apiproxy/src/api/events.ts`）：
-
-- `tool/call` / `tool/result`：经 `{ type: 'session/event', event, view }` 帧透传，`view` 是 Host 算好的渲染意图（`ToolCallView` / `ToolResultView`），飞书侧无需自己解析 args/result。
-- `todo/write`：同为 `session/event` 帧透传，`event.data.todos` 喂 WebUI 的 TodoPanel（见 `packages/client/connection/src/client/fixture.ts`）。
-
-**现成模式（照抄 `src/feishu-questions.ts` / `src/feishu-approvals.ts` 即可）**：
-1. `apiProxy.events.mux({...}, signal)` 订阅流；
-2. `bridgeHolder.current.resolveChat(frame.sessionId)` 反向定位 chat（`/new` `/thread` 覆盖也识别）；
-3. 经 `cardChannel`（`send` + `onCardAction`）投递到飞书，`chat.threadId` 存在则 `replyInThread`；
-4. 所有 listener 在 `runtime.onChannelChange` 时重挂（连接重建后失效）；
-5. 用 `ctx.effect` 注册 dispose（对应 `src/index.ts:226`）。
-
-**session 元数据来源**：`cwd` 与 `agentPreset` 持久化在 session header 里（`packages/session/session-persistence-jsonl/src/format.ts:57,62`），可通过 `sessionPersistence.readFrom()` 读，也记在 `agents.create({ meta: { cwd, agentPreset } })`（`src/harness.ts:408`）。卡片 footer 与 `/status` 都从这里取，**不经过 LLM**。
+> 定位见 [AGENTS.md](./AGENTS.md)：**把 DSH 的原生特性接入飞书，而非再造一个 agent 平台/助手**。
+> 状态：`已有` ✅ / `部分` ⚠️ / `待实现` 🔲 / `规划中` 📋 / `待调研` 🔍
 
 ---
 
-## 1. 每轮最终结果卡片化 + 底部标注 workspace/preset —— `已有` ✅
+## 已完成
 
-- **目标**：每轮对话的最终 assistant 文本渲染成**飞书 interactive card**，卡片底部（footer）固定标注当前 session 的 **workspace 路径 + agent 模式（preset）**。
-- **实现**：`src/channel.ts` 的 `renderReplyCard()` 使用 `{ tag: 'markdown', content }` 组件渲染，底部 note 注入 workspace + preset。空回复显示 `(empty response)` 占位。
+| # | 功能 | 说明 |
+|---|---|---|
+| 1 | 卡片化 + footer | 最终回复渲染为飞书卡片，底部标注 workspace + preset |
+| 4 | `/status` 命令 | 展示 session id / title / workspace / preset / model / tokens / context |
+| 5 | 工具调用展示 | 订阅 `tool/call` + `tool/result`，蓝色/绿色/红色卡片 |
+| 6 | todo 展示 | 订阅 `todo/write`，绿色卡片含进度条 |
+| 15 | Agent 消息队列调研 | 两层队列机制已确认（见下方调研记录） |
 
-## 2. 工作区 + 预设只在 `/new` 时指定 —— `待实现`（含命令扩展）
+## 待实现
 
-- **目标**：`/new` 支持带参数指定 workspace 和 agent preset，创建新 session 时生效；**不**改变已有 session。
-- **现状**：`handleNewCommand`（`src/commands.ts:307`）无参，只加 salt 生成新 sessionId；bridge 的 `config.workspace` / `config.agentPreset` 是全局配置。
-- **待补**：
-  - `/new [--workspace <path>] [--preset <id>]` 解析参数；
-  - bridge 按 chat 记录"下一次 createAgent 用的 workspace/preset"（per-chat pending override，类似已有 `chatToSession` 的模式，`src/harness.ts:88`）；
-  - 未指定时沿用全局 config / WebUI 原生默认。
-- **参考语义**：persisted——只影响新 session，运行中不动（同 `/model` 的 `modelPersisted`）。
-- **验收**：`/new --workspace ... --preset ...` 后，新消息落到该 workspace / preset；旧 session 不受影响。
-
-## 3. 工作区选择：cd 式候选补全（列目录供选） —— `待实现` ⭐
-
-- **目标**：输入 workspace 前缀时，**列出匹配的子目录候选**让用户选择；**只列目录，不列文件**；**不是 shell 即时补全**（补全文本），而是"列选项供选"。
-- **现状**：无。workspace 目前是配置项。
-- **接缝**：插件在 host 端可读文件系统——`/new --workspace` 输入前缀后，`readdir` 列该前缀下匹配的子目录（`fstat` 判断 `isDirectory()`），过滤文件，返回候选列表给用户选。
-- **形态**：返回候选列表（如 `/workspace /path/to/<TAB>` 或 `/new --workspace /path/to/` 绑定候选时），用户从列表选一个，填入完整路径。
-- **验收**：输入前缀能列出仅目录候选；文件不在列表中；用户选择后得到可用的 workspace 路径。
-
-## 4. `/status` 命令 —— `已有` ✅
-
-- **目标**：展示当前 session / chat 的 WebUI 全部状态信息。
-- **实现**：`/status` 直接在 `executeSlashCommand` 中处理（不需要 live agent），返回飞书 interactive card。显示字段：session id、title、workspace、preset、model、activity（turns/steps/tool calls）、tokens（input/output）、context 使用率（lastInputTokens / contextWindow）。数据从 `sessionPersistence.readFrom()` 读取 session header + events，不经过 LLM。
-
-## 5. 工具调用展示 —— `已有` ✅
-
-- **目标**：模型调用工具时在飞书侧可视化（工具名、参数、结果），对齐 WebUI ToolCard。
-- **实现**：`src/feishu-toolcalls.ts` 订阅 apiproxy mux `tool/call` + `tool/result` 事件，蓝色卡片（调用开始）+ 绿色/红色卡片（调用完成/失败），含参数摘要、结果、耗时。200ms 批量 debounce 防刷屏。
-
-## 6. todo 展示 —— `已有` ✅
-
-- **目标**：把 DSH 的 todo 状态映射到飞书，对齐 WebUI TodoPanel。
-- **实现**：`src/feishu-todos.ts` 订阅 apiproxy mux `todo/write` 事件，绿色卡片含进度条（完成数/总数）和状态图标（⬜ 待办 / 🔄 进行中 / ✅ 完成）。500ms debounce。
-
-## 7. 多 thread 并行 → 飞书话题导航 —— `规划中`
-
-- **目标**：用飞书话题映射多个并行 thread，用户能并行推进多个会话。
-- **现状**：底层已通——话题按 `chat_id + thread_id` 生成独立 session（`src/conversation.ts:12` `conversationKey`），回复留原话题（`replyInThread`）。缺并行可见性/导航。
-- **待补**：如何在飞书侧看到当前活跃话题/会话（对齐 WebUI session 树）；话题间入口切换（现有 `/thread` 是聊天级非话题级）；可选订阅 `host/session-added` / mux `session/subscribed` 做活跃提示。
-- **接缝**：DSH `agents` registry + `sessions`；`resolveChat` 已能反向查表（`src/harness.ts:181`）。
-- **验收**：飞书能并行推进多个话题，各自独立不串，能看清各自状态。
-
-## 9. 中间 assistant 消息展示（流式输出） —— `部分` ⚠️
-
-- **目标**：agent 循环中的 assistant 中间消息（tool call 之间）以飞书卡片展示，对齐 WebUI 的 conversation stream。
-- **现状**：`src/feishu-streaming.ts` 已订阅 mux `assistant/message` 事件，`/stream` 命令可开关（默认 OFF）。**但当前实现有 QPS 瓶颈**：每次发独立新卡片，受飞书消息发送 5 QPS 限制。
-- **流式输出技术方案**：见下方 [飞书流式输出技术方案](#飞书流式输出技术方案)。
-- **待补**：迁移到 CardKit 流式更新 API，消除 QPS 限制。
-
-## 10. 文档与版本一致性 —— `低` / quick win
-
-- **README 过期**：`README.md:292-293` 仍写 `/compact` 可用，但 CHANGELOG 已确认 `/compact` 移除。需同步：勾掉 `/compact`，补 `/new` `/thread` `/help` `/approve` `/deny` `/approvals`（及本清单新增的 `/status`、`/new --workspace/--preset`）。
-- **README 定位未对齐**：README 开头仍是"channel 插件"口径，应按 AGENTS.md 新定位更新。
-- **版本号**：`package.json` 是 `0.1.0`，CHANGELOG 已发布到 `0.2.2`。改名前先厘清。
-
-## 11. 非流式模式下 assistant 中间消息不可见 —— `待实现`
-
-- **问题**：即使 `/stream` 开启，assistant 中间消息在非流式（CardKit）模式下仍不可见。
-- **根因待查**：`feishu-streaming.ts` 的 `enabled()` 回调是否生效？`assistant/message` 事件是否在 agent 多步循环中实际发出？需要在真实 agent 循环中加日志确认事件流。
-- **可能原因**：(a) `enabled()` 返回 false（settings 未持久化）；(b) `resolveChat()` 返回 undefined（session 映射问题）；(c) agent 单步完成即结束，没有中间 assistant/message 事件。
-- **验收**：开启 `/stream` 后，agent 多步循环中的中间 assistant 文本以紫色卡片展示。
-
-## 12. tool call 卡片 markdown 不渲染 —— `待实现`
-
-- **问题**：`feishu-toolcalls.ts` 和 `feishu-todos.ts` 使用 `{ tag: 'div', text: { tag: 'lark_md', content } }` 渲染卡片内容。`lark_md` 只支持 **粗体/斜体/链接**，不支持代码块、标题、列表等。
-- **现状**：tool call 的 Args 和 Result 用 `\`\`\`code\`\`\`` 代码块格式，在飞书侧显示为原始文本而非代码块。
-- **修复**：将 `lark_md` + `div` 改为 `{ tag: 'markdown', content }`（同 reply card 的做法）。涉及文件：`feishu-toolcalls.ts`（4 处）、`feishu-todos.ts`（2 处）、`feishu-questions.ts`（3 处）、`feishu-approvals.ts`（2 处）。`channel.ts:305` 的 note 区域保持 `lark_md`（note 只支持 lark_md）。
-- **验收**：tool call 卡片中的代码块、标题、列表正确渲染。
-
-## 13. 卡片 Markdown 渲染不稳定 —— `待解决`
-
-- **问题**：飞书 interactive card 的 `{ tag: 'markdown', content }` 组件对不同 Markdown 语法的渲染支持不一致。
-- **实测结果**：
-  - **列表**（`- item` / `1. item`）：✅ 稳定渲染
-  - **标题**（`# H1` / `## H2`）：❌ 不稳定，有时渲染有时不渲染
-  - **表格**（`| col | col |`）：❌ 几乎不能正常渲染
-- **对比**：飞书**普通消息**（非卡片）的表格完全可以正常渲染。说明是卡片 markdown 组件的限制，不是飞书整体的 markdown 支持问题。
-- **可能原因**：飞书卡片的 markdown 组件是 [lark_md](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/card-components/content-components/rich-text) 的增强版，但对复杂语法（标题、表格）的支持仍不完整，与普通消息的 markdown 渲染引擎不同。
-- **影响范围**：所有使用 `{ tag: 'markdown', content }` 的卡片——reply card、tool call card、todo card、streaming card。
-- **可能的缓解方案**：
-  - 表格：改用 `div` + `column_set` 布局组件模拟表格（手动拼 JSON，不依赖 markdown 语法）
-  - 标题：改用 `div` + `lark_md` 的 `**粗体**` 模拟标题样式
-  - 或者：对复杂内容用普通消息（`{ text }`）而非卡片发送，但会失去卡片的 header/footer/样式
-- **验收**：agent 回复中的表格和标题在飞书侧正确展示（可用降级方案）。
-
-## 14. Agent 运行中即时执行纯查询命令 —— `待实现`
-
-- **问题**：`/status`、`/help`、`/approvals` 等命令不需要 LLM 响应、不改变任何设置，但当前实现需要 `await agent.whenIdle()` 后才能处理。Agent 忙时用户发 `/status` 会被排队，等到当前 turn 结束才响应。
-- **现状分析**：飞书 SDK 的 `chatQueue` 按 chat 串行化消息投递（`src/channel.ts:153`），`on('message')` handler 内部是 `await slashCommand(message)`。即使 slash command 本身很快返回，它也要等前一条消息（agent turn）的 handler 完成后才被调用。
-- **解决方案**：在 `channel.ts` 的 `on('message')` handler 中，先检测是否为纯查询命令（`/status` `/help` `/approvals`），如果是则**立即处理并返回**，不进入 `bridge.reply()` 的 await 链。需要将命令分类为「需要 agent」和「不需要 agent」两类。
-- **验收**：Agent 忙碌时发 `/status` 立即返回结果，不等待当前 turn 结束。
-
-## 15. DSH Agent 消息队列机制 —— `已完成调研` ✅
-
-- **调研结论**（已确认，记录备查）：
-  - **两层队列**：(1) Lark SDK 的 `chatQueue`（per-chat 串行化投递）；(2) DSH Agent 的 `Inbox`（per-agent 应用层队列）。
-  - **`Inbox` 机制**（`packages/core/agent/src/inbox.ts`）：维护 `next-turn` 和 `next-step` 两个 FIFO 队列。每次插入/删除都持久化为 `agent/inbox/spliced` session event，进程重启后可恢复。
-  - **`followup()` 行为**：agent 忙时，消息插入 `next-turn` 队列，`wakeDriver()` 设置 `wakeRequested = true`（latch）。当前 turn 结束后 `kick()` 循环自动处理下一个 turn。
-  - **`whenIdle()` 行为**：spin-until-stable 模式——等待 `activityDone` promise，如果等待期间有新 work 被调度（`activityDone` 变了），继续等待，直到完全空闲。
-  - **`chatQueue` 行为**：Lark SDK 级别的 per-chat 串行化。同一 chat 的消息按序投递到 `on('message')` handler，不同 chat 并行。防止同一 chat 内的消息竞争。
-  - **关键结论**：消息不会丢失。Agent 忙时新消息进入 Inbox 队列，当前 turn 完成后自动处理。但飞书侧用户需要等当前 turn 完成才能看到响应。
-
-## 16. 权限系统接入飞书命令 —— `待实现`
-
-- **目标**：将 DSH WebUI 的权限设定功能接入飞书，对齐 WebUI 的 permission chip 和 `/permission` 命令。
-- **DSH 权限系统**：
-  - **Sandbox 模式**（3 种）：`read-only`（只读）、`workspace-write`（工作区可写）、`danger-full-access`（完全访问）
-  - **Permission Presets**（`packages/extensions/permission-presets/`）：预设组合 = sandbox mode + approval policy，WebUI 用 `/permission <preset>` 切换
-  - **Session 事件**：`sandbox/mode`（记录模式切换）、`permission/preset`（记录 preset 切换），都在 session log 中持久化
-  - **WebUI 展示**：composer bar 旁的 permission chip，点击展开 preset 列表，选中后提交 `/permission <preset>`
-- **飞书接入方案**：
-  - 新增 `/permission` 命令（列出可用 presets + 当前值，切换指定 preset）
-  - `/sandbox` 命令（直接切换 sandbox mode，不走 preset）
-  - 可选：在 reply card footer 显示当前 sandbox mode（与 workspace/preset 并列）
-- **待调研**：
-  - [ ] `permissionPresets` service 的完整 API（list/get/set）
-  - [ ] sandbox mode 的 session 级切换 API（`setSandboxMode` 在 `packages/sandbox/sandbox-policy/src/session-mode.ts`）
-  - [ ] WebUI 的 `/permission` 命令注册方式（是否与 dsh-feishu 的 slash command 冲突）
-- **验收**：飞书可查看/切换 permission preset 和 sandbox mode，与 WebUI 同步。
+| # | 功能 | 优先级 | 说明 |
+|---|---|---|---|
+| 12 | tool call 卡片 markdown 渲染 | **高** | `lark_md` → `markdown`，11 处改动，立即改善可读性 |
+| 13 | 卡片 Markdown 渲染不稳定 | **高** | 标题不稳定、表格不渲染（普通消息正常），需降级方案 |
+| 11 | 非流式中间消息不可见 | **高** | `/stream` 开启后仍不可见，需诊断 enabled() + 事件流 |
+| 14 | 纯查询命令即时返回 | **中** | Agent 忙时 `/status` 排队等待，需分离命令处理 |
+| 16 | 权限系统接入 | **中** | 新增 `/permission` `/sandbox`，对齐 WebUI 权限设定 |
+| 2 | `/new` 带参数 | **中** | `/new --workspace <path> --preset <id>` |
+| 3 | 工作区候选补全 | **中** | 输入前缀列出匹配目录供选 |
+| 9 | 流式输出 → CardKit | **低** | 解决 5 QPS 瓶颈，需调研 CardKit API |
+| 7 | 多 thread 话题导航 | **低** | 飞书话题映射 DSH session，底层已通 |
+| 8 | 文档与版本一致性 | **低** | README 过期、版本号不一致 |
 
 ---
 
-## 优先级建议
+## #12 tool call 卡片 markdown 不渲染
 
-1. ~~**#1 卡片化 + footer**~~ ✅ + ~~**#4 `/status`**~~ ✅ —— 本轮核心，纯插件层收尾，无 DSH 改动，立即提升飞书体验。
-2. **#12 tool call markdown 修复** —— 简单修复，改 `lark_md` → `markdown`，立即改善可读性。
-3. **#13 卡片 Markdown 渲染不稳定** —— 表格和标题渲染问题，可能需要降级方案。
-4. **#11 非流式中间消息** —— 需要诊断 `enabled()` + 事件流，可能涉及 settings 持久化。
-5. **#14 纯查询命令即时返回** —— 改 channel handler 逻辑，Agent 忙时 `/status` 不排队。
-6. **#16 权限系统接入** —— 新增 `/permission` `/sandbox` 命令，需调研 DSH 权限 API。
-7. **#2 `/new` 带参数** + **#3 目录候选补全** —— 配合 #1 的 footer，让用户能把会话正确落到目标 workspace/preset。
-8. **#9 流式输出 → CardKit 迁移** —— 解决 5 QPS 瓶颈，需调研 CardKit API + 权限。
-9. **#8 文档一致性** —— 顺手清理。
-10. **#7 多 thread 话题导航** —— 工作量更大，底层已在。
+- **问题**：`feishu-toolcalls.ts` / `feishu-todos.ts` / `feishu-questions.ts` / `feishu-approvals.ts` 使用 `{ tag: 'div', text: { tag: 'lark_md' } }`，只支持粗体/斜体/链接，不支持代码块。
+- **修复**：改为 `{ tag: 'markdown', content }`（同 reply card）。`channel.ts:305` 的 note 区保持 `lark_md`（note 只支持 lark_md）。
+- **验收**：tool call 卡片代码块正确渲染。
 
-> 每完成一项，更新本清单状态 + 同步更新 AGENTS.md 的「与 DSH Web UI 功能对齐」表。
+## #13 卡片 Markdown 渲染不稳定
+
+- **实测**：列表 ✅ 稳定 | 标题 ❌ 不稳定 | 表格 ❌ 几乎不渲染
+- **对比**：飞书普通消息的表格完全正常——是卡片 markdown 组件的限制
+- **缓解方案**：表格用 `div` + `column_set` 模拟；标题用粗体模拟；或降级为普通消息
+
+## #11 非流式中间消息不可见
+
+- **现状**：`feishu-streaming.ts` 订阅 `assistant/message`，`/stream` 开关默认 OFF
+- **待查**：`enabled()` 回调是否生效？settings 是否持久化？agent 多步循环是否发出事件？
+- **已加诊断日志**：listener 启动 + 前 3 个 assistant/message 事件会打 log
+
+## #14 纯查询命令即时返回
+
+- **问题**：`/status` `/help` `/approvals` 不需要 LLM，但飞书 `chatQueue` 按 chat 串行化，需等前一条消息处理完
+- **方案**：channel handler 中分离「需要 agent」和「不需要 agent」命令，后者立即处理
+
+## #16 权限系统接入
+
+- **DSH 权限**：3 种 sandbox 模式（read-only / workspace-write / danger-full-access）+ permission presets
+- **Session 事件**：`sandbox/mode`、`permission/preset`，持久化在 session log
+- **飞书接入**：`/permission` 列出 presets + 切换；`/sandbox` 直接切模式
+- **待调研**：`permissionPresets` service API、`setSandboxMode` API、与 WebUI `/permission` 命令是否冲突
+
+## #9 流式输出技术方案
+
+> 详见下方 [飞书流式输出技术方案](#飞书流式输出技术方案)。
+
+- **现状**：每次发独立新卡片，5 QPS 限制
+- **目标**：CardKit 流式更新（单卡持续更新，无 QPS 限制）
+- **状态**：方案已设计，待实现
 
 ---
 
 ## 飞书流式输出技术方案
 
-> 调研日期：2026-08-24。飞书官方文档来源见各段引用。
-
-### 现状：普通卡片发送（有 QPS 限制）
-
-当前 `src/feishu-streaming.ts` 每次 agent 循环中的 assistant 中间消息都**发一张新的独立卡片**：
+### 现状：普通卡片发送（5 QPS 限制）
 
 ```
-POST /im/v1/messages  →  发送新卡片（每张独立消息）
+POST /im/v1/messages → 每张独立消息，5 QPS
 ```
 
-**限制**：
-- 每用户/每群 **5 QPS**（每秒最多发 5 条消息）
-- agent 循环中 tool call 卡片 + todo 卡片 + streaming 卡片 + 最终回复卡片，很容易触发
-- 超限后返回错误，卡片发送失败（当前有 `.catch()` 兜底，但用户看不到内容）
+### 目标：CardKit 流式更新（无 QPS 限制）
 
-### 方案：CardKit 流式更新（无 QPS 限制）
-
-飞书提供 **CardKit 流式更新 API**，核心机制是：**先创建一张流式卡片，然后持续更新同一张卡片的内容**。
-
-#### API 端点
-
-| 步骤 | API | 说明 |
-|---|---|---|
-| 1. 创建流式卡片 | `POST /open-apis/cardkit/v1/card` | body 含 `streaming_mode: true`，返回 `card_id` |
-| 2. 更新卡片内容 | `POST /open-apis/cardkit/v1/card/:card_id/contents` | 全量/局部/文本流式更新 |
-| 3. 结束流式 | 关闭 streaming_mode 或 10 分钟自动关闭 | — |
-
-#### 关键限制
+```
+POST /cardkit/v1/card {streaming_mode: true} → 创建流式卡片，拿到 card_id
+POST /cardkit/v1/card/:card_id/contents      → 持续更新，无 QPS 限制
+```
 
 | 限制项 | 值 |
 |---|---|
-| 流式更新 QPS | **无限制**（官方文档明确："在流式更新模式下，不会触发接口的频率限制"） |
-| 卡片大小 | **30KB**（JSON 序列化后） |
-| 组件数量 | **200 个** |
-| 自动关闭 | 最后一次激活后 **10 分钟** |
-| 文本流式更新频率 | 默认 70ms/次（可配 `print_frequency_ms`） |
-| 文本流式步长 | 默认 1 字符/次（可配 `print_step`） |
+| 流式更新 QPS | **无限制** |
+| 卡片大小 | 30KB |
+| 组件数量 | 200 个 |
+| 自动关闭 | 10 分钟 |
+| 文本流式频率 | 70ms/次（可配） |
 
-#### 迁移方案
-
-**当前架构**（每次发新卡片）：
-```
-agent/message → 200ms debounce → sendCard(chat, card) → POST /im/v1/messages
-                                ↓ (每张独立消息，5 QPS 限制)
-```
-
-**目标架构**（单卡流式更新）：
-```
-turn/start → createStreamingCard(chat) → POST /cardkit/v1/card {streaming_mode: true}
-                                       → 拿到 card_id
-assistant/message → updateStreamingContent(card_id, text)
-                  → POST /cardkit/v1/card/:card_id/contents (无 QPS 限制)
-tool/call → updateStreamingContent(card_id, "🔧 calling xxx...")
-turn/end → finalizeStreamingCard(card_id)
-         → 关闭 streaming_mode 或发送最终卡片
-```
-
-#### 实现要点
-
-1. **session 级卡片**：每个 session 在 `turn/start` 时创建一张流式卡片，`turn/end` 时关闭。
-2. **内容拼接**：tool call 结果、assistant 中间消息都追加到同一张卡片，而非发新卡。
-3. **CardKit SDK**：飞书 Node SDK 的 `lark.Cardkit` 或直接 HTTP 调用。
-4. **降级**：CardKit API 不可用时，回退到当前的独立卡片方案（保底）。
-5. **`/stream` 命令**：保留开关功能，控制是否创建流式卡片。
-
-#### 需要调研的细节
-
-- [ ] CardKit 创建卡片的完整请求体结构（`POST /cardkit/v1/card`）
-- [ ] 全量更新 vs 局部更新 vs 文本流式更新的适用场景
-- [ ] 是否需要额外的飞书应用权限（`cardkit:card` scope？）
-- [ ] `card_id` 的生命周期（同一 session 多个 turn 是否复用？）
-- [ ] 飞书 Node SDK 是否已封装 CardKit API，还是需要直接 HTTP 调用
-- [ ] 流式卡片在飞书客户端的渲染效果（是否支持 markdown？是否有 loading 动画？）
-
-#### 参考
+### 参考
 
 - [流式更新卡片概述](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/streaming-updates-openapi-overview.md)
-- [更新卡片实体配置](https://open.larkoffice.com/document/cardkit-v1/card/settings)
-- [流式更新文本 API](https://open.feishu.cn/document/cardkit-v1/card-element/content)
-- [飞书AI机器人流式输出实践（掘金）](https://juejin.cn/post/7600990891206819867)
-- [飞书 Streaming Card / CardKit 实战（CSDN）](https://devpress.csdn.net/demo/69affc8c54b52172bc6052fc.html)
+- [飞书AI机器人流式输出实践](https://juejin.cn/post/7600990891206819867)
 - [CardKit 流式更新 Python 示例](https://feishu.danling.org/streaming/cardkit/)
-- [OpenClaw 飞书流式回复配置指南](https://jishuzhan.net/article/2029099169638580225)
+
+---
+
+## Agent 消息队列调研记录
+
+- **两层队列**：Lark SDK `chatQueue`（per-chat 串行）+ DSH Agent `Inbox`（per-agent 应用层）
+- **`followup()`**：消息进 `next-turn` 队列，`wakeRequested` latch，当前 turn 完成后自动处理
+- **`whenIdle()`**：spin-until-stable，等所有排队 turn 完成才返回
+- **关键结论**：消息不会丢失，但飞书侧需等当前 turn 完成才能响应
