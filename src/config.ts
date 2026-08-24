@@ -60,7 +60,7 @@ export const ConfigSchema: z<Config> = z.object({
   agentPreset: z.string(),
   errorMessage: z.string().default(DEFAULT_ERROR_MESSAGE),
   reactEmoji: z.string().default(DEFAULT_REACTION_EMOJI).description('Emoji reaction added to each inbound message; empty string disables it'),
-  showIntermediateMessages: z.boolean().default(false).description('Show intermediate assistant messages during agent turns (not just tool calls and final reply)'),
+  showIntermediateMessages: z.boolean().default(true).description('Show intermediate assistant messages during agent turns (not just tool calls and final reply)'),
 })
 
 export function resolveSettingsConfig(config: Config): SettingsConfig {
