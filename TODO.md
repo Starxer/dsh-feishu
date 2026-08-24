@@ -37,11 +37,17 @@
 - **问题**：`feishu-toolcalls.ts` / `feishu-todos.ts` / `feishu-questions.ts` / `feishu-approvals.ts` 使用 `{ tag: 'div', text: { tag: 'lark_md' } }`，只支持粗体/斜体/链接，不支持代码块。
 - **修复**：改为 `{ tag: 'markdown', content }`（同 reply card）。`channel.ts` 的 note 区保持 `lark_md`（note 只支持 lark_md）。
 
-## #13 卡片 Markdown 渲染不稳定 —— ✅ 已修复
+## #13 卡片 Markdown 渲染不稳定 —— ⚠️ 部分修复
 
 - **实测**：列表 ✅ 稳定 | 标题 ❌ 不稳定 | 表格 ❌ 几乎不渲染
 - **对比**：飞书普通消息的表格完全正常——是卡片 markdown 组件的限制
-- **修复**：回复含表格（`|`）或标题（`#`）时自动降级为普通 text 消息。普通消息支持完整 markdown。
+- **根因**：原始 dsh-lark 用 `{ markdown: text }` 格式发送回复（支持完整 markdown）。改成卡片后丢失了这个能力。
+- **已实现的修复**：
+  - `needsPlainTextFallback()` 检测表格行（`|`）和标题（`#`）
+  - 含表格/标题的回复用 `{ markdown: text }` 格式发送（原生 markdown 消息，支持完整语法）
+  - 普通回复仍用卡片（带 header/footer）
+  - 表格内容即使 streaming 已发过卡片也会发（因为 streaming 卡片也渲染不了表格）
+- **待验证**：`{ markdown: text }` 格式是否正确生效（需要用户测试表格渲染）
 
 ## #11 非流式中间消息不可见
 
