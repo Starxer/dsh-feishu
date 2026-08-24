@@ -20,6 +20,7 @@ function fixture() {
         events.push({ seq: seq++, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: `answer:${echoed}` }] } } })
         events.push({ seq: seq++, type: 'turn/end', data: { reason: { kind: 'completed' } } })
       }),
+      status: 'idle' as const,
     }
     agents.set(String(sessionId), agent)
     return { agent, dispose: vi.fn(async () => undefined) }
@@ -152,7 +153,7 @@ describe('HarnessConversationService', () => {
   })
 
   it('rejects a turn that commits no successful assistant answer', async () => {
-    const create = vi.fn(async ({ sessionId }: any) => ({ agent: { session: { id: sessionId, seq: 0, events: [{ seq: 0, type: 'turn/end', data: { reason: { kind: 'error' } } }] }, whenIdle: async () => undefined, followup() {} }, dispose: async () => undefined }))
+    const create = vi.fn(async ({ sessionId }: any) => ({ agent: { session: { id: sessionId, seq: 0, events: [{ seq: 0, type: 'turn/end', data: { reason: { kind: 'error' } } }] }, whenIdle: async () => undefined, followup() {}, status: 'idle' as const }, dispose: async () => undefined }))
     const service = new HarnessConversationService({ agents: { create, resume: vi.fn(), get: () => undefined }, sessions: { flush: async () => true }, sessionPersistence: { list: async () => [] }, selection: () => ({ provider: 'p', model: 'm' }), agentPresets: { resolve: async () => ({ id: 'default' }), mount: async () => undefined }, workspaceRegistry: { list: () => [], resolveByPath: async () => undefined, archivedSessionIds: [] } }, { domain: 'feishu', workspace: '/work' })
     await expect(service.reply({ chatId: 'a', chatType: 'p2p', content: 'one' })).rejects.toThrow(/successful assistant response/)
   })

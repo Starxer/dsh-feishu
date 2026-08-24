@@ -222,26 +222,40 @@ export async function startChannel(
         }
       }
       try {
-        const text = await bridge.reply(inboundMessage)
-        // Skip the final reply card if intermediate assistant message cards
-        // were already sent during this turn (avoids duplication).
-        const sessionId = bridge.resolveSessionIdFor(inboundMessage)
-        if (!bridge.consumeIntermediateSent(sessionId)) {
-          const meta = await replyCardMeta?.({ chatId: message.chatId, chatType: message.chatType, ...(message.threadId !== undefined ? { threadId: message.threadId } : {}) })
-          const card = renderReplyCard(text, meta)
-          await channel.send(message.chatId, { card }, {
-            replyTo: message.messageId,
+        // Fire-and-forget: submit the message to the agent and return
+        // immediately so the chatQueue can deliver the next message (e.g.
+        // a slash command) without waiting for the agent turn to finish.
+        // The reply card is sent asynchronously when the agent completes.
+        const chatId = message.chatId
+        const chatType = message.chatType
+        const messageId = message.messageId
+        const threadId = message.threadId
+        void bridge.reply(inboundMessage).then(async (text) => {
+          const sessionId = bridge.resolveSessionIdFor(inboundMessage)
+          if (!bridge.consumeIntermediateSent(sessionId)) {
+            const meta = await replyCardMeta?.({ chatId, chatType, ...(threadId !== undefined ? { threadId } : {}) })
+            const card = renderReplyCard(text, meta)
+            await channel.send(chatId, { card }, {
+              replyTo: messageId,
+              replyInThread,
+            })
+          }
+        }).catch((error: unknown) => {
+          logError(`dsh-feishu: message handling failed: ${error instanceof Error ? error.message : String(error)}`)
+          void channel.send(chatId, { text: config.errorMessage }, {
+            replyTo: messageId,
             replyInThread,
+          }).catch((sendError: unknown) => {
+            logError(`dsh-feishu: fallback reply failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`)
           })
-        }
+        })
       } catch (error: unknown) {
-        logError(`dsh-feishu: message handling failed: ${error instanceof Error ? error.message : String(error)}`)
+        // Synchronous errors from bridge.reply() setup (rare)
+        logError(`dsh-feishu: message dispatch failed: ${error instanceof Error ? error.message : String(error)}`)
         await channel.send(message.chatId, { text: config.errorMessage }, {
           replyTo: message.messageId,
           replyInThread,
-        }).catch((sendError: unknown) => {
-          logError(`dsh-feishu: fallback reply failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`)
-        })
+        }).catch(() => undefined)
       }
     }),
     channel.on('reconnecting', () => { logger.warn('dsh-feishu: WebSocket reconnecting') }),

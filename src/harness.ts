@@ -13,6 +13,7 @@ interface AgentLike {
   session: { id: unknown; seq: number; events: readonly { seq: number; type: string; data: any }[] }
   whenIdle(): Promise<void>
   followup(message: ReturnType<typeof createUserMessage>): void
+  status: 'idle' | 'running'
 }
 
 interface AgentHandleLike { agent: AgentLike; dispose(): Promise<void> }
@@ -189,6 +190,17 @@ export class HarnessConversationService {
     } catch {
       return undefined
     }
+  }
+
+  /**
+   * Check if the agent for a chat is currently running (processing a turn).
+   * Does NOT create an agent — returns false if no agent exists yet.
+   */
+  isAgentRunning(message: ConversationMessage): boolean {
+    const sessionId = this.resolveSessionId(message)
+    const live = this.deps.agents.get(sessionId as never)
+    if (live === undefined) return false
+    return (live as unknown as AgentLike).status === 'running'
   }
 
   async dispose(): Promise<void> {

@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { startChannel } from '../src/channel.ts'
 import type { AttachmentId, ImageAttachmentRef, ImageMediaType, ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'
 
+/** Flush the microtask queue so fire-and-forget promises settle. */
+const flushAsync = () => new Promise<void>(resolve => setTimeout(resolve, 0))
+
 const IMAGE_LIMITS: ImageAttachmentLimits = {
   maxImageBytes: 10_000_000,
   maxImagesPerMessage: 20,
@@ -71,6 +74,7 @@ describe('startChannel', () => {
     expect(logger.info).toHaveBeenCalledWith('dsh-feishu: WebSocket connected')
     expect(factory).toHaveBeenCalledWith(expect.objectContaining({ transport: 'websocket', policy: expect.objectContaining({ requireMention: true, dmMode: 'open' }) }))
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'p2p', content: 'hi' })
+    await flushAsync()
     expect(channel.addReaction).toHaveBeenCalledWith('om_1', 'THUMBSUP')
     expect(bridge.reply).toHaveBeenCalledWith(expect.objectContaining({ content: 'hi' }))
     expect(channel.send).toHaveBeenCalledWith('oc_1', { card: expect.objectContaining({ header: expect.objectContaining({ template: 'blue' }), elements: expect.arrayContaining([expect.objectContaining({ tag: 'markdown', content: 'Hello **Lark**' })]) }) }, { replyTo: 'om_1', replyInThread: false })
@@ -89,6 +93,7 @@ describe('startChannel', () => {
       groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: '', showIntermediateMessages: false,
     }, bridge, () => channel as any, logger)
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'p2p', content: 'hi' })
+    await flushAsync()
     expect(channel.addReaction).not.toHaveBeenCalled()
     expect(channel.send).toHaveBeenCalledWith('oc_1', { card: expect.objectContaining({ header: expect.objectContaining({ template: 'blue' }), elements: expect.arrayContaining([expect.objectContaining({ tag: 'markdown', content: 'ok' })]) }) }, { replyTo: 'om_1', replyInThread: false })
     await stop()
@@ -104,6 +109,7 @@ describe('startChannel', () => {
       groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: 'THUMBSUP', showIntermediateMessages: false,
     }, bridge, () => channel as any, logger)
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'p2p', content: 'hi' })
+    await flushAsync()
     expect(logger.warn).toHaveBeenCalledWith('dsh-feishu: reaction failed: reaction denied')
     expect(channel.send).toHaveBeenCalledWith('oc_1', { card: expect.objectContaining({ header: expect.objectContaining({ template: 'blue' }), elements: expect.arrayContaining([expect.objectContaining({ tag: 'markdown', content: 'ok' })]) }) }, { replyTo: 'om_1', replyInThread: false })
     await stop()
@@ -115,6 +121,7 @@ describe('startChannel', () => {
     const terminal = { error: vi.fn() }
     await startChannel({ appId: 'id', appSecret: 'secret', domain: 'lark', requireMention: true, dmMode: 'open', groupAllowlist: [], dmAllowlist: [], workspace: '/work', errorMessage: 'safe error', reactEmoji: 'THUMBSUP', showIntermediateMessages: false }, bridge, () => channel as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, terminal)
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'group', threadId: 'omt_1', content: 'hi' })
+    await flushAsync()
     expect(terminal.error).toHaveBeenCalledWith('dsh-feishu: message handling failed: secret stack')
     expect(channel.send).toHaveBeenCalledWith('oc_1', { text: 'safe error' }, { replyTo: 'om_1', replyInThread: true })
   })
@@ -174,6 +181,7 @@ describe('startChannel', () => {
       groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: 'THUMBSUP', showIntermediateMessages: false,
     }, bridge, () => channel as any, logger, undefined, slashCommand)
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'p2p', content: 'hello world' })
+    await flushAsync()
     expect(slashCommand).toHaveBeenCalledOnce()
     expect(bridge.reply).toHaveBeenCalledWith(expect.objectContaining({ content: 'hello world' }))
     expect(channel.send).toHaveBeenCalledWith('oc_1', { card: expect.objectContaining({ header: expect.objectContaining({ template: 'blue' }), elements: expect.arrayContaining([expect.objectContaining({ tag: 'markdown', content: 'agent answer' })]) }) }, { replyTo: 'om_1', replyInThread: false })
@@ -206,6 +214,7 @@ describe('startChannel', () => {
       messageId: 'om_2', chatId: 'oc_2', chatType: 'p2p', content: '',
       resources: [{ type: 'image', fileKey: 'img_abc' }],
     })
+    await flushAsync()
     expect(channel.rawClient.im.v1.messageResource.get).toHaveBeenCalledWith({
       params: { type: 'image' },
       path: { message_id: 'om_2', file_key: 'img_abc' },

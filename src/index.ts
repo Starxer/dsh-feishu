@@ -433,13 +433,14 @@ function renderStatusCard(meta: {
   sessionId: string; workspace: string; agentPreset: string; model: string; title: string
   turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number
   contextWindow: number; lastInputTokens: number
-}): object {
+}, agentRunning: boolean): object {
   const fields: string[] = []
   fields.push(`**Session:** \`${meta.sessionId}\``)
   if (meta.title !== '') fields.push(`**Title:** ${meta.title}`)
   fields.push(`**Workspace:** \`${meta.workspace || '(default)'}\``)
   fields.push(`**Preset:** \`${meta.agentPreset || '(default)'}\``)
   fields.push(`**Model:** \`${meta.model}\``)
+  fields.push(`**Agent:** ${agentRunning ? '🔄 Running' : '⏸️ Idle'}`)
   if (meta.turns > 0 || meta.steps > 0) {
     const parts: string[] = [`${meta.turns} turns`, `${meta.steps} steps`]
     if (meta.toolCalls > 0) parts.push(`${meta.toolCalls} tool calls`)
@@ -451,6 +452,10 @@ function renderStatusCard(meta: {
   if (meta.contextWindow > 0) {
     const pct = Math.min(100, Math.round(meta.lastInputTokens / meta.contextWindow * 100))
     fields.push(`**Context:** ${formatTokenCount(meta.lastInputTokens)} / ${formatTokenCount(meta.contextWindow)} (${pct}%)`)
+  }
+  if (agentRunning) {
+    fields.push('')
+    fields.push('> ⚠️ Agent 正在运行中，以上信息可能并非最新。请在 Agent 运行结束后再次发送 `/status` 获取准确信息。')
   }
   return {
     config: { wide_screen_mode: true },
@@ -519,7 +524,8 @@ async function executeSlashCommand(
   // /status, /new, /thread are handled directly — they don't need a live agent.
   if (parsed.name === 'status') {
     const meta = await bridge.getSessionMeta(chatMessage)
-    return { kind: 'success', text: '', card: renderStatusCard(meta) }
+    const agentRunning = bridge.isAgentRunning(chatMessage)
+    return { kind: 'success', text: '', card: renderStatusCard(meta, agentRunning) }
   }
   if (parsed.name === 'new') {
     const salt = `new-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
