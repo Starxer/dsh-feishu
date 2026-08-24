@@ -237,11 +237,12 @@ export async function startChannel(
           logReplyDiagnostic(text, fallback)
           const meta = await replyCardMeta?.({ chatId, chatType, ...(threadId !== undefined ? { threadId } : {}) })
           if (fallback) {
-            // Tables/headings can't render in cards OR streaming cards.
-            // Always send as plain text, even if intermediate was sent.
+            // Tables/headings can't render in card markdown component.
+            // Use Feishu's native markdown message format which supports
+            // full markdown including tables and headings.
             const footer = buildFooterText(meta)
-            const plainText = footer !== '' ? `${text}\n\n---\n${footer}` : text
-            await channel.send(chatId, { text: plainText }, {
+            const mdText = footer !== '' ? `${text}\n\n---\n${footer}` : text
+            await channel.send(chatId, { markdown: mdText }, {
               replyTo: messageId,
               replyInThread,
             })
