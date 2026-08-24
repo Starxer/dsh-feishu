@@ -74,7 +74,14 @@
 - **接缝**：DSH `agents` registry + `sessions`；`resolveChat` 已能反向查表（`src/harness.ts:181`）。
 - **验收**：飞书能并行推进多个话题，各自独立不串，能看清各自状态。
 
-## 8. 文档与版本一致性 —— `低` / quick win
+## 9. 中间 assistant 消息展示（流式输出） —— `部分` ⚠️
+
+- **目标**：agent 循环中的 assistant 中间消息（tool call 之间）以飞书卡片展示，对齐 WebUI 的 conversation stream。
+- **现状**：`src/feishu-streaming.ts` 已订阅 mux `assistant/message` 事件，`/stream` 命令可开关（默认 OFF）。**但当前实现有 QPS 瓶颈**：每次发独立新卡片，受飞书消息发送 5 QPS 限制。
+- **流式输出技术方案**：见下方 [飞书流式输出技术方案](#飞书流式输出技术方案)。
+- **待补**：迁移到 CardKit 流式更新 API，消除 QPS 限制。
+
+## 10. 文档与版本一致性 —— `低` / quick win
 
 - **README 过期**：`README.md:292-293` 仍写 `/compact` 可用，但 CHANGELOG 已确认 `/compact` 移除。需同步：勾掉 `/compact`，补 `/new` `/thread` `/help` `/approve` `/deny` `/approvals`（及本清单新增的 `/status`、`/new --workspace/--preset`）。
 - **README 定位未对齐**：README 开头仍是"channel 插件"口径，应按 AGENTS.md 新定位更新。
@@ -87,7 +94,96 @@
 1. ~~**#1 卡片化 + footer**~~ ✅ + ~~**#4 `/status`**~~ ✅ —— 本轮核心，纯插件层收尾，无 DSH 改动，立即提升飞书体验。
 2. **#2 `/new` 带参数** + **#3 目录候选补全** —— 配合 #1 的 footer，让用户能把会话正确落到目标 workspace/preset。
 3. ~~**#5 工具调用展示**~~ ✅ + ~~**#6 todo 展示**~~ ✅ —— 已完成，零改造 DSH，复用 mux 订阅模式。
-4. **#8 文档一致性** —— 顺手清理。
-5. **#7 多 thread 话题导航** —— 工作量更大，底层已在。
+4. **#9 流式输出 → CardKit 迁移** —— 解决 5 QPS 瓶颈，需调研 CardKit API + 权限。
+5. **#8 文档一致性** —— 顺手清理。
+6. **#7 多 thread 话题导航** —— 工作量更大，底层已在。
 
 > 每完成一项，更新本清单状态 + 同步更新 AGENTS.md 的「与 DSH Web UI 功能对齐」表。
+
+---
+
+## 飞书流式输出技术方案
+
+> 调研日期：2026-08-24。飞书官方文档来源见各段引用。
+
+### 现状：普通卡片发送（有 QPS 限制）
+
+当前 `src/feishu-streaming.ts` 每次 agent 循环中的 assistant 中间消息都**发一张新的独立卡片**：
+
+```
+POST /im/v1/messages  →  发送新卡片（每张独立消息）
+```
+
+**限制**：
+- 每用户/每群 **5 QPS**（每秒最多发 5 条消息）
+- agent 循环中 tool call 卡片 + todo 卡片 + streaming 卡片 + 最终回复卡片，很容易触发
+- 超限后返回错误，卡片发送失败（当前有 `.catch()` 兜底，但用户看不到内容）
+
+### 方案：CardKit 流式更新（无 QPS 限制）
+
+飞书提供 **CardKit 流式更新 API**，核心机制是：**先创建一张流式卡片，然后持续更新同一张卡片的内容**。
+
+#### API 端点
+
+| 步骤 | API | 说明 |
+|---|---|---|
+| 1. 创建流式卡片 | `POST /open-apis/cardkit/v1/card` | body 含 `streaming_mode: true`，返回 `card_id` |
+| 2. 更新卡片内容 | `POST /open-apis/cardkit/v1/card/:card_id/contents` | 全量/局部/文本流式更新 |
+| 3. 结束流式 | 关闭 streaming_mode 或 10 分钟自动关闭 | — |
+
+#### 关键限制
+
+| 限制项 | 值 |
+|---|---|
+| 流式更新 QPS | **无限制**（官方文档明确："在流式更新模式下，不会触发接口的频率限制"） |
+| 卡片大小 | **30KB**（JSON 序列化后） |
+| 组件数量 | **200 个** |
+| 自动关闭 | 最后一次激活后 **10 分钟** |
+| 文本流式更新频率 | 默认 70ms/次（可配 `print_frequency_ms`） |
+| 文本流式步长 | 默认 1 字符/次（可配 `print_step`） |
+
+#### 迁移方案
+
+**当前架构**（每次发新卡片）：
+```
+agent/message → 200ms debounce → sendCard(chat, card) → POST /im/v1/messages
+                                ↓ (每张独立消息，5 QPS 限制)
+```
+
+**目标架构**（单卡流式更新）：
+```
+turn/start → createStreamingCard(chat) → POST /cardkit/v1/card {streaming_mode: true}
+                                       → 拿到 card_id
+assistant/message → updateStreamingContent(card_id, text)
+                  → POST /cardkit/v1/card/:card_id/contents (无 QPS 限制)
+tool/call → updateStreamingContent(card_id, "🔧 calling xxx...")
+turn/end → finalizeStreamingCard(card_id)
+         → 关闭 streaming_mode 或发送最终卡片
+```
+
+#### 实现要点
+
+1. **session 级卡片**：每个 session 在 `turn/start` 时创建一张流式卡片，`turn/end` 时关闭。
+2. **内容拼接**：tool call 结果、assistant 中间消息都追加到同一张卡片，而非发新卡。
+3. **CardKit SDK**：飞书 Node SDK 的 `lark.Cardkit` 或直接 HTTP 调用。
+4. **降级**：CardKit API 不可用时，回退到当前的独立卡片方案（保底）。
+5. **`/stream` 命令**：保留开关功能，控制是否创建流式卡片。
+
+#### 需要调研的细节
+
+- [ ] CardKit 创建卡片的完整请求体结构（`POST /cardkit/v1/card`）
+- [ ] 全量更新 vs 局部更新 vs 文本流式更新的适用场景
+- [ ] 是否需要额外的飞书应用权限（`cardkit:card` scope？）
+- [ ] `card_id` 的生命周期（同一 session 多个 turn 是否复用？）
+- [ ] 飞书 Node SDK 是否已封装 CardKit API，还是需要直接 HTTP 调用
+- [ ] 流式卡片在飞书客户端的渲染效果（是否支持 markdown？是否有 loading 动画？）
+
+#### 参考
+
+- [流式更新卡片概述](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/streaming-updates-openapi-overview.md)
+- [更新卡片实体配置](https://open.larkoffice.com/document/cardkit-v1/card/settings)
+- [流式更新文本 API](https://open.feishu.cn/document/cardkit-v1/card-element/content)
+- [飞书AI机器人流式输出实践（掘金）](https://juejin.cn/post/7600990891206819867)
+- [飞书 Streaming Card / CardKit 实战（CSDN）](https://devpress.csdn.net/demo/69affc8c54b52172bc6052fc.html)
+- [CardKit 流式更新 Python 示例](https://feishu.danling.org/streaming/cardkit/)
+- [OpenClaw 飞书流式回复配置指南](https://jishuzhan.net/article/2029099169638580225)
