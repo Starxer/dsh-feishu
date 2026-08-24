@@ -27,13 +27,10 @@
 
 ---
 
-## 1. 每轮最终结果卡片化 + 底部标注 workspace/preset —— `待实现` ⭐ 本轮核心
+## 1. 每轮最终结果卡片化 + 底部标注 workspace/preset —— `已有` ✅
 
 - **目标**：每轮对话的最终 assistant 文本渲染成**飞书 interactive card**，卡片底部（footer）固定标注当前 session 的 **workspace 路径 + agent 模式（preset）**。
-- **现状**：目前 `src/channel.ts:210` 用 `channel.send(chatId, { markdown: text })` 发纯文本，无 footer。
-- **接缝**：`harness.ts` 的 `reply()` 拿到 assistant 文本后，channel 层渲染卡片；workspace/preset 从 bridge 的 session meta（`createAgent` 时存的 `config.workspace` / `config.agentPreset`）或 `readFrom()` 读 header 的 `cwd` / `agentPreset`。
-- **边界**：footer **纯插件注入，不调 LLM**、不占模型 token。需确认 card 的文本区能承载较长 assistant 输出（markdown 渲染）。
-- **验收**：每轮回复为卡片；卡片底部能正确显示该 session 的 workspace + preset；换 workspace/preset 后 footer 随之更新。
+- **实现**：`src/channel.ts` 的 `renderReplyCard()` 使用 `{ tag: 'markdown', content }` 组件渲染，底部 note 注入 workspace + preset。空回复显示 `(empty response)` 占位。
 
 ## 2. 工作区 + 预设只在 `/new` 时指定 —— `待实现`（含命令扩展）
 
@@ -67,21 +64,15 @@
 - **接缝**：`agent-presets.select({ sessionId, agentPreset })`（`packages/host/apiproxy/src/api/agent-presets.ts:71`）是 WebUI 运行时换 preset 的原生 RPC——**当前不做**，仅在此备注为后续可能接点。
 - **验收**：飞书 `/status` 返回完整状态信息，内容与 WebUI 一致；用户可据此确认当前 session 的工作区、模式、模型。
 
-## 5. 工具调用展示 —— `待实现`
+## 5. 工具调用展示 —— `已有` ✅
 
 - **目标**：模型调用工具时在飞书侧可视化（工具名、参数、结果），对齐 WebUI ToolCard。
-- **现状**：`src` 无 tool-call 可视化；`summarizeTurn` 只提取 assistant 文本，丢弃 tool 过程（`src/conversation.ts:33`）。
-- **接缝**：`events.mux()` → `session/event` 帧，`event.type ∈ {'tool/call','tool/result'}`，`view` 即 Host 渲染意图。
-- **建议形态**：轻量卡片（工具名 + 参数摘要 + 结果摘要），注意控制刷屏（一个 turn 可能几十次 tool 调用）。
-- **验收**：飞书能看到"正在调用某工具 → 完成"的卡片序列；与审批/问题卡片不冲突。
+- **实现**：`src/feishu-toolcalls.ts` 订阅 apiproxy mux `tool/call` + `tool/result` 事件，蓝色卡片（调用开始）+ 绿色/红色卡片（调用完成/失败），含参数摘要、结果、耗时。200ms 批量 debounce 防刷屏。
 
-## 6. todo 展示 —— `待实现`
+## 6. todo 展示 —— `已有` ✅
 
 - **目标**：把 DSH 的 todo 状态映射到飞书，对齐 WebUI TodoPanel。
-- **现状**：`src` 无 todo 处理。
-- **接缝**：`events.mux()` → `session/event` 帧，`event.type === 'todo/write'`，`event.data.todos`。
-- **形态候选**：实时 todo 卡片 / `/todo` 命令拉快照（二选一）。
-- **验收**：飞书能展示 agent 当前 todo 清单，变化有反馈。
+- **实现**：`src/feishu-todos.ts` 订阅 apiproxy mux `todo/write` 事件，绿色卡片含进度条（完成数/总数）和状态图标（⬜ 待办 / 🔄 进行中 / ✅ 完成）。500ms debounce。
 
 ## 7. 多 thread 并行 → 飞书话题导航 —— `规划中`
 
@@ -101,9 +92,9 @@
 
 ## 优先级建议
 
-1. **#1 卡片化 + footer** + **#4 `/status`** —— 本轮核心，纯插件层收尾，无 DSH 改动，立即提升飞书体验。
+1. ~~**#1 卡片化 + footer**~~ ✅ + **#4 `/status`** —— 本轮核心，纯插件层收尾，无 DSH 改动，立即提升飞书体验。
 2. **#2 `/new` 带参数** + **#3 目录候选补全** —— 配合 #1 的 footer，让用户能把会话正确落到目标 workspace/preset。
-3. **#5 工具调用展示** + **#6 todo 展示** —— 有清晰接缝、零改造 DSH，复用 mux 订阅模式。
+3. ~~**#5 工具调用展示**~~ ✅ + ~~**#6 todo 展示**~~ ✅ —— 已完成，零改造 DSH，复用 mux 订阅模式。
 4. **#8 文档一致性** —— 顺手清理。
 5. **#7 多 thread 话题导航** —— 工作量更大，底层已在。
 
