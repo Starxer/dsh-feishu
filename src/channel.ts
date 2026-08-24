@@ -122,7 +122,7 @@ export interface ChatCoordinates {
 
 export async function startChannel(
   config: Omit<RuntimeConfig, 'appSecretRef'>,
-  bridge: Pick<HarnessConversationService, 'reply' | 'dispose'>,
+  bridge: Pick<HarnessConversationService, 'reply' | 'dispose' | 'consumeIntermediateSent' | 'resolveSessionIdFor'>,
   factory: ChannelFactory = createLarkChannel,
   logger: PluginLogger = console,
   terminalLogger?: Pick<PluginLogger, 'error'>,
@@ -223,12 +223,17 @@ export async function startChannel(
       }
       try {
         const text = await bridge.reply(inboundMessage)
-        const meta = await replyCardMeta?.({ chatId: message.chatId, chatType: message.chatType, ...(message.threadId !== undefined ? { threadId: message.threadId } : {}) })
-        const card = renderReplyCard(text, meta)
-        await channel.send(message.chatId, { card }, {
-          replyTo: message.messageId,
-          replyInThread,
-        })
+        // Skip the final reply card if intermediate assistant message cards
+        // were already sent during this turn (avoids duplication).
+        const sessionId = bridge.resolveSessionIdFor(inboundMessage)
+        if (!bridge.consumeIntermediateSent(sessionId)) {
+          const meta = await replyCardMeta?.({ chatId: message.chatId, chatType: message.chatType, ...(message.threadId !== undefined ? { threadId: message.threadId } : {}) })
+          const card = renderReplyCard(text, meta)
+          await channel.send(message.chatId, { card }, {
+            replyTo: message.messageId,
+            replyInThread,
+          })
+        }
       } catch (error: unknown) {
         logError(`dsh-feishu: message handling failed: ${error instanceof Error ? error.message : String(error)}`)
         await channel.send(message.chatId, { text: config.errorMessage }, {

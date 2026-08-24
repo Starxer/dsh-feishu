@@ -90,6 +90,12 @@ export class HarnessConversationService {
    * without spinning a new chat in Feishu.
    */
   private readonly chatToSession = new Map<string, string>()
+  /**
+   * Sessions for which intermediate assistant message cards were sent during
+   * the current turn. The channel skips the final reply card for these
+   * sessions to avoid duplication.
+   */
+  private readonly intermediateSent = new Set<string>()
 
   constructor(private readonly deps: HarnessDependencies, private readonly config: HarnessBridgeConfig) {
     this.loadSessionMap()
@@ -450,6 +456,23 @@ export class HarnessConversationService {
       }
     }
     return { title, turns: turns.size, steps, toolCalls, inputTokens, outputTokens, contextWindow, lastInputTokens }
+  }
+
+  /** Mark a session as having sent intermediate assistant message cards. */
+  markIntermediateSent(sessionId: string): void {
+    this.intermediateSent.add(sessionId)
+  }
+
+  /** Check and consume the intermediate-sent flag for a session. Returns true if intermediate cards were sent. */
+  consumeIntermediateSent(sessionId: string): boolean {
+    if (!this.intermediateSent.has(sessionId)) return false
+    this.intermediateSent.delete(sessionId)
+    return true
+  }
+
+  /** Resolve the session id for a chat message (used by streaming module). */
+  resolveSessionIdFor(message: ConversationMessage): string {
+    return this.resolveSessionId(message)
   }
 
   /** Marker kept to silence trailing whitespace edits. */

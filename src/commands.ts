@@ -108,6 +108,7 @@ export interface CommandTranslations {
   readonly approvalsAgeHours: (n: number) => string
   readonly statusDescription: string
   readonly statusOutput: (meta: { sessionId: string; workspace: string; agentPreset: string; model: string; title: string; turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number; contextWindow: number; lastInputTokens: number }) => string
+  readonly streamDescription: string
 }
 
 /**
@@ -251,7 +252,12 @@ export function registerLarkCommands(
       description: t.statusDescription,
       handler: invocation => handleStatusCommand(invocation, bridge, chatMessageFor, t),
     })
-  }, 'dsh-feishu: /model /new /thread /help /approve /deny /approvals /status commands')
+    yield ctx.commands.register({
+      name: 'stream',
+      description: t.streamDescription,
+      handler: async () => ({ kind: 'success', text: '' }),
+    })
+  }, 'dsh-feishu: /model /new /thread /help /approve /deny /approvals /status /stream commands')
 }
 
 async function handleModelCommand(

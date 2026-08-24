@@ -56,6 +56,7 @@ const translations: CommandTranslations = {
   approvalsAgeHours: n => `${n}h`,
   statusDescription: 'Show session status',
   statusOutput: (meta) => `Session: ${meta.sessionId} | Title: ${meta.title} | Workspace: ${meta.workspace} | Preset: ${meta.agentPreset} | Model: ${meta.model}`,
+  streamDescription: 'Toggle streaming messages',
 }
 
 const stubApprovalControl: ApprovalControl = {
@@ -171,7 +172,7 @@ describe('registerLarkCommands', () => {
   it('registers the /model, /new, /thread, and /help commands on the registry', () => {
     const fake = fakeContext()
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands(), stubApprovalControl)
-    expect(fake.registered.map(item => item.name)).toEqual(['model', 'new', 'thread', 'help', 'approve', 'deny', 'approvals', 'status'])
+    expect(fake.registered.map(item => item.name)).toEqual(['model', 'new', 'thread', 'help', 'approve', 'deny', 'approvals', 'status', 'stream'])
     fake.dispose()
   })
 })

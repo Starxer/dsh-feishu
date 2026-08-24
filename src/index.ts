@@ -29,6 +29,7 @@ import { handleProvisionRequest, handleSettingsRequest, PROVISION_PATH, SETTINGS
 import { settleApprovalBySlash, startFeishuApprovals, type PendingApprovalView } from './feishu-approvals.ts'
 import { startFeishuToolCalls } from './feishu-toolcalls.ts'
 import { startFeishuTodos } from './feishu-todos.ts'
+import { startFeishuStreaming } from './feishu-streaming.ts'
 
 export const name = 'lark-channel'
 export const inject = [
@@ -102,6 +103,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   let stopApprovals: () => void = () => undefined
   let stopToolCalls: () => void = () => undefined
   let stopTodos: () => void = () => undefined
+  let stopStreaming: () => void = () => undefined
   const channelHolder: { current: LarkChannel | undefined } = { current: undefined }
   const buildApprovalControl = (apiProxy: ApiProxy): ApprovalControl => {
     const approvalsHandle = startFeishuApprovals({
@@ -184,7 +186,12 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         createLarkChannel,
         ctx.logger,
         console,
-        message => executeSlashCommand(message, bridge, commands, bridgeHolder),
+        message => executeSlashCommand(message, bridge, commands, bridgeHolder, () => {
+          const current = currentSettings().showIntermediateMessages
+          const next = !current
+          void settings.mutate(namespace, [{ op: 'set', path: ['showIntermediateMessages'], value: next }], currentRevision())
+          return { enabled: next as boolean }
+        }),
         attachments,
         async (coords) => {
           const meta = await bridge.getSessionMeta(coords as ConversationMessage)
@@ -217,6 +224,13 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       channel: cardChannel,
       bridgeHolder,
       logger: ctx.logger('dsh-feishu'),
+    })
+    stopStreaming = startFeishuStreaming({
+      apiProxy,
+      channel: cardChannel,
+      bridgeHolder,
+      logger: ctx.logger('dsh-feishu'),
+      enabled: () => currentSettings().showIntermediateMessages,
     })
   }
   registerLarkCommands(
@@ -253,7 +267,8 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     stopApprovals()
     stopToolCalls()
     stopTodos()
-  }, 'dsh-feishu: feishu questions + approvals + toolcalls + todos listeners')
+    stopStreaming()
+  }, 'dsh-feishu: feishu questions + approvals + toolcalls + todos + streaming listeners')
 
   let lastPrintedQrUrl: string | undefined
   const provisionManager = new ProvisionManager({
@@ -410,6 +425,7 @@ const larkCommandTranslations: CommandTranslations = {
     }
     return lines.join('\n')
   },
+  streamDescription: 'Toggle intermediate assistant messages during agent turns',
 }
 
 /** Render the /status result as a Feishu interactive card. */
@@ -491,6 +507,7 @@ async function executeSlashCommand(
   bridge: HarnessConversationService,
   commands: CommandRuntime,
   bridgeHolder: { lastChatMessage: { chatId: string; chatType: 'p2p' | 'group'; threadId?: string } | undefined },
+  toggleStream?: () => { enabled: boolean },
 ): Promise<{ kind: 'success' | 'error'; text: string; card?: object } | undefined> {
   const parsed = parseCommand(message.content)
   if (parsed === undefined) return undefined
@@ -511,6 +528,15 @@ async function executeSlashCommand(
   }
   if (parsed.name === 'thread') {
     return await handleThreadDirect(parsed.rawInput.trim(), bridge, chatMessage)
+  }
+  if (parsed.name === 'stream') {
+    if (toggleStream === undefined) {
+      return { kind: 'error', text: 'Stream mode toggle is not available.' }
+    }
+    const result = toggleStream()
+    return { kind: 'success', text: result.enabled
+      ? '🟢 Streaming intermediate assistant messages: **ON**'
+      : '🔴 Streaming intermediate assistant messages: **OFF**' }
   }
   // Stash the chat coordinates so the registered handler can find them
   // without holding per-invocation state on the agent. The bridge serializes
