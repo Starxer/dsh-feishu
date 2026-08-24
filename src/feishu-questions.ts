@@ -226,14 +226,15 @@ function renderQuestionCard(
   rpcId: string,
   _sessionId: string,
 ): object {
-  const body: object[] = []
+  const mdParts: string[] = []
   if (question.header !== undefined && question.header !== '') {
-    body.push({ tag: 'div', text: { tag: 'lark_md', content: `**${question.header}**` } })
+    mdParts.push(`**${question.header}**`)
   }
-  body.push({ tag: 'div', text: { tag: 'lark_md', content: question.question } })
+  mdParts.push(question.question)
   if (question.detail !== undefined && question.detail !== '') {
-    body.push({ tag: 'div', text: { tag: 'lark_md', content: question.detail } })
+    mdParts.push(question.detail)
   }
+  const body: object[] = [{ tag: 'markdown', content: mdParts.join('\n') }]
   const multiSelect = question.multiSelect === true
   const elements: object[] = []
   if (options.length > 0) {

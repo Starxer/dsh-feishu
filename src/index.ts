@@ -189,6 +189,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         message => executeSlashCommand(message, bridge, commands, bridgeHolder, () => {
           const current = currentSettings().showIntermediateMessages
           const next = !current
+          ctx.logger('dsh-feishu').info(`dsh-feishu: /stream toggle: ${current} → ${next}`)
           void settings.mutate(namespace, [{ op: 'set', path: ['showIntermediateMessages'], value: next }], currentRevision())
           return { enabled: next as boolean }
         }),

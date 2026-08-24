@@ -174,22 +174,12 @@ function renderTodoCard(todos: TodoItem[]): object {
     const text = todo.status === 'completed' ? `~~${todo.content}~~` : todo.content
     lines.push(`${icon} ${text}`)
   }
-  const body: object[] = [
-    {
-      tag: 'div',
-      text: { tag: 'lark_md', content: `**Progress:** ${completed}/${total}` },
-    },
-    {
-      tag: 'div',
-      text: { tag: 'lark_md', content: lines.join('\n') },
-    },
-  ]
   return {
     config: { wide_screen_mode: true },
     header: {
       title: { tag: 'plain_text', content: '📋 Todo List' },
       template: 'turquoise',
     },
-    elements: body,
+    elements: [{ tag: 'markdown', content: `**Progress:** ${completed}/${total}\n${lines.join('\n')}` }],
   }
 }

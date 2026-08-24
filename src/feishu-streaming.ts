@@ -97,13 +97,24 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): () => void {
         const frame = envelope.payload as MuxFrame
         if (frame.type !== 'session/event') continue
         totalReceived++
-        if (enabled !== undefined && !enabled()) continue
+        if (enabled !== undefined && !enabled()) {
+          // Log the first few skips so operators can see the enabled() state
+          if (totalReceived <= 3) {
+            logger.info(`dsh-feishu: streaming event skipped (enabled()=false, totalReceived=${totalReceived})`)
+          }
+          continue
+        }
         const event = frame.event
         if (event === undefined) continue
         const bridge = bridgeHolder.current
         if (bridge === undefined) continue
         const chat = bridge.resolveChat(frame.sessionId)
-        if (chat === undefined) continue
+        if (chat === undefined) {
+          if (assistantReceived <= 3) {
+            logger.info(`dsh-feishu: streaming event for unknown chat session=${frame.sessionId}`)
+          }
+          continue
+        }
         const state = getState(frame.sessionId)
 
         if (event.type === 'assistant/message') {

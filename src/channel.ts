@@ -234,11 +234,22 @@ export async function startChannel(
           const sessionId = bridge.resolveSessionIdFor(inboundMessage)
           if (!bridge.consumeIntermediateSent(sessionId)) {
             const meta = await replyCardMeta?.({ chatId, chatType, ...(threadId !== undefined ? { threadId } : {}) })
-            const card = renderReplyCard(text, meta)
-            await channel.send(chatId, { card }, {
-              replyTo: messageId,
-              replyInThread,
-            })
+            // Cards don't support tables or headings in markdown; fall back
+            // to a plain text message when the reply contains them.
+            if (needsPlainTextFallback(text)) {
+              const footer = buildFooterText(meta)
+              const plainText = footer !== '' ? `${text}\n\n---\n${footer}` : text
+              await channel.send(chatId, { text: plainText }, {
+                replyTo: messageId,
+                replyInThread,
+              })
+            } else {
+              const card = renderReplyCard(text, meta)
+              await channel.send(chatId, { card }, {
+                replyTo: messageId,
+                replyInThread,
+              })
+            }
           }
         }).catch((error: unknown) => {
           logError(`dsh-feishu: message handling failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -286,6 +297,30 @@ export async function startChannel(
       }
     },
   }
+}
+
+/**
+ * Check if the reply text contains markdown features that cards don't support
+ * (tables, headings). When true, the reply should be sent as a plain text
+ * message instead of an interactive card.
+ */
+function needsPlainTextFallback(text: string): boolean {
+  for (const line of text.split('\n')) {
+    const trimmed = line.trimStart()
+    // Table row: starts with | and has at least one more |
+    if (trimmed.startsWith('|') && trimmed.indexOf('|', 1) !== -1) return true
+    // Heading: starts with # followed by space
+    if (/^#{1,6}\s/.test(trimmed)) return true
+  }
+  return false
+}
+
+/** Build a one-line footer string for plain-text fallback messages. */
+function buildFooterText(meta?: ReplyCardMeta): string {
+  const parts: string[] = []
+  if (meta?.workspace !== undefined && meta.workspace !== '') parts.push(`📂 ${meta.workspace}`)
+  if (meta?.agentPreset !== undefined && meta.agentPreset !== '') parts.push(`⚙️ ${meta.agentPreset}`)
+  return parts.join(' · ')
 }
 
 /**

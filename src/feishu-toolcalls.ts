@@ -163,26 +163,16 @@ function summarizeValue(value: unknown, maxLen: number = 200): string {
  * Render a tool-call card showing the tool name and arguments.
  */
 function renderToolCallCard(toolName: string, args: unknown): object {
-  const body: object[] = [
-    {
-      tag: 'div',
-      text: { tag: 'lark_md', content: `**Tool:** \`${toolName}\`` },
-    },
-  ]
+  const parts: string[] = [`**Tool:** \`${toolName}\``]
   const argsSummary = summarizeValue(args, 300)
-  if (argsSummary !== '') {
-    body.push({
-      tag: 'div',
-      text: { tag: 'lark_md', content: `**Args:**\n\`\`\`\n${argsSummary}\n\`\`\`` },
-    })
-  }
+  if (argsSummary !== '') parts.push(`**Args:**\n\`\`\`\n${argsSummary}\n\`\`\``)
   return {
     config: { wide_screen_mode: true },
     header: {
       title: { tag: 'plain_text', content: '🔧 Tool Call' },
       template: 'wathet',
     },
-    elements: body,
+    elements: [{ tag: 'markdown', content: parts.join('\n') }],
   }
 }
 
@@ -190,31 +180,18 @@ function renderToolCallCard(toolName: string, args: unknown): object {
  * Render a tool-result card showing the result or error.
  */
 function renderToolResultCard(toolName: string, isError: boolean, result: unknown, elapsed: number | undefined): object {
-  const body: object[] = [
-    {
-      tag: 'div',
-      text: { tag: 'lark_md', content: `**Tool:** \`${toolName}\`` },
-    },
-  ]
+  const parts: string[] = [`**Tool:** \`${toolName}\``]
   if (elapsed !== undefined) {
-    body.push({
-      tag: 'div',
-      text: { tag: 'lark_md', content: `**Time:** ${elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s` : `${elapsed}ms`}` },
-    })
+    parts.push(`**Time:** ${elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s` : `${elapsed}ms`}`)
   }
   const resultSummary = summarizeValue(result, 300)
-  if (resultSummary !== '') {
-    body.push({
-      tag: 'div',
-      text: { tag: 'lark_md', content: `**Result:**\n\`\`\`\n${resultSummary}\n\`\`\`` },
-    })
-  }
+  if (resultSummary !== '') parts.push(`**Result:**\n\`\`\`\n${resultSummary}\n\`\`\``)
   return {
     config: { wide_screen_mode: true },
     header: {
       title: { tag: 'plain_text', content: isError ? '❌ Tool Error' : '✅ Tool Done' },
       template: isError ? 'red' : 'green',
     },
-    elements: body,
+    elements: [{ tag: 'markdown', content: parts.join('\n') }],
   }
 }

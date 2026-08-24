@@ -257,22 +257,12 @@ function shortCodeFor(rpcId: string): string {
  * "Approval needed", body with tool/reason, action row with Reject / Approve.
  */
 function renderApprovalCard(entry: PendingApproval): object {
-  const body: object[] = []
-  body.push({
-    tag: 'div',
-    text: { tag: 'lark_md', content: `**Tool:** \`${entry.toolName}\`` },
-  })
-  if (entry.chat.threadId !== undefined) {
-    body.push({
-      tag: 'div',
-      text: { tag: 'lark_md', content: `_id \`${entry.shortCode}\` · pending in this thread_` },
-    })
-  } else {
-    body.push({
-      tag: 'div',
-      text: { tag: 'lark_md', content: `_id \`${entry.shortCode}\` · pending in this chat_` },
-    })
-  }
+  const locationHint = entry.chat.threadId !== undefined
+    ? `_id \`${entry.shortCode}\` · pending in this thread_`
+    : `_id \`${entry.shortCode}\` · pending in this chat_`
+  const body: object[] = [
+    { tag: 'markdown', content: `**Tool:** \`${entry.toolName}\`\n${locationHint}` },
+  ]
   const value = JSON.stringify({ rpcId: entry.rpcId })
   return {
     config: { wide_screen_mode: true },
