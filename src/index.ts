@@ -534,9 +534,15 @@ async function executeSlashCommand(
       return { kind: 'error', text: 'Stream mode toggle is not available.' }
     }
     const result = toggleStream()
-    return { kind: 'success', text: result.enabled
-      ? '🟢 Streaming intermediate assistant messages: **ON**'
-      : '🔴 Streaming intermediate assistant messages: **OFF**' }
+    const lines = [
+      result.enabled
+        ? '🟢 Streaming intermediate assistant messages: **ON**'
+        : '🔴 Streaming intermediate assistant messages: **OFF**',
+      '',
+      'When ON, assistant text responses between tool calls will appear as purple cards in the chat.',
+      'This setting persists across restarts.',
+    ]
+    return { kind: 'success', text: lines.join('\n') }
   }
   // Stash the chat coordinates so the registered handler can find them
   // without holding per-invocation state on the agent. The bridge serializes

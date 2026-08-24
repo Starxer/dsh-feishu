@@ -420,7 +420,19 @@ export class HarnessConversationService {
     return { sessionId, workspace: this.config.workspace ?? '', agentPreset: this.config.agentPreset ?? '', model: `${model.provider}/${model.model}`, ...empty }
   }
 
-  /** Derive session statistics from event log, mirroring the WebUI StatsLine. */
+  /**
+   * Derive session statistics from event log, mirroring the WebUI's
+   * tokenUsage + contextPressure projections.
+   *
+   * Token accounting uses last-wins per turn/step (matching the WebUI's
+   * `tokenUsageProjectionDefinition`): when an LLM step retries (same
+   * turn+step), the later usage replaces the earlier one rather than
+   * double-counting. `outputTokens` accumulates across all unique steps.
+   * `inputTokens` = billed input (uncached + cacheRead + cacheWrite).
+   *
+   * Also processes `assistant/chunk` events with `chunk.type === 'usage'`
+   * for early usage samples (same last-wins semantics per turn/step).
+   */
   private deriveSessionStats(events: ReadonlyArray<{ type: string; data: any }>): {
     title: string; turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number
     contextWindow: number; lastInputTokens: number
@@ -428,11 +440,17 @@ export class HarnessConversationService {
     const turns = new Set<number>()
     let steps = 0
     let toolCalls = 0
-    let inputTokens = 0
-    let outputTokens = 0
     let title = ''
     let contextWindow = 0
+
+    // Last-wins per turn/step for input tokens (matches WebUI projection).
+    // key = `${turn}:${step}` → billed input tokens for that step.
+    const stepInput = new Map<string, number>()
+    let totalOutput = 0
+
+    // Track the latest usage sample for context % display.
     let lastInputTokens = 0
+
     for (const event of events) {
       if (event.type === 'turn/start') {
         turns.add((event.data?.turn as number | undefined) ?? turns.size)
@@ -440,13 +458,28 @@ export class HarnessConversationService {
         steps++
       } else if (event.type === 'tool/call') {
         toolCalls++
-      } else if (event.type === 'assistant/message') {
-        const usage = event.data?.usage as { inputTokens?: number; outputTokens?: number } | undefined
-        if (usage?.inputTokens !== undefined) {
-          inputTokens += usage.inputTokens
-          lastInputTokens = usage.inputTokens
+      } else if (event.type === 'assistant/message' || (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'usage')) {
+        const turn = event.data?.turn as number | undefined
+        const step = event.data?.step as number | undefined
+        // For assistant/message, usage is at data.usage; for assistant/chunk, at data.chunk.usage
+        const usage = event.type === 'assistant/message'
+          ? event.data?.usage
+          : event.data?.chunk?.usage
+        if (usage === undefined || usage === null) continue
+        const iTokens = usage.inputTokens as number | undefined
+        const oTokens = usage.outputTokens as number | undefined
+        const crTokens = (usage.cacheReadTokens ?? 0) as number
+        const cwTokens = (usage.cacheWriteTokens ?? 0) as number
+        if (turn !== undefined && step !== undefined && iTokens !== undefined) {
+          // Last-wins: replace previous value for same turn+step.
+          const key = `${turn}:${step}`
+          const billed = iTokens + crTokens + cwTokens
+          stepInput.set(key, billed)
         }
-        if (usage?.outputTokens !== undefined) outputTokens += usage.outputTokens
+        if (oTokens !== undefined) totalOutput += oTokens
+        if (iTokens !== undefined) {
+          lastInputTokens = iTokens + crTokens + cwTokens
+        }
       } else if (event.type === 'session/title') {
         const next = event.data?.title
         if (typeof next === 'string' && next !== '') title = next
@@ -455,7 +488,12 @@ export class HarnessConversationService {
         if (cw !== undefined && cw > 0) contextWindow = cw
       }
     }
-    return { title, turns: turns.size, steps, toolCalls, inputTokens, outputTokens, contextWindow, lastInputTokens }
+
+    // Sum the surviving (non-replaced) per-step input tokens.
+    let inputTokens = 0
+    for (const v of stepInput.values()) inputTokens += v
+
+    return { title, turns: turns.size, steps, toolCalls, inputTokens, outputTokens: totalOutput, contextWindow, lastInputTokens }
   }
 
   /** Mark a session as having sent intermediate assistant message cards. */

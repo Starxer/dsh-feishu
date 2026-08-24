@@ -69,17 +69,26 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): () => void {
   const sendCard = (chat: ConversationMessage, sessionId: string, text: string): void => {
     if (text.trim() === '') return
     const card = renderStreamingCard(text)
-    bridgeHolder.current?.markIntermediateSent(sessionId)
     void channel.send(
       chat.chatId,
       { card },
       chat.threadId !== undefined ? { replyInThread: true } : {},
-    ).catch((error: unknown) => {
+    ).then(() => {
+      // Only mark intermediate sent AFTER the card is successfully delivered;
+      // otherwise the final reply card would be wrongly skipped on send failure.
+      bridgeHolder.current?.markIntermediateSent(sessionId)
+    }).catch((error: unknown) => {
       logger.warn(`dsh-feishu: streaming card send failed: ${error instanceof Error ? error.message : String(error)}`)
     })
   }
 
+  // Diagnostic: log once when the stream starts so operators can confirm the
+  // listener is alive. Also count received events to detect wiring issues.
+  let totalReceived = 0
+  let assistantReceived = 0
+
   const iterate = async (): Promise<void> => {
+    logger.info('dsh-feishu: streaming listener started (mux subscription active)')
     try {
       for await (const envelope of apiProxy.events.mux(
         { rpcId: RpcId(`feishu-streaming-${Date.now()}`), payload: {} },
@@ -87,6 +96,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): () => void {
       )) {
         const frame = envelope.payload as MuxFrame
         if (frame.type !== 'session/event') continue
+        totalReceived++
         if (enabled !== undefined && !enabled()) continue
         const event = frame.event
         if (event === undefined) continue
@@ -97,6 +107,10 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): () => void {
         const state = getState(frame.sessionId)
 
         if (event.type === 'assistant/message') {
+          assistantReceived++
+          if (assistantReceived <= 3) {
+            logger.info(`dsh-feishu: streaming got assistant/message #${assistantReceived} for session ${frame.sessionId}`)
+          }
           const message = event.data?.message
           if (message === undefined || message === null) continue
           const content = message.content
