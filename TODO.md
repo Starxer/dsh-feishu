@@ -19,10 +19,10 @@
 
 | # | 功能 | 优先级 | 说明 |
 |---|---|---|---|
-| 12 | tool call 卡片 markdown 渲染 | **高** | `lark_md` → `markdown`，11 处改动，立即改善可读性 |
-| 13 | 卡片 Markdown 渲染不稳定 | **高** | 标题不稳定、表格不渲染（普通消息正常），需降级方案 |
-| 11 | 非流式中间消息不可见 | **高** | `/stream` 开启后仍不可见，需诊断 enabled() + 事件流 |
-| 14 | 纯查询命令即时返回 | **中** | Agent 忙时 `/status` 排队等待，需分离命令处理 |
+| 12 | tool call 卡片 markdown 渲染 | **高** | ✅ 已修复：`lark_md` → `markdown`，4 文件 11 处 |
+| 13 | 卡片 Markdown 渲染不稳定 | **高** | ✅ 已修复：表格/标题自动降级为普通消息 |
+| 11 | 非流式中间消息不可见 | **高** | 已加诊断日志，需用户发 `/stream` 后测试 |
+| 14 | 纯查询命令即时返回 | **中** | ✅ 已修复：fire-and-forget + agent 运行状态 |
 | 16 | 权限系统接入 | **中** | 新增 `/permission` `/sandbox`，对齐 WebUI 权限设定 |
 | 2 | `/new` 带参数 | **中** | `/new --workspace <path> --preset <id>` |
 | 3 | 工作区候选补全 | **中** | 输入前缀列出匹配目录供选 |
@@ -32,23 +32,26 @@
 
 ---
 
-## #12 tool call 卡片 markdown 不渲染
+## #12 tool call 卡片 markdown 不渲染 —— ✅ 已修复
 
 - **问题**：`feishu-toolcalls.ts` / `feishu-todos.ts` / `feishu-questions.ts` / `feishu-approvals.ts` 使用 `{ tag: 'div', text: { tag: 'lark_md' } }`，只支持粗体/斜体/链接，不支持代码块。
-- **修复**：改为 `{ tag: 'markdown', content }`（同 reply card）。`channel.ts:305` 的 note 区保持 `lark_md`（note 只支持 lark_md）。
-- **验收**：tool call 卡片代码块正确渲染。
+- **修复**：改为 `{ tag: 'markdown', content }`（同 reply card）。`channel.ts` 的 note 区保持 `lark_md`（note 只支持 lark_md）。
 
-## #13 卡片 Markdown 渲染不稳定
+## #13 卡片 Markdown 渲染不稳定 —— ✅ 已修复
 
 - **实测**：列表 ✅ 稳定 | 标题 ❌ 不稳定 | 表格 ❌ 几乎不渲染
 - **对比**：飞书普通消息的表格完全正常——是卡片 markdown 组件的限制
-- **缓解方案**：表格用 `div` + `column_set` 模拟；标题用粗体模拟；或降级为普通消息
+- **修复**：回复含表格（`|`）或标题（`#`）时自动降级为普通 text 消息。普通消息支持完整 markdown。
 
 ## #11 非流式中间消息不可见
 
 - **现状**：`feishu-streaming.ts` 订阅 `assistant/message`，`/stream` 开关默认 OFF
-- **待查**：`enabled()` 回调是否生效？settings 是否持久化？agent 多步循环是否发出事件？
-- **已加诊断日志**：listener 启动 + 前 3 个 assistant/message 事件会打 log
+- **已加诊断日志**：
+  - listener 启动时打 log
+  - `enabled()=false` 跳过事件时前 3 次打 log
+  - `resolveChat()` 返回 undefined 时打 log
+  - `/stream` toggle 时记录状态变化
+- **下一步**：用户发 `/stream` 开启后测试，看 journalctl 日志确认事件流
 
 ## #14 纯查询命令即时返回
 
