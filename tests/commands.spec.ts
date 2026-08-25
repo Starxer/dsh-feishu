@@ -57,6 +57,14 @@ const translations: CommandTranslations = {
   statusDescription: 'Show session status',
   statusOutput: (meta) => `Session: ${meta.sessionId} | Title: ${meta.title} | Workspace: ${meta.workspace} | Preset: ${meta.agentPreset} | Model: ${meta.model}`,
   streamDescription: 'Toggle streaming messages',
+  stopDescription: 'Stop the running agent',
+  reasoningDescription: 'Show or change reasoning effort',
+  reasoningUsage: 'Usage: /reasoning [off|low|high|max]',
+  reasoningCurrent: (effort: string) => `Current: ${effort}`,
+  reasoningCurrentDefault: '(default)',
+  reasoningSwitched: (effort: string) => `Switched to ${effort}`,
+  reasoningLevels: 'Levels: off, low, high, max',
+  reasoningUnknown: (level: string) => `Unknown: ${level}`,
 }
 
 const stubApprovalControl: ApprovalControl = {
@@ -172,7 +180,7 @@ describe('registerLarkCommands', () => {
   it('registers the /model, /new, /thread, and /help commands on the registry', () => {
     const fake = fakeContext()
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands(), stubApprovalControl)
-    expect(fake.registered.map(item => item.name)).toEqual(['model', 'new', 'thread', 'help', 'approve', 'deny', 'approvals', 'status', 'stream'])
+    expect(fake.registered.map(item => item.name)).toEqual(['model', 'new', 'thread', 'help', 'approve', 'deny', 'approvals', 'status', 'stream', 'reasoning'])
     fake.dispose()
   })
 })

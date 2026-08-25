@@ -1,7 +1,7 @@
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { conversationKey, summarizeTurn, toSessionId } from './conversation.ts'
@@ -49,7 +49,7 @@ export interface HarnessDependencies {
      *  behind cordis), cold sessions still list with no title. */
     readFrom?(id: unknown, fromSeq: number): Promise<{ meta: unknown; events: ReadonlyArray<{ seq: number; type: string; data: any }> }>
   }
-  selection(): { provider: string; model: string }
+  selection(): { provider: string; model: string; reasoningEffort?: ReasoningEffortId }
   agentPresets: {
     resolve(id?: string): Promise<{ id: string }>
     mount(agentCtx: Parameters<typeof installModelSelection>[0], id?: string): Promise<unknown>
@@ -410,12 +410,13 @@ export class HarnessConversationService {
    * when the session has not been created yet.
    */
   async getSessionMeta(message: ConversationMessage): Promise<{
-    sessionId: string; workspace: string; agentPreset: string; model: string; title: string
+    sessionId: string; workspace: string; agentPreset: string; model: string; reasoningEffort: string; title: string
     turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number
     contextWindow: number; lastInputTokens: number
   }> {
     const sessionId = this.resolveSessionId(message)
     const model = this.selections.get(sessionId)?.current ?? this.deps.selection()
+    const reasoningEffort = model.reasoningEffort ? String(model.reasoningEffort) : ''
     const empty = { title: '', turns: 0, steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, contextWindow: 0, lastInputTokens: 0 }
     // Try reading the session header + events from persistence
     const readFrom = this.deps.sessionPersistence.readFrom
@@ -426,10 +427,10 @@ export class HarnessConversationService {
         const ws = header?.cwd ?? this.config.workspace ?? ''
         const preset = header?.agentPreset ?? this.config.agentPreset ?? ''
         const stats = this.deriveSessionStats(result.events as ReadonlyArray<{ type: string; data: any }>)
-        return { sessionId, workspace: ws, agentPreset: preset, model: `${model.provider}/${model.model}`, ...stats }
+        return { sessionId, workspace: ws, agentPreset: preset, model: `${model.provider}/${model.model}`, reasoningEffort, ...stats }
       } catch { /* fall through to config defaults */ }
     }
-    return { sessionId, workspace: this.config.workspace ?? '', agentPreset: this.config.agentPreset ?? '', model: `${model.provider}/${model.model}`, ...empty }
+    return { sessionId, workspace: this.config.workspace ?? '', agentPreset: this.config.agentPreset ?? '', model: `${model.provider}/${model.model}`, reasoningEffort, ...empty }
   }
 
   /**
@@ -552,10 +553,11 @@ export class HarnessConversationService {
       const existing = this.selections.get(sessionId)
       if (existing === undefined) {
         const fallback = this.deps.selection()
-        const initial: ModelSelection = {
+        const initial = {
           provider: this.config.provider ?? fallback.provider,
           model: this.config.model ?? fallback.model,
-        }
+          ...(fallback.reasoningEffort !== undefined ? { reasoningEffort: fallback.reasoningEffort } : {}),
+        } satisfies ModelSelection
         const ref: LiveSelection = { current: initial, assembled: undefined }
         installModelSelection(liveAgent.ctx, ref)
         this.selections.set(sessionId, ref)
@@ -563,10 +565,11 @@ export class HarnessConversationService {
       return { agent: liveAgent as unknown as AgentLike, dispose: async () => undefined }
     }
     const fallback = this.deps.selection()
-    const initial: ModelSelection = {
+    const initial = {
       provider: this.config.provider ?? fallback.provider,
       model: this.config.model ?? fallback.model,
-    }
+      ...(fallback.reasoningEffort !== undefined ? { reasoningEffort: fallback.reasoningEffort } : {}),
+    } satisfies ModelSelection
     // Build a mutable ref once per session; the agent loop's `installModelSelection`
     // listener reads `current` on every `system-prompt/assemble`, so a later
     // `/model` command mutating `ref.current` takes effect on the next message.

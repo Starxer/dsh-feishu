@@ -9,21 +9,26 @@
 
 | # | 功能 | 说明 |
 |---|---|---|
-| 1 | 卡片化 + footer | 最终回复渲染为飞书卡片，底部标注 workspace + preset |
-| 4 | `/status` 命令 | 展示 session id / title / workspace / preset / model / tokens / context |
-| 5 | 工具调用展示 | 订阅 `tool/call` + `tool/result`，蓝色/绿色/红色卡片 |
-| 6 | todo 展示 | 订阅 `todo/write`，绿色卡片含进度条 |
+| 1 | 卡片化 + footer | 最终回复卡片底部标注 workspace + preset + **模型名** + **思考强度** + **上下文使用量** |
+| 4 | `/status` 命令 | 展示 session id / title / workspace / preset / model / **reasoning** / tokens / context |
+| 5 | 工具调用展示 | 订阅 `apiProxy.events.mux` → `tool/call` + `tool/result`，wathet/green/red 卡片 |
+| 6 | todo 展示 | 订阅 `apiProxy.events.mux` → `todo/write`，turquoise 卡片含进度条 |
+| 11 | 中间消息不可见 | ✅ 改为 `apiProxy.events.mux` + `tool/call` 时 flush 累积文字，紫色卡片 |
+| 12 | tool call 卡片 markdown 渲染 | ✅ `lark_md` → `markdown`，4 文件 11 处 |
+| 13 | 卡片 Markdown 渲染不稳定 | ✅ 表格/标题自动降级为 `{ markdown: text }` 原生消息 |
+| 14 | 纯查询命令即时返回 | ✅ fire-and-forget + agent 运行状态检测 |
 | 15 | Agent 消息队列调研 | 两层队列机制已确认（见下方调研记录） |
+| 17 | `/reasoning` 思考强度命令 | ✅ `/reasoning [off|low|high|max]`，通过 `agentDefaultModel.saveSelection` 持久化 |
+| — | `/stop` 命令 | 通过 `apiProxy.sessions.cancel` 中断运行中的 agent，等同 WebUI 停止按钮 |
+| — | `/stream` 命令 | 切换 `showIntermediateMessages` 设置（已与中间消息模块解耦，保留备用） |
 
 ## 待实现
 
 | # | 功能 | 优先级 | 说明 |
 |---|---|---|---|
-| 12 | tool call 卡片 markdown 渲染 | **高** | ✅ 已修复：`lark_md` → `markdown`，4 文件 11 处 |
-| 13 | 卡片 Markdown 渲染不稳定 | **高** | ✅ 已修复：表格/标题自动降级为普通消息 |
-| 11 | 非流式中间消息不可见 | **高** | 已加诊断日志，需用户发 `/stream` 后测试 |
-| 14 | 纯查询命令即时返回 | **中** | ✅ 已修复：fire-and-forget + agent 运行状态 |
 | 16 | 权限系统接入 | **中** | 新增 `/permission` `/sandbox`，对齐 WebUI 权限设定 |
+| 18 | 思考内容展示 | **中** | 显示模型 reasoning/thinking 内容，内容放在代码块里防止占用过多行 |
+| 19 | tool_call / tool_done 顺序问题 | **中** | 有时 tool_result 先于 tool_call 到达，顺序反了，需排查 mux 事件时序 |
 | 2 | `/new` 带参数 | **中** | `/new --workspace <path> --preset <id>` |
 | 3 | 工作区候选补全 | **中** | 输入前缀列出匹配目录供选 |
 | 9 | 流式输出 → CardKit | **低** | 解决 5 QPS 瓶颈，需调研 CardKit API |
@@ -32,12 +37,43 @@
 
 ---
 
+## 卡片颜色参考
+
+| 颜色 | 用途 | 文件 |
+|---|---|---|
+| blue | 最终回复卡片、问题卡片 | `channel.ts`、`feishu-questions.ts` |
+| turquoise (青绿) | Status 状态卡片、Todo 列表卡片 | `index.ts`、`feishu-todos.ts` |
+| wathet (浅蓝) | Tool Call 调用中 | `feishu-toolcalls.ts` |
+| green | Tool Result 成功 | `feishu-toolcalls.ts` |
+| red | Tool Error 失败 | `feishu-toolcalls.ts` |
+| violet (紫色) | 中间消息 (tool call 之前的 assistant 文字) | `feishu-streaming.ts` |
+| orange | 审批请求 | `feishu-approvals.ts` |
+| grey | 无选项问题 | `feishu-questions.ts` |
+
+---
+
+## #11 中间消息不可见 —— ✅ 已修复
+
+- **根因 1**：旧代码用 `ctx.on('session/event')` 订阅 Cordis 事件，在插件 scope 中不生效
+- **根因 2**：旧代码依赖 `showIntermediateMessages` 设置，默认为 `false`
+- **修复**（2025-08-25）：
+  - 改用 `apiProxy.events.mux()` SSE（与 toolcalls/todos 一致）
+  - 逻辑：`assistant/chunk` → 累积 text-delta → `tool/call` 到达时 flush 为紫色卡片
+  - 不再依赖 `/stream` 开关或 `showIntermediateMessages` 设置
+  - 不再调用 `markIntermediateSent`（中间消息 ≠ 最终回复，不应跳过最终卡片）
+
+## #17 `/reasoning` 思考强度命令 —— ✅ 已实现
+
+- **命令**：`/reasoning` 查看 / `/reasoning off|low|high|max` 设置
+- **持久化**：通过 `agentDefaultModel.saveSelection()` 写入 DSH settings，重启后自动恢复
+- **联动**：status 卡片 + footer 均显示当前 reasoning effort
+
 ## #12 tool call 卡片 markdown 不渲染 —— ✅ 已修复
 
 - **问题**：`feishu-toolcalls.ts` / `feishu-todos.ts` / `feishu-questions.ts` / `feishu-approvals.ts` 使用 `{ tag: 'div', text: { tag: 'lark_md' } }`，只支持粗体/斜体/链接，不支持代码块。
 - **修复**：改为 `{ tag: 'markdown', content }`（同 reply card）。`channel.ts` 的 note 区保持 `lark_md`（note 只支持 lark_md）。
 
-## #13 卡片 Markdown 渲染不稳定 —— ⚠️ 部分修复
+## #13 卡片 Markdown 渲染不稳定 —— ✅ 已修复并验证
 
 - **实测**：列表 ✅ 稳定 | 标题 ❌ 不稳定 | 表格 ❌ 几乎不渲染
 - **对比**：飞书普通消息的表格完全正常——是卡片 markdown 组件的限制
@@ -46,23 +82,7 @@
   - `needsPlainTextFallback()` 检测表格行（`|`）和标题（`#`）
   - 含表格/标题的回复用 `{ markdown: text }` 格式发送（原生 markdown 消息，支持完整语法）
   - 普通回复仍用卡片（带 header/footer）
-  - 表格内容即使 streaming 已发过卡片也会发（因为 streaming 卡片也渲染不了表格）
-- **待验证**：`{ markdown: text }` 格式是否正确生效（需要用户测试表格渲染）
-
-## #11 非流式中间消息不可见
-
-- **现状**：`feishu-streaming.ts` 订阅 `assistant/message`，`/stream` 开关默认 OFF
-- **已加诊断日志**：
-  - listener 启动时打 log
-  - `enabled()=false` 跳过事件时前 3 次打 log
-  - `resolveChat()` 返回 undefined 时打 log
-  - `/stream` toggle 时记录状态变化
-- **下一步**：用户发 `/stream` 开启后测试，看 journalctl 日志确认事件流
-
-## #14 纯查询命令即时返回
-
-- **问题**：`/status` `/help` `/approvals` 不需要 LLM，但飞书 `chatQueue` 按 chat 串行化，需等前一条消息处理完
-- **方案**：channel handler 中分离「需要 agent」和「不需要 agent」命令，后者立即处理
+- **2025-08-24 验证**：`{ markdown: text }` 格式正确生效，表格在飞书正常显示 ✅
 
 ## #16 权限系统接入
 
@@ -70,6 +90,21 @@
 - **Session 事件**：`sandbox/mode`、`permission/preset`，持久化在 session log
 - **飞书接入**：`/permission` 列出 presets + 切换；`/sandbox` 直接切模式
 - **待调研**：`permissionPresets` service API、`setSandboxMode` API、与 WebUI `/permission` 命令是否冲突
+
+## #18 思考内容展示
+
+- **目标**：模型 reasoning/thinking 内容以卡片形式展示，内容放在代码块里防止占用过多行
+- **数据源**：`assistant/chunk` 事件中 `chunk.type === 'reasoning-delta'` 的文本
+- **UI 方案**：紫色卡片（同中间消息），reasoning 文字包裹在 ` ``` ` 代码块中，可折叠
+
+## #19 tool_call / tool_done 顺序问题
+
+- **现象**：有时飞书先收到 tool result（绿色/红色卡片），后收到 tool call（蓝色卡片），顺序反了
+- **可能原因**：
+  - mux SSE 的 `tool/result` 和 `tool/call` 是两个独立事件，result 可能比 call 先到
+  - `feishu-toolcalls.ts` 的 `scheduleBatch` 有 200ms debounce，可能导致 call 卡片被延迟发送
+  - session 事件的 `seq` 顺序 vs mux 传播顺序可能不一致
+- **排查方向**：对比 session event seq 和 mux 帧到达顺序，确认是事件源乱序还是消费端乱序
 
 ## #9 流式输出技术方案
 

@@ -78,7 +78,7 @@ export function resolveSettingsConfig(config: Config): SettingsConfig {
     dmAllowlist: config.dmAllowlist ?? [],
     errorMessage,
     reactEmoji: config.reactEmoji ?? DEFAULT_REACTION_EMOJI,
-    showIntermediateMessages: config.showIntermediateMessages ?? false,
+    showIntermediateMessages: config.showIntermediateMessages ?? true,
     ...(config.appSecret === undefined ? {} : { appSecret: config.appSecret }),
     ...(config.provider === undefined ? {} : { provider: config.provider }),
     ...(config.model === undefined ? {} : { model: config.model }),

@@ -109,6 +109,14 @@ export interface CommandTranslations {
   readonly statusDescription: string
   readonly statusOutput: (meta: { sessionId: string; workspace: string; agentPreset: string; model: string; title: string; turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number; contextWindow: number; lastInputTokens: number }) => string
   readonly streamDescription: string
+  readonly stopDescription: string
+  readonly reasoningDescription: string
+  readonly reasoningUsage: string
+  readonly reasoningCurrent: (effort: string) => string
+  readonly reasoningCurrentDefault: string
+  readonly reasoningSwitched: (effort: string) => string
+  readonly reasoningLevels: string
+  readonly reasoningUnknown: (level: string) => string
 }
 
 /**
@@ -257,7 +265,18 @@ export function registerLarkCommands(
       description: t.streamDescription,
       handler: async () => ({ kind: 'success', text: '' }),
     })
-  }, 'dsh-feishu: /model /new /thread /help /approve /deny /approvals /status /stream commands')
+    yield ctx.commands.register({
+      name: 'reasoning',
+      description: t.reasoningDescription,
+      handler: invocation => handleReasoningCommand(
+        invocation,
+        agentDefaultModel,
+        bridge,
+        chatMessageFor,
+        t,
+      ),
+    })
+  }, 'dsh-feishu: /model /new /thread /help /approve /deny /approvals /status /stream /reasoning commands')
 }
 
 async function handleModelCommand(
@@ -309,6 +328,53 @@ async function handleModelCommand(
   const previous = bridge.setCurrentSelection(chatMessageFor(invocation), selection)
   const liveNote = previous === undefined ? t.modelPersisted : t.modelLiveApplied
   return { kind: 'success', text: `${t.modelSwitched(route.provider, route.model)}\n${liveNote}` }
+}
+
+const VALID_REASONING_LEVELS = ['off', 'low', 'high', 'max'] as const
+
+/**
+ * Handle `/reasoning [level]`. Show or change the reasoning effort.
+ * The setting is persisted through agentDefaultModel.saveSelection so it
+ * survives DSH restarts.
+ */
+async function handleReasoningCommand(
+  invocation: CommandInvocation,
+  agentDefaultModel: AgentDefaultModelConfig,
+  bridge: Pick<HarnessConversationService, 'setCurrentSelection' | 'currentSelectionFor'>,
+  chatMessageFor: (invocation: CommandInvocation) => ConversationMessage,
+  t: CommandTranslations,
+): Promise<CommandResult> {
+  const rawInput = invocation.rawInput.trim().toLowerCase()
+  const current = agentDefaultModel.currentSelection()
+  const currentEffort = current.reasoningEffort ? String(current.reasoningEffort) : undefined
+
+  // No argument → show current level
+  if (rawInput === '') {
+    const display = currentEffort ?? t.reasoningCurrentDefault
+    const lines = [
+      t.reasoningCurrent(display),
+      '',
+      t.reasoningLevels,
+    ]
+    return { kind: 'success', text: lines.join('\n') }
+  }
+
+  // Validate level
+  if (!(VALID_REASONING_LEVELS as readonly string[]).includes(rawInput)) {
+    return { kind: 'error', text: `${t.reasoningUnknown(rawInput)}\n${t.reasoningLevels}` }
+  }
+
+  const level = rawInput as typeof VALID_REASONING_LEVELS[number]
+
+  // Preserve existing provider/model, only change reasoningEffort
+  const selection = {
+    provider: current.provider,
+    model: current.model,
+    reasoningEffort: level as never,
+  }
+  await agentDefaultModel.saveSelection(selection)
+  bridge.setCurrentSelection(chatMessageFor(invocation), selection)
+  return { kind: 'success', text: t.reasoningSwitched(level) }
 }
 
 /**

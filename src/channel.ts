@@ -111,6 +111,10 @@ async function admitImagesForMessage(
 export interface ReplyCardMeta {
   workspace?: string
   agentPreset?: string
+  model?: string
+  reasoningEffort?: string
+  contextWindow?: number
+  lastInputTokens?: number
 }
 
 /** Chat coordinates passed to the footer callback for session lookup. */
@@ -332,12 +336,27 @@ function logReplyDiagnostic(text: string, fallback: boolean): void {
   console.log(`dsh-feishu: reply preview="${preview}" fallback=${fallback}`)
 }
 
-/** Build a one-line footer string for plain-text fallback messages. */
+/** Compact token count display: 517 / 12.2K / 1.2M */
+function formatTokenCount(n: number): string {
+  if (n < 1_000) return String(n)
+  if (n < 1_000_000) return `${Math.round(n / 100) / 10}K`
+  return `${Math.round(n / 100_000) / 10}M`
+}
+
+/** Build a multi-line footer string for plain-text fallback messages. */
 function buildFooterText(meta?: ReplyCardMeta): string {
-  const parts: string[] = []
-  if (meta?.workspace !== undefined && meta.workspace !== '') parts.push(`📂 ${meta.workspace}`)
-  if (meta?.agentPreset !== undefined && meta.agentPreset !== '') parts.push(`⚙️ ${meta.agentPreset}`)
-  return parts.join(' · ')
+  const line1: string[] = []
+  const line2: string[] = []
+  if (meta?.workspace !== undefined && meta.workspace !== '') line1.push(`📂 ${meta.workspace}`)
+  if (meta?.agentPreset !== undefined && meta.agentPreset !== '') line1.push(`⚙️ ${meta.agentPreset}`)
+  if (meta?.model !== undefined && meta.model !== '') line2.push(`🧠 ${meta.model}`)
+  if (meta?.reasoningEffort !== undefined && meta.reasoningEffort !== '') line2.push(`💡 ${meta.reasoningEffort}`)
+  if (meta?.contextWindow !== undefined && meta.contextWindow > 0 && meta?.lastInputTokens !== undefined) {
+    const pct = Math.min(100, Math.round(meta.lastInputTokens / meta.contextWindow * 100))
+    line2.push(`📊 ${formatTokenCount(meta.lastInputTokens)}/${formatTokenCount(meta.contextWindow)} (${pct}%)`)
+  }
+  const lines = [line1.join(' · '), line2.join(' · ')].filter(l => l !== '')
+  return lines.join('\n')
 }
 
 /**
@@ -354,25 +373,31 @@ function renderReplyCard(text: string, meta?: ReplyCardMeta): object {
       content: displayText,
     },
   ]
-  // Add footer with workspace/preset info when available
-  const footerParts: string[] = []
+  // Add footer with workspace/preset/model/context info when available
+  const line1: string[] = []
+  const line2: string[] = []
   if (meta?.workspace !== undefined && meta.workspace !== '') {
-    footerParts.push(`📂 ${meta.workspace}`)
+    line1.push(`📂 ${meta.workspace}`)
   }
   if (meta?.agentPreset !== undefined && meta.agentPreset !== '') {
-    footerParts.push(`🤖 ${meta.agentPreset}`)
+    line1.push(`⚙️ ${meta.agentPreset}`)
   }
-  if (footerParts.length > 0) {
+  if (meta?.model !== undefined && meta.model !== '') {
+    line2.push(`🧠 ${meta.model}`)
+  }
+  if (meta?.reasoningEffort !== undefined && meta.reasoningEffort !== '') {
+    line2.push(`💡 ${meta.reasoningEffort}`)
+  }
+  if (meta?.contextWindow !== undefined && meta.contextWindow > 0 && meta?.lastInputTokens !== undefined) {
+    const pct = Math.min(100, Math.round(meta.lastInputTokens / meta.contextWindow * 100))
+    line2.push(`📊 ${formatTokenCount(meta.lastInputTokens)}/${formatTokenCount(meta.contextWindow)} (${pct}%)`)
+  }
+  const noteElements: object[] = []
+  if (line1.length > 0) noteElements.push({ tag: 'lark_md', content: line1.join(' · ') })
+  if (line2.length > 0) noteElements.push({ tag: 'lark_md', content: line2.join(' · ') })
+  if (noteElements.length > 0) {
     elements.push({ tag: 'hr' })
-    elements.push({
-      tag: 'note',
-      elements: [
-        {
-          tag: 'lark_md',
-          content: footerParts.join(' · '),
-        },
-      ],
-    })
+    elements.push({ tag: 'note', elements: noteElements })
   }
   return {
     config: { wide_screen_mode: true },

@@ -41,9 +41,11 @@ export type { PluginConfig }
 export { ConfigSchema } from './config.ts'
 
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
+import { RpcId } from '@deepseek-ai/dsh-host-apiproxy'
 import { startFeishuQuestions } from './feishu-questions.ts'
 
 export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void> {
+  console.log('dsh-feishu: apply() called, apiProxy=', ctx.get('apiProxy') !== undefined ? 'available' : 'UNDEFINED')
   const agents = ctx.get('agents')
   const sessions = ctx.get('sessions')
   const sessionPersistence = ctx.get('sessionPersistence')
@@ -72,7 +74,9 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   // only path in that case — the Feishu chat gets no card. We log the gap so
   // operators see why a deployment loses the option UI.
   if (apiProxy === undefined) {
-    ctx.logger('dsh-feishu').warn('dsh-feishu: apiProxy unavailable — ask_user_question cards will not render in Feishu')
+    ctx.logger('dsh-feishu').warn('dsh-feishu: apiProxy unavailable — streaming/questions/approvals/toolcalls/todos will not work')
+  } else {
+    ctx.logger('dsh-feishu').info('dsh-feishu: apiProxy available — will start streaming/questions/approvals listeners')
   }
 
   const settingsScope = settings.register(
@@ -130,10 +134,15 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   const cardActionHandlers = new Set<(evt: CardActionEvent) => void | Promise<void>>()
   const attachedChannels = new Set<LarkChannel>()
   const cardChannel = {
-    send: (to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<unknown> => {
+    send: (to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<{ messageId?: string }> => {
       const ch = channelHolder.current
       if (ch === undefined) return Promise.reject(new Error('dsh-feishu: channel not connected'))
-      return ch.send(to, input, opts) as Promise<unknown>
+      return ch.send(to, input, opts) as Promise<{ messageId?: string }>
+    },
+    updateCard: (messageId: string, card: object): Promise<void> => {
+      const ch = channelHolder.current
+      if (ch === undefined) return Promise.reject(new Error('dsh-feishu: channel not connected'))
+      return ch.updateCard(messageId, card)
     },
     onCardAction: (handler: (evt: CardActionEvent) => void | Promise<void>): (() => void) => {
       cardActionHandlers.add(handler)
@@ -192,11 +201,18 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
           ctx.logger('dsh-feishu').info(`dsh-feishu: /stream toggle: ${current} → ${next}`)
           void settings.mutate(namespace, [{ op: 'set', path: ['showIntermediateMessages'], value: next }], currentRevision())
           return { enabled: next as boolean }
-        }),
+        }, apiProxy),
         attachments,
         async (coords) => {
           const meta = await bridge.getSessionMeta(coords as ConversationMessage)
-          return { workspace: meta.workspace, agentPreset: meta.agentPreset }
+          return {
+            workspace: meta.workspace,
+            agentPreset: meta.agentPreset,
+            model: meta.model,
+            reasoningEffort: meta.reasoningEffort,
+            contextWindow: meta.contextWindow,
+            lastInputTokens: meta.lastInputTokens,
+          }
         },
       )
     },
@@ -231,7 +247,6 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       channel: cardChannel,
       bridgeHolder,
       logger: ctx.logger('dsh-feishu'),
-      enabled: () => currentSettings().showIntermediateMessages,
     })
   }
   registerLarkCommands(
@@ -244,7 +259,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       startNewSession: (chatMessage, salt) => bridgeHolder.current?.startNewSession(chatMessage, salt) ?? '',
       switchToSession: (chatMessage, sessionId) => bridgeHolder.current?.switchToSession(chatMessage, sessionId) ?? false,
       listSessions: async () => bridgeHolder.current?.listSessions() ?? [],
-      getSessionMeta: async (chatMessage) => bridgeHolder.current?.getSessionMeta(chatMessage) ?? { sessionId: '', workspace: '', agentPreset: '', model: '', title: '', turns: 0, steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, contextWindow: 0, lastInputTokens: 0 },
+      getSessionMeta: async (chatMessage) => bridgeHolder.current?.getSessionMeta(chatMessage) ?? { sessionId: '', workspace: '', agentPreset: '', model: '', reasoningEffort: '', title: '', turns: 0, steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, contextWindow: 0, lastInputTokens: 0 },
     },
     () => {
       const last = bridgeHolder.lastChatMessage
@@ -427,11 +442,19 @@ const larkCommandTranslations: CommandTranslations = {
     return lines.join('\n')
   },
   streamDescription: 'Toggle intermediate assistant messages during agent turns',
+  stopDescription: 'Stop the currently running agent in this chat (like the WebUI stop button)',
+  reasoningDescription: 'Show or change the model reasoning effort (thinking intensity)',
+  reasoningUsage: 'Usage: /reasoning [off|low|high|max]',
+  reasoningCurrent: (effort: string) => `🧠 Current reasoning effort: **${effort}**`,
+  reasoningCurrentDefault: '(provider default)',
+  reasoningSwitched: (effort: string) => `🧠 Reasoning effort switched to **${effort}**. Persisted across restarts.`,
+  reasoningLevels: 'Available levels: `off` · `low` · `high` · `max`',
+  reasoningUnknown: (level: string) => `Unknown reasoning level "${level}".`,
 }
 
 /** Render the /status result as a Feishu interactive card. */
 function renderStatusCard(meta: {
-  sessionId: string; workspace: string; agentPreset: string; model: string; title: string
+  sessionId: string; workspace: string; agentPreset: string; model: string; reasoningEffort: string; title: string
   turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number
   contextWindow: number; lastInputTokens: number
 }, agentRunning: boolean): object {
@@ -441,6 +464,7 @@ function renderStatusCard(meta: {
   fields.push(`**Workspace:** \`${meta.workspace || '(default)'}\``)
   fields.push(`**Preset:** \`${meta.agentPreset || '(default)'}\``)
   fields.push(`**Model:** \`${meta.model}\``)
+  if (meta.reasoningEffort !== '') fields.push(`**Reasoning:** \`${meta.reasoningEffort}\``)
   fields.push(`**Agent:** ${agentRunning ? '🔄 Running' : '⏸️ Idle'}`)
   if (meta.turns > 0 || meta.steps > 0) {
     const parts: string[] = [`${meta.turns} turns`, `${meta.steps} steps`]
@@ -514,6 +538,7 @@ async function executeSlashCommand(
   commands: CommandRuntime,
   bridgeHolder: { lastChatMessage: { chatId: string; chatType: 'p2p' | 'group'; threadId?: string } | undefined },
   toggleStream?: () => { enabled: boolean },
+  apiProxy?: ApiProxy,
 ): Promise<{ kind: 'success' | 'error'; text: string; card?: object } | undefined> {
   const parsed = parseCommand(message.content)
   if (parsed === undefined) return undefined
@@ -550,6 +575,34 @@ async function executeSlashCommand(
       'This setting persists across restarts.',
     ]
     return { kind: 'success', text: lines.join('\n') }
+  }
+  // /stop cancels the running agent — mirrors the WebUI stop button's
+  // `sessions.cancel` RPC. Unlike `/approve`/`/deny`, this does not need
+  // a live agent handle; the apiProxy call reaches the host directly.
+  if (parsed.name === 'stop') {
+    if (apiProxy === undefined) {
+      return { kind: 'error', text: '⚠️ Cannot stop: apiProxy is not available.' }
+    }
+    // Resolve the session id for this chat without creating an agent.
+    const sessionId = bridge.resolveSessionIdFor(chatMessage)
+    try {
+      const response = await apiProxy.sessions.cancel({
+        rpcId: RpcId(`feishu-stop-${Date.now()}`),
+        payload: { sessionId: sessionId as never },
+      })
+      if (response.result.ok) {
+        return { kind: 'success', text: '⏹️ Agent 已停止。当前 turn 的工具执行将尽快终止。' }
+      }
+      // Known error codes
+      const code = response.result.error?.code
+      if (code === 'session-not-found') {
+        return { kind: 'error', text: '⚠️ 该 session 当前没有运行中的 agent，无需停止。' }
+      }
+      return { kind: 'error', text: `⚠️ 停止失败: ${response.result.error?.message ?? 'unknown error'} (${code ?? 'no code'})` }
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error)
+      return { kind: 'error', text: `⚠️ 停止失败: ${msg}` }
+    }
   }
   // Stash the chat coordinates so the registered handler can find them
   // without holding per-invocation state on the agent. The bridge serializes

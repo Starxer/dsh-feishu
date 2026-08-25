@@ -23,9 +23,10 @@ interface BridgeHolder {
   current: HarnessConversationService | undefined
 }
 
-/** Channel adapter for sending cards. */
+/** Channel adapter for sending and updating cards. */
 export interface FeishuToolCallsChannel {
-  send(to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<unknown>
+  send(to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<{ messageId?: string }>
+  updateCard(messageId: string, card: object): Promise<void>
 }
 
 /** Public deps for the tool-calls module. */
@@ -42,7 +43,7 @@ interface SessionToolState {
   pending: Map<string, PendingToolCall>
   /** Debounce timer for sending batched updates. */
   batchTimer: ReturnType<typeof setTimeout> | undefined
-  /** Queued cards to send. */
+  /** Queued cards to send (only for tool results without a pending call card). */
   batchQueue: Array<{ chat: ConversationMessage; card: object }>
 }
 
@@ -51,6 +52,10 @@ interface PendingToolCall {
   toolCallId: string
   arguments?: unknown
   startedAt: number
+  /** Promise that resolves with the messageId of the sent call card. */
+  messageIdPromise: Promise<string | undefined>
+  /** The chat info for this tool call. */
+  chat: ConversationMessage
 }
 
 /**
@@ -97,6 +102,7 @@ export function startFeishuToolCalls(deps: FeishuToolCallsDeps): () => void {
 
   const iterate = async (): Promise<void> => {
     try {
+      console.log('dsh-feishu: [toolcall] mux stream starting')
       for await (const envelope of apiProxy.events.mux(
         { rpcId: RpcId(`feishu-toolcalls-${Date.now()}`), payload: {} },
         controller.signal,
@@ -111,17 +117,42 @@ export function startFeishuToolCalls(deps: FeishuToolCallsDeps): () => void {
         if (chat === undefined) continue
         const state = getState(frame.sessionId)
 
+        // Log all events for debugging
+        if (event.type === 'tool/call' || event.type === 'tool/result' || event.type === 'turn/start' || event.type === 'turn/end') {
+          console.log(`dsh-feishu: [toolcall] event=${event.type} session=${frame.sessionId}`)
+          logger.info(`dsh-feishu: [toolcall] event=${event.type} session=${frame.sessionId}`)
+        }
+
         if (event.type === 'tool/call') {
           const toolCallId = String(event.data?.callId ?? '')
           const toolName = (event.data?.name as string) ?? 'unknown'
           const args = event.data?.arguments
-          state.pending.set(toolCallId, { toolName, toolCallId, arguments: args, startedAt: Date.now() })
+          logger.info(`dsh-feishu: [toolcall] session=${frame.sessionId} event=tool/call callId=${toolCallId} tool=${toolName}`)
+
+          // Send the call card immediately (not batched) to get messageId
           const card = renderToolCallCard(toolName, args)
-          scheduleBatch(state, chat, card)
+          const messageIdPromise = channel.send(
+            chat.chatId,
+            { card },
+            chat.threadId !== undefined ? { replyInThread: true } : {},
+          ).then((result) => result?.messageId).catch((error: unknown) => {
+            logger.warn(`dsh-feishu: tool-call card send failed: ${error instanceof Error ? error.message : String(error)}`)
+            return undefined
+          })
+
+          state.pending.set(toolCallId, {
+            toolName,
+            toolCallId,
+            arguments: args,
+            startedAt: Date.now(),
+            messageIdPromise,
+            chat,
+          })
         } else if (event.type === 'tool/result') {
           const toolCallId = String(event.data?.message?.source?.callId ?? '')
           const pending = state.pending.get(toolCallId)
-          state.pending.delete(toolCallId)
+          logger.info(`dsh-feishu: [toolcall] session=${frame.sessionId} event=tool/result callId=${toolCallId} hasPending=${pending !== undefined}`)
+
           const toolName = pending?.toolName ?? 'unknown'
           const isError = event.data?.error !== undefined || event.data?.message?.content?.[0]?.isError === true
           const resultContent = event.data?.message?.content
@@ -129,8 +160,27 @@ export function startFeishuToolCalls(deps: FeishuToolCallsDeps): () => void {
             ? resultContent.map((b: { type: string; text?: string }) => b.type === 'text' ? b.text ?? '' : '').filter(Boolean).join('\n')
             : resultContent
           const elapsed = pending !== undefined ? Date.now() - pending.startedAt : undefined
-          const card = renderToolResultCard(toolName, isError, result, elapsed)
-          scheduleBatch(state, chat, card)
+
+          if (pending !== undefined) {
+            // Wait for messageId then update the existing card
+            void pending.messageIdPromise.then((messageId) => {
+              if (messageId !== undefined) {
+                const updatedCard = renderToolResultCard(toolName, isError, result, elapsed, pending.arguments)
+                return channel.updateCard(messageId, updatedCard)
+              }
+              // Fallback if messageId not available
+              const card = renderToolResultCard(toolName, isError, result, elapsed)
+              scheduleBatch(state, pending.chat, card)
+            }).catch((error: unknown) => {
+              logger.warn(`dsh-feishu: tool-call card update failed: ${error instanceof Error ? error.message : String(error)}`)
+            })
+          } else {
+            // No pending call — send a standalone result card
+            const card = renderToolResultCard(toolName, isError, result, elapsed)
+            scheduleBatch(state, chat, card)
+          }
+
+          state.pending.delete(toolCallId)
         }
       }
     } catch (error: unknown) {
@@ -178,14 +228,24 @@ function renderToolCallCard(toolName: string, args: unknown): object {
 
 /**
  * Render a tool-result card showing the result or error.
+ * If args is provided, includes the original call info (for update mode).
  */
-function renderToolResultCard(toolName: string, isError: boolean, result: unknown, elapsed: number | undefined): object {
+function renderToolResultCard(toolName: string, isError: boolean, result: unknown, elapsed: number | undefined, args?: unknown): object {
   const parts: string[] = [`**Tool:** \`${toolName}\``]
+
+  // Include args summary if provided (for update mode)
+  if (args !== undefined) {
+    const argsSummary = summarizeValue(args, 300)
+    if (argsSummary !== '') parts.push(`**Args:**\n\`\`\`\n${argsSummary}\n\`\`\``)
+  }
+
   if (elapsed !== undefined) {
     parts.push(`**Time:** ${elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s` : `${elapsed}ms`}`)
   }
+
   const resultSummary = summarizeValue(result, 300)
   if (resultSummary !== '') parts.push(`**Result:**\n\`\`\`\n${resultSummary}\n\`\`\``)
+
   return {
     config: { wide_screen_mode: true },
     header: {
