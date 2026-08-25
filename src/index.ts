@@ -483,12 +483,13 @@ function renderStatusCard(meta: {
     fields.push('> ⚠️ Agent 正在运行中，以上信息可能并非最新。请在 Agent 运行结束后再次发送 `/status` 获取准确信息。')
   }
   return {
+    schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
       title: { tag: 'plain_text', content: '📊 Session Status' },
       template: 'turquoise',
     },
-    elements: [{ tag: 'markdown', content: fields.join('\n') }],
+    body: { elements: [{ tag: 'markdown', content: fields.join('\n') }] },
   }
 }
 

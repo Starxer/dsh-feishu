@@ -237,21 +237,9 @@ export async function startChannel(
         void bridge.reply(inboundMessage).then(async (text) => {
           const sessionId = bridge.resolveSessionIdFor(inboundMessage)
           const intermediateSent = bridge.consumeIntermediateSent(sessionId)
-          const fallback = needsPlainTextFallback(text)
-          logReplyDiagnostic(text, fallback)
           const meta = await replyCardMeta?.({ chatId, chatType, ...(threadId !== undefined ? { threadId } : {}) })
-          if (fallback) {
-            // Tables/headings can't render in card markdown component.
-            // Use Feishu's native markdown message format which supports
-            // full markdown including tables and headings.
-            const footer = buildFooterText(meta)
-            const mdText = footer !== '' ? `${text}\n\n---\n${footer}` : text
-            await channel.send(chatId, { markdown: mdText }, {
-              replyTo: messageId,
-              replyInThread,
-            })
-          } else if (!intermediateSent) {
-            // Normal card reply — skip if streaming already sent the content.
+          if (!intermediateSent) {
+            // Card JSON 2.0 supports full markdown (tables, headings, inline code)
             const card = renderReplyCard(text, meta)
             await channel.send(chatId, { card }, {
               replyTo: messageId,
@@ -306,36 +294,6 @@ export async function startChannel(
   }
 }
 
-/**
- * Check if the reply text contains markdown features that cards don't support
- * (tables, headings). When true, the reply should be sent as a plain text
- * message instead of an interactive card.
- */
-function needsPlainTextFallback(text: string): boolean {
-  let inCodeBlock = false
-  for (const line of text.split('\n')) {
-    const trimmed = line.trimStart()
-    // Track code block state
-    if (trimmed.startsWith('```')) {
-      inCodeBlock = !inCodeBlock
-      continue
-    }
-    // Skip content inside code blocks
-    if (inCodeBlock) continue
-    // Table row: starts with | and has at least one more |
-    if (trimmed.startsWith('|') && trimmed.indexOf('|', 1) !== -1) return true
-    // Heading: starts with # followed by space
-    if (/^#{1,6}\s/.test(trimmed)) return true
-  }
-  return false
-}
-
-// Diagnostic: log the first 200 chars of reply text and fallback decision
-function logReplyDiagnostic(text: string, fallback: boolean): void {
-  const preview = text.slice(0, 200).replace(/\n/g, '\\n')
-  console.log(`dsh-feishu: reply preview="${preview}" fallback=${fallback}`)
-}
-
 /** Compact token count display: 517 / 12.2K / 1.2M */
 function formatTokenCount(n: number): string {
   if (n < 1_000) return String(n)
@@ -343,26 +301,10 @@ function formatTokenCount(n: number): string {
   return `${Math.round(n / 100_000) / 10}M`
 }
 
-/** Build a multi-line footer string for plain-text fallback messages. */
-function buildFooterText(meta?: ReplyCardMeta): string {
-  const line1: string[] = []
-  const line2: string[] = []
-  if (meta?.workspace !== undefined && meta.workspace !== '') line1.push(`📂 ${meta.workspace}`)
-  if (meta?.agentPreset !== undefined && meta.agentPreset !== '') line1.push(`⚙️ ${meta.agentPreset}`)
-  if (meta?.model !== undefined && meta.model !== '') line2.push(`🧠 ${meta.model}`)
-  if (meta?.reasoningEffort !== undefined && meta.reasoningEffort !== '') line2.push(`💡 ${meta.reasoningEffort}`)
-  if (meta?.contextWindow !== undefined && meta.contextWindow > 0 && meta?.lastInputTokens !== undefined) {
-    const pct = Math.min(100, Math.round(meta.lastInputTokens / meta.contextWindow * 100))
-    line2.push(`📊 ${formatTokenCount(meta.lastInputTokens)}/${formatTokenCount(meta.contextWindow)} (${pct}%)`)
-  }
-  const lines = [line1.join(' · '), line2.join(' · ')].filter(l => l !== '')
-  return lines.join('\n')
-}
-
 /**
  * Render an assistant reply as a Feishu interactive card with optional
- * workspace/preset footer metadata. The card uses markdown for the main
- * content and a note block at the bottom for session context.
+ * workspace/preset footer metadata. Card JSON 2.0 supports full markdown
+ * (tables, headings, inline code) natively.
  */
 function renderReplyCard(text: string, meta?: ReplyCardMeta): object {
   // Ensure content is never empty - use a placeholder if needed
@@ -397,14 +339,23 @@ function renderReplyCard(text: string, meta?: ReplyCardMeta): object {
   if (line2.length > 0) noteElements.push({ tag: 'lark_md', content: line2.join(' · ') })
   if (noteElements.length > 0) {
     elements.push({ tag: 'hr' })
-    elements.push({ tag: 'note', elements: noteElements })
+    // Card JSON 2.0 doesn't support 'note' tag — use markdown with notation text size
+    const footerContent = (noteElements as Array<{ tag: string; content?: string }>)
+      .filter((e) => e.tag === 'lark_md')
+      .map((e) => e.content ?? '')
+      .filter(Boolean)
+      .join('\n')
+    if (footerContent !== '') {
+      elements.push({ tag: 'markdown', content: footerContent, text_size: 'notation' })
+    }
   }
   return {
+    schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
       title: { tag: 'plain_text', content: 'Assistant' },
       template: 'blue',
     },
-    elements,
+    body: { elements },
   }
 }

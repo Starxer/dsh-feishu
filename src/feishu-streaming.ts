@@ -146,11 +146,12 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): () => void {
 function renderIntermediateCard(text: string): object {
   const displayText = text.length > 3000 ? text.slice(0, 3000) + '\n\n…(truncated)' : text
   return {
+    schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
       title: { tag: 'plain_text', content: '💬 Assistant' },
       template: 'violet',
     },
-    elements: [{ tag: 'markdown', content: displayText }],
+    body: { elements: [{ tag: 'markdown', content: displayText }] },
   }
 }

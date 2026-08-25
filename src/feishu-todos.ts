@@ -175,11 +175,12 @@ function renderTodoCard(todos: TodoItem[]): object {
     lines.push(`${icon} ${text}`)
   }
   return {
+    schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
       title: { tag: 'plain_text', content: '📋 Todo List' },
       template: 'turquoise',
     },
-    elements: [{ tag: 'markdown', content: `**Progress:** ${completed}/${total}\n${lines.join('\n')}` }],
+    body: { elements: [{ tag: 'markdown', content: `**Progress:** ${completed}/${total}\n${lines.join('\n')}` }] },
   }
 }

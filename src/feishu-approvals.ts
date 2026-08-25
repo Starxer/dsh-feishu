@@ -265,31 +265,34 @@ function renderApprovalCard(entry: PendingApproval): object {
   ]
   const value = JSON.stringify({ rpcId: entry.rpcId })
   return {
+    schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
       title: { tag: 'plain_text', content: 'Approval needed' },
       template: 'orange',
     },
-    elements: [
-      ...body,
-      {
-        tag: 'action',
-        actions: [
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: 'Reject' },
-            type: 'danger',
-            value: JSON.stringify({ rpcId: entry.rpcId, outcome: 'rejected' }),
-          },
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: 'Approve once' },
-            type: 'primary',
-            value,
-          },
-        ],
-      },
-    ],
+    body: {
+      elements: [
+        ...body,
+        {
+          tag: 'action',
+          actions: [
+            {
+              tag: 'button',
+              text: { tag: 'plain_text', content: 'Reject' },
+              type: 'danger',
+              value: JSON.stringify({ rpcId: entry.rpcId, outcome: 'rejected' }),
+            },
+            {
+              tag: 'button',
+              text: { tag: 'plain_text', content: 'Approve once' },
+              type: 'primary',
+              value,
+            },
+          ],
+        },
+      ],
+    },
   }
 }
 

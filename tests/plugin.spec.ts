@@ -77,7 +77,7 @@ describe('startChannel', () => {
     await flushAsync()
     expect(channel.addReaction).toHaveBeenCalledWith('om_1', 'THUMBSUP')
     expect(bridge.reply).toHaveBeenCalledWith(expect.objectContaining({ content: 'hi' }))
-    expect(channel.send).toHaveBeenCalledWith('oc_1', { card: expect.objectContaining({ header: expect.objectContaining({ template: 'blue' }), elements: expect.arrayContaining([expect.objectContaining({ tag: 'markdown', content: 'Hello **Lark**' })]) }) }, { replyTo: 'om_1', replyInThread: false })
+    expect(channel.send).toHaveBeenCalledWith('oc_1', { card: expect.objectContaining({ header: expect.objectContaining({ template: 'blue' }), body: { elements: expect.arrayContaining([expect.objectContaining({ tag: 'markdown', content: 'Hello **Lark**' })]) } }) }, { replyTo: 'om_1', replyInThread: false })
     await stop()
     expect(channel.disconnect).toHaveBeenCalledOnce()
     expect(bridge.dispose).toHaveBeenCalledOnce()
@@ -95,7 +95,7 @@ describe('startChannel', () => {
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'p2p', content: 'hi' })
     await flushAsync()
     expect(channel.addReaction).not.toHaveBeenCalled()
-    expect(channel.send).toHaveBeenCalledWith('oc_1', { card: expect.objectContaining({ header: expect.objectContaining({ template: 'blue' }), elements: expect.arrayContaining([expect.objectContaining({ tag: 'markdown', content: 'ok' })]) }) }, { replyTo: 'om_1', replyInThread: false })
+    expect(channel.send).toHaveBeenCalledWith('oc_1', { card: expect.objectContaining({ header: expect.objectContaining({ template: 'blue' }), body: { elements: expect.arrayContaining([expect.objectContaining({ tag: 'markdown', content: 'ok' })]) } }) }, { replyTo: 'om_1', replyInThread: false })
     await stop()
   })
 
@@ -111,7 +111,7 @@ describe('startChannel', () => {
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'p2p', content: 'hi' })
     await flushAsync()
     expect(logger.warn).toHaveBeenCalledWith('dsh-feishu: reaction failed: reaction denied')
-    expect(channel.send).toHaveBeenCalledWith('oc_1', { card: expect.objectContaining({ header: expect.objectContaining({ template: 'blue' }), elements: expect.arrayContaining([expect.objectContaining({ tag: 'markdown', content: 'ok' })]) }) }, { replyTo: 'om_1', replyInThread: false })
+    expect(channel.send).toHaveBeenCalledWith('oc_1', { card: expect.objectContaining({ header: expect.objectContaining({ template: 'blue' }), body: { elements: expect.arrayContaining([expect.objectContaining({ tag: 'markdown', content: 'ok' })]) } }) }, { replyTo: 'om_1', replyInThread: false })
     await stop()
   })
 
@@ -184,7 +184,7 @@ describe('startChannel', () => {
     await flushAsync()
     expect(slashCommand).toHaveBeenCalledOnce()
     expect(bridge.reply).toHaveBeenCalledWith(expect.objectContaining({ content: 'hello world' }))
-    expect(channel.send).toHaveBeenCalledWith('oc_1', { card: expect.objectContaining({ header: expect.objectContaining({ template: 'blue' }), elements: expect.arrayContaining([expect.objectContaining({ tag: 'markdown', content: 'agent answer' })]) }) }, { replyTo: 'om_1', replyInThread: false })
+    expect(channel.send).toHaveBeenCalledWith('oc_1', { card: expect.objectContaining({ header: expect.objectContaining({ template: 'blue' }), body: { elements: expect.arrayContaining([expect.objectContaining({ tag: 'markdown', content: 'agent answer' })]) } }) }, { replyTo: 'om_1', replyInThread: false })
   })
 
   it('reports a slash-command failure with the safe fallback and skips the bridge', async () => {
@@ -224,7 +224,7 @@ describe('startChannel', () => {
       content: '',
       imageBlocks: [expect.objectContaining({ mediaType: 'image/jpeg', bytes: 4 })],
     }))
-    expect(channel.send).toHaveBeenCalledWith('oc_2', { card: expect.objectContaining({ header: expect.objectContaining({ template: 'blue' }), elements: expect.arrayContaining([expect.objectContaining({ tag: 'markdown', content: 'described image' })]) }) }, { replyTo: 'om_2', replyInThread: false })
+    expect(channel.send).toHaveBeenCalledWith('oc_2', { card: expect.objectContaining({ header: expect.objectContaining({ template: 'blue' }), body: { elements: expect.arrayContaining([expect.objectContaining({ tag: 'markdown', content: 'described image' })]) } }) }, { replyTo: 'om_2', replyInThread: false })
     await stop()
   })
 

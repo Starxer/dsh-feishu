@@ -217,12 +217,13 @@ function renderToolCallCard(toolName: string, args: unknown): object {
   const argsSummary = summarizeValue(args, 300)
   if (argsSummary !== '') parts.push(`**Args:**\n\`\`\`\n${argsSummary}\n\`\`\``)
   return {
+    schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
       title: { tag: 'plain_text', content: '🔧 Tool Call' },
       template: 'wathet',
     },
-    elements: [{ tag: 'markdown', content: parts.join('\n') }],
+    body: { elements: [{ tag: 'markdown', content: parts.join('\n') }] },
   }
 }
 
@@ -247,11 +248,12 @@ function renderToolResultCard(toolName: string, isError: boolean, result: unknow
   if (resultSummary !== '') parts.push(`**Result:**\n\`\`\`\n${resultSummary}\n\`\`\``)
 
   return {
+    schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
       title: { tag: 'plain_text', content: isError ? '❌ Tool Error' : '✅ Tool Done' },
       template: isError ? 'red' : 'green',
     },
-    elements: [{ tag: 'markdown', content: parts.join('\n') }],
+    body: { elements: [{ tag: 'markdown', content: parts.join('\n') }] },
   }
 }
