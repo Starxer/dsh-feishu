@@ -7,8 +7,9 @@
 ### 工具调用展示（`src/feishu-toolcalls.ts`）
 
 - 订阅 apiproxy mux 的 `tool/call` + `tool/result` 事件，在飞书侧展示模型的工具调用过程。
-- 调用开始时发送蓝色卡片（工具名 + 参数摘要），调用结束时发送绿色/红色卡片（结果或错误 + 耗时）。
-- 200ms 批量 debounce，避免高频工具调用刷屏。
+- **原地更新**：`tool/call` 发送卡片后保存 `messageIdPromise`，`tool/result` 等待 `messageId` 后用 `updateCard` 更新同一张卡片（蓝色→绿色/红色），不再发两张独立卡片。
+- 消除竞态：`tool/call` 直接发送（不走批量队列），确保 `messageId` 在 `tool/result` 到达前可用。
+- 使用 Card JSON 2.0 格式，内联代码（反引号）正常渲染。
 
 ### Todo 展示（`src/feishu-todos.ts`）
 
@@ -19,8 +20,10 @@
 ### 回复卡片消息（`src/channel.ts`）
 
 - 每轮最终结果渲染为飞书 interactive card（蓝色 header "Assistant"），替代原来的纯文本消息。
-- 使用 `{ tag: 'markdown', content: ... }` 组件（非 `div + lark_md`），完整支持标题、代码块、有序/无序列表等 markdown 语法。
-- 底部 note footer 自动注入当前 session 的 workspace + agent preset 信息。
+- **全面迁移到 Card JSON 2.0**（`schema: '2.0'` + `body.elements`），原生支持表格、标题、内联代码（反引号）、代码块等完整 markdown 语法。
+- 不再需要 `needsPlainTextFallback()` 降级逻辑——所有回复统一走卡片。
+- `note` 标签（2.0 不支持）替换为 `markdown` + `text_size: 'notation'`，footer 视觉效果保持一致。
+- 底部 footer 自动注入当前 session 的 workspace + preset + model + reasoning + context 信息。
 - 空回复显示 `(empty response)` 占位。
 
 ### Session 映射持久化（`src/harness.ts`）
@@ -42,7 +45,8 @@
 
 ### 卡片结构修复
 
-- **所有飞书卡片**（回复、工具调用、todo、审批、问题）统一使用顶层 `elements` 数组，移除错误的 `body: { elements }` 嵌套。飞书解析器不识别 `body.elements`，导致卡片显示为空。
+- **所有飞书卡片**全面迁移到 **Card JSON 2.0** 格式（`schema: '2.0'` + `body.elements`），原生支持表格、标题、内联代码等完整 markdown 语法。
+- `note` 标签（2.0 不支持）替换为 `markdown` + `text_size: 'notation'`。
 - `feishu-approvals.ts` 审批卡片同步修复。
 
 ### `harness.ts` — persisted session 跳过 `attachSession`

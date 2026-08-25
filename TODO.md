@@ -11,14 +11,15 @@
 |---|---|---|
 | 1 | 卡片化 + footer | 最终回复卡片底部标注 workspace + preset + **模型名** + **思考强度** + **上下文使用量** |
 | 4 | `/status` 命令 | 展示 session id / title / workspace / preset / model / **reasoning** / tokens / context |
-| 5 | 工具调用展示 | 订阅 `apiProxy.events.mux` → `tool/call` + `tool/result`，wathet/green/red 卡片 |
+| 5 | 工具调用展示 | 订阅 `apiProxy.events.mux` → `tool/call` + `tool/result`，wathet/green/red 卡片。**原地更新**：`tool/call` 发卡片后保存 `messageId`，`tool/result` 用 `updateCard` 更新同一张卡片 |
 | 6 | todo 展示 | 订阅 `apiProxy.events.mux` → `todo/write`，turquoise 卡片含进度条 |
 | 11 | 中间消息不可见 | ✅ 改为 `apiProxy.events.mux` + `tool/call` 时 flush 累积文字，紫色卡片 |
 | 12 | tool call 卡片 markdown 渲染 | ✅ `lark_md` → `markdown`，4 文件 11 处 |
-| 13 | 卡片 Markdown 渲染不稳定 | ✅ 表格/标题自动降级为 `{ markdown: text }` 原生消息 |
+| 13 | 卡片 Markdown 渲染不稳定 | ✅ 全面迁移到 Card JSON 2.0，表格/标题/内联代码原生渲染，移除降级逻辑 |
 | 14 | 纯查询命令即时返回 | ✅ fire-and-forget + agent 运行状态检测 |
 | 15 | Agent 消息队列调研 | 两层队列机制已确认（见下方调研记录） |
 | 17 | `/reasoning` 思考强度命令 | ✅ `/reasoning [off|low|high|max]`，通过 `agentDefaultModel.saveSelection` 持久化 |
+| 19 | tool_call / tool_done 顺序问题 | ✅ `tool/call` 直接发送保存 `messageIdPromise`，`tool/result` 等待后 `updateCard`，消除竞态 |
 | — | `/stop` 命令 | 通过 `apiProxy.sessions.cancel` 中断运行中的 agent，等同 WebUI 停止按钮 |
 | — | `/stream` 命令 | 切换 `showIntermediateMessages` 设置（已与中间消息模块解耦，保留备用） |
 
@@ -28,7 +29,6 @@
 |---|---|---|---|
 | 16 | 权限系统接入 | **中** | 新增 `/permission` `/sandbox`，对齐 WebUI 权限设定 |
 | 18 | 思考内容展示 | **中** | 显示模型 reasoning/thinking 内容，内容放在代码块里防止占用过多行 |
-| 19 | tool_call / tool_done 顺序问题 | **中** | 有时 tool_result 先于 tool_call 到达，顺序反了，需排查 mux 事件时序 |
 | 2 | `/new` 带参数 | **中** | `/new --workspace <path> --preset <id>` |
 | 3 | 工作区候选补全 | **中** | 输入前缀列出匹配目录供选 |
 | 9 | 流式输出 → CardKit | **低** | 解决 5 QPS 瓶颈，需调研 CardKit API |
@@ -73,16 +73,15 @@
 - **问题**：`feishu-toolcalls.ts` / `feishu-todos.ts` / `feishu-questions.ts` / `feishu-approvals.ts` 使用 `{ tag: 'div', text: { tag: 'lark_md' } }`，只支持粗体/斜体/链接，不支持代码块。
 - **修复**：改为 `{ tag: 'markdown', content }`（同 reply card）。`channel.ts` 的 note 区保持 `lark_md`（note 只支持 lark_md）。
 
-## #13 卡片 Markdown 渲染不稳定 —— ✅ 已修复并验证
+## #13 卡片 Markdown 渲染不稳定 —— ✅ 已修复（Card JSON 2.0）
 
-- **实测**：列表 ✅ 稳定 | 标题 ❌ 不稳定 | 表格 ❌ 几乎不渲染
-- **对比**：飞书普通消息的表格完全正常——是卡片 markdown 组件的限制
-- **根因**：原始 dsh-lark 用 `{ markdown: text }` 格式发送回复（支持完整 markdown）。改成卡片后丢失了这个能力。
-- **已实现的修复**：
-  - `needsPlainTextFallback()` 检测表格行（`|`）和标题（`#`）
-  - 含表格/标题的回复用 `{ markdown: text }` 格式发送（原生 markdown 消息，支持完整语法）
-  - 普通回复仍用卡片（带 header/footer）
-- **2025-08-24 验证**：`{ markdown: text }` 格式正确生效，表格在飞书正常显示 ✅
+- **根因**：Card JSON 1.0 的 markdown 组件不支持表格、标题、内联代码等完整语法
+- **修复**（2025-08-25）：
+  - 全面迁移到 **Card JSON 2.0**（`schema: '2.0'` + `body.elements`）
+  - 表格、标题、内联代码（反引号）原生渲染，不再降级
+  - `note` 标签（2.0 不支持）替换为 `markdown` + `text_size: 'notation'`
+  - 删除 `needsPlainTextFallback()`、`logReplyDiagnostic()`、`buildFooterText()` 三个废弃函数
+  - 回复流程简化：始终发卡片，不再有 markdown 消息降级路径
 
 ## #16 权限系统接入
 
@@ -97,14 +96,14 @@
 - **数据源**：`assistant/chunk` 事件中 `chunk.type === 'reasoning-delta'` 的文本
 - **UI 方案**：紫色卡片（同中间消息），reasoning 文字包裹在 ` ``` ` 代码块中，可折叠
 
-## #19 tool_call / tool_done 顺序问题
+## #19 tool_call / tool_done 顺序问题 —— ✅ 已修复
 
 - **现象**：有时飞书先收到 tool result（绿色/红色卡片），后收到 tool call（蓝色卡片），顺序反了
-- **可能原因**：
-  - mux SSE 的 `tool/result` 和 `tool/call` 是两个独立事件，result 可能比 call 先到
-  - `feishu-toolcalls.ts` 的 `scheduleBatch` 有 200ms debounce，可能导致 call 卡片被延迟发送
-  - session 事件的 `seq` 顺序 vs mux 传播顺序可能不一致
-- **排查方向**：对比 session event seq 和 mux 帧到达顺序，确认是事件源乱序还是消费端乱序
+- **根因**：`tool/call` 和 `tool/result` 都走 `scheduleBatch`（200ms debounce），`tool/result` 到达时 `messageId` 可能还没保存（异步竞态）
+- **修复**（2025-08-25）：
+  - `tool/call` 卡片**直接发送**（不走批量队列），保存 `messageIdPromise`
+  - `tool/result` 时 `await messageIdPromise` 确保拿到 `messageId` 后再 `updateCard`
+  - 效果：一张卡片从蓝色（调用中）→ 绿色/红色（完成），不再出现两张卡片
 
 ## #9 流式输出技术方案
 
