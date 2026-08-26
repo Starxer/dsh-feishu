@@ -229,24 +229,34 @@ async function presentQuestions(
 }
 
 /**
- * Build a settled question card — shows the selected option(s) with buttons removed.
+ * Build a settled question card — shows all options with the selected one
+ * highlighted, buttons removed. Uses turquoise header to distinguish from
+ * the original blue question card.
  */
 function renderSettledQuestionCard(
   question: AskUserQuestionItem,
   selected: readonly string[],
 ): object {
+  const options = question.options ?? []
+  const selectedSet = new Set(selected)
   const mdParts: string[] = []
   if (question.header !== undefined && question.header !== '') {
     mdParts.push(`**${question.header}**`)
   }
   mdParts.push(question.question)
   mdParts.push('')
-  mdParts.push(`✅ **已选择：** ${selected.join(', ')}`)
+  for (const option of options) {
+    if (selectedSet.has(option.label)) {
+      mdParts.push(`✅ ~~${option.label}~~ — *已选择*`)
+    } else {
+      mdParts.push(`⬜ ${option.label}`)
+    }
+  }
   return {
     config: { wide_screen_mode: true },
     header: {
       title: { tag: 'plain_text', content: question.header ?? 'Question' },
-      template: 'green',
+      template: 'turquoise',
     },
     body: { elements: [{ tag: 'markdown', content: mdParts.join('\n') }] },
   }
