@@ -66,10 +66,9 @@ export async function provisionApp(options: ProvisionOptions): Promise<Provision
       name: 'DSH 助手',
       desc: 'DeepSeek Harness 飞书入口',
     },
-    addons: {
-      scopes: { tenant: FEISHU_PROVISION_SCOPES },
-      events: { items: { tenant: [FEISHU_MESSAGE_EVENT] } },
-    },
+    // Don't pass addons — the QR landing page's addons parameter overrides
+    // the server's default app configuration, which may disable card action
+    // callbacks. hermes and qwenpaw don't pass addons and card buttons work.
     onQRCodeReady: info => options.onState({ phase: 'waiting', qrUrl: info.url, expireIn: info.expireIn }),
     onStatusChange: () => undefined,
   })
