@@ -306,9 +306,13 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
           if (chunk !== undefined && chunk !== null) {
             if (chunk.type === 'reasoning-delta' && typeof chunk.text === 'string') {
               state.reasoning += chunk.text
+              // Record first token time for reasoning (TTFT anchor).
+              if (state.firstTokenTime === 0) {
+                state.firstTokenTime = event.time ?? Date.now()
+              }
             } else if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
               state.text += chunk.text
-              // Record first token time (TTFT anchor).
+              // Record first token time for text (if no reasoning came first).
               if (state.firstTokenTime === 0) {
                 state.firstTokenTime = event.time ?? Date.now()
               }
@@ -558,12 +562,12 @@ function renderStepCard(
 ): object {
   const elements: object[] = []
 
-  // Reasoning section
+  // Reasoning section (use 4 backticks to avoid collision with code blocks in reasoning)
   if (reasoning !== undefined && reasoning !== '') {
     const displayReasoning = reasoning.length > 3000 ? reasoning.slice(0, 3000) + '\n…(truncated)' : reasoning
     elements.push({
       tag: 'markdown',
-      content: `🧠 **Reasoning**\n\`\`\`\n${displayReasoning}\n\`\`\``,
+      content: `🧠 **Reasoning**\n\`\`\`\`\`\n${displayReasoning}\n\`\`\`\`\``,
     })
   }
 
