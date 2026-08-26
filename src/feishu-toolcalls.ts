@@ -3,6 +3,9 @@
  * mux stream so the Feishu chat can render cards showing tool invocations
  * and their results as they happen.
  *
+ * Reasoning content is NOT handled here — it's in feishu-streaming.ts as
+ * part of the per-step assistant card (one card per step with reasoning + text).
+ *
  * @module @starxer/dsh-feishu/feishu-toolcalls
  */
 
@@ -62,7 +65,7 @@ interface PendingToolCall {
  * Subscribe to the apiproxy mux stream and render tool call/result cards.
  * Returns a disposer.
  */
-export function startFeishuToolCalls(deps: FeishuToolCallsDeps): () => void {
+export function startFeishuToolCalls(deps: FeishuToolCallsDeps): { stop: () => void } {
   const { apiProxy, channel, bridgeHolder, logger } = deps
   const controller = new AbortController()
   const sessionStates = new Map<string, SessionToolState>()
@@ -116,12 +119,6 @@ export function startFeishuToolCalls(deps: FeishuToolCallsDeps): () => void {
         const chat = bridge.resolveChat(frame.sessionId)
         if (chat === undefined) continue
         const state = getState(frame.sessionId)
-
-        // Log all events for debugging
-        if (event.type === 'tool/call' || event.type === 'tool/result' || event.type === 'turn/start' || event.type === 'turn/end') {
-          console.log(`dsh-feishu: [toolcall] event=${event.type} session=${frame.sessionId}`)
-          logger.info(`dsh-feishu: [toolcall] event=${event.type} session=${frame.sessionId}`)
-        }
 
         if (event.type === 'tool/call') {
           const toolCallId = String(event.data?.callId ?? '')
@@ -190,12 +187,14 @@ export function startFeishuToolCalls(deps: FeishuToolCallsDeps): () => void {
   }
   void iterate()
 
-  return () => {
-    controller.abort()
-    for (const state of sessionStates.values()) {
-      if (state.batchTimer !== undefined) clearTimeout(state.batchTimer)
-    }
-    sessionStates.clear()
+  return {
+    stop: () => {
+      controller.abort()
+      for (const state of sessionStates.values()) {
+        if (state.batchTimer !== undefined) clearTimeout(state.batchTimer)
+      }
+      sessionStates.clear()
+    },
   }
 }
 
@@ -213,7 +212,8 @@ function summarizeValue(value: unknown, maxLen: number = 200): string {
  * Render a tool-call card showing the tool name and arguments.
  */
 function renderToolCallCard(toolName: string, args: unknown): object {
-  const parts: string[] = [`**Tool:** \`${toolName}\``]
+  const parts: string[] = []
+  parts.push(`**Tool:** \`${toolName}\``)
   const argsSummary = summarizeValue(args, 300)
   if (argsSummary !== '') parts.push(`**Args:**\n\`\`\`\n${argsSummary}\n\`\`\``)
   return {
@@ -232,7 +232,9 @@ function renderToolCallCard(toolName: string, args: unknown): object {
  * If args is provided, includes the original call info (for update mode).
  */
 function renderToolResultCard(toolName: string, isError: boolean, result: unknown, elapsed: number | undefined, args?: unknown): object {
-  const parts: string[] = [`**Tool:** \`${toolName}\``]
+  const parts: string[] = []
+
+  parts.push(`**Tool:** \`${toolName}\``)
 
   // Include args summary if provided (for update mode)
   if (args !== undefined) {

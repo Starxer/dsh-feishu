@@ -28,11 +28,13 @@ export interface Config {
   reactEmoji?: string
   /** Show intermediate assistant messages during agent turns. */
   showIntermediateMessages?: boolean
+  /** Show model reasoning/thinking content in tool call cards and final reply. */
+  showReasoning?: boolean
 }
 
 export interface SettingsConfig extends Required<Pick<Config,
   'appId' | 'appSecretRef' | 'domain' | 'requireMention' | 'dmMode' | 'groupAllowlist' |
-  'dmAllowlist' | 'errorMessage' | 'reactEmoji' | 'showIntermediateMessages'>> {
+  'dmAllowlist' | 'errorMessage' | 'reactEmoji' | 'showIntermediateMessages' | 'showReasoning'>> {
   appSecret?: string
   provider?: string
   model?: string
@@ -61,6 +63,7 @@ export const ConfigSchema: z<Config> = z.object({
   errorMessage: z.string().default(DEFAULT_ERROR_MESSAGE),
   reactEmoji: z.string().default(DEFAULT_REACTION_EMOJI).description('Emoji reaction added to each inbound message; empty string disables it'),
   showIntermediateMessages: z.boolean().default(true).description('Show intermediate assistant messages during agent turns (not just tool calls and final reply)'),
+  showReasoning: z.boolean().default(true).description('Show model reasoning/thinking content in tool call cards and final reply'),
 })
 
 export function resolveSettingsConfig(config: Config): SettingsConfig {
@@ -79,6 +82,7 @@ export function resolveSettingsConfig(config: Config): SettingsConfig {
     errorMessage,
     reactEmoji: config.reactEmoji ?? DEFAULT_REACTION_EMOJI,
     showIntermediateMessages: config.showIntermediateMessages ?? true,
+    showReasoning: config.showReasoning ?? true,
     ...(config.appSecret === undefined ? {} : { appSecret: config.appSecret }),
     ...(config.provider === undefined ? {} : { provider: config.provider }),
     ...(config.model === undefined ? {} : { model: config.model }),

@@ -27,7 +27,6 @@ import { ProvisionManager } from './provision-manager.ts'
 import { registerLarkCommands, formatRelativeTime, type ApprovalControl, type CommandTranslations } from './commands.ts'
 import { handleProvisionRequest, handleSettingsRequest, PROVISION_PATH, SETTINGS_PATH } from './web.ts'
 import { settleApprovalBySlash, startFeishuApprovals, type PendingApprovalView } from './feishu-approvals.ts'
-import { startFeishuToolCalls } from './feishu-toolcalls.ts'
 import { startFeishuTodos } from './feishu-todos.ts'
 import { startFeishuStreaming } from './feishu-streaming.ts'
 
@@ -105,9 +104,10 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   // the runtime reconnects (see the `runtime.onChannelChange` hook).
   let stopQuestions: () => void = () => undefined
   let stopApprovals: () => void = () => undefined
-  let stopToolCalls: () => void = () => undefined
-  let stopTodos: () => void = () => undefined
   let stopStreaming: () => void = () => undefined
+  let consumeReasoning: (sessionId: string) => string | undefined = () => undefined
+  let consumeLastStepHadContent: (sessionId: string) => boolean = () => false
+  let stopTodos: () => void = () => undefined
   const channelHolder: { current: LarkChannel | undefined } = { current: undefined }
   const buildApprovalControl = (apiProxy: ApiProxy): ApprovalControl => {
     const approvalsHandle = startFeishuApprovals({
@@ -230,24 +230,22 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       bridgeHolder,
       logger: ctx.logger('dsh-feishu'),
     })
-    stopToolCalls = startFeishuToolCalls({
-      apiProxy,
-      channel: cardChannel,
-      bridgeHolder,
-      logger: ctx.logger('dsh-feishu'),
-    })
     stopTodos = startFeishuTodos({
       apiProxy,
       channel: cardChannel,
       bridgeHolder,
       logger: ctx.logger('dsh-feishu'),
     })
-    stopStreaming = startFeishuStreaming({
+    const streamingResult = startFeishuStreaming({
       apiProxy,
       channel: cardChannel,
       bridgeHolder,
       logger: ctx.logger('dsh-feishu'),
+      showReasoning: () => currentSettings().showReasoning,
     })
+    stopStreaming = streamingResult.stop
+    consumeReasoning = streamingResult.consumeReasoning
+    consumeLastStepHadContent = streamingResult.consumeLastStepHadContent
   }
   registerLarkCommands(
     ctx,
@@ -277,14 +275,20 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
           async settle() { /* noop when apiProxy is absent */ },
         }
       : buildApprovalControl(apiProxy),
+    {
+      get: () => currentSettings().showReasoning,
+      toggle: () => {
+        const current = currentSettings().showReasoning
+        void settings.mutate(namespace, [{ op: 'set', path: ['showReasoning'], value: !current }], currentRevision())
+      },
+    },
   )
   ctx.effect(() => () => {
     stopQuestions()
     stopApprovals()
-    stopToolCalls()
     stopTodos()
     stopStreaming()
-  }, 'dsh-feishu: feishu questions + approvals + toolcalls + todos + streaming listeners')
+  }, 'dsh-feishu: feishu questions + approvals + todos + streaming listeners')
 
   let lastPrintedQrUrl: string | undefined
   const provisionManager = new ProvisionManager({
@@ -444,12 +448,13 @@ const larkCommandTranslations: CommandTranslations = {
   streamDescription: 'Toggle intermediate assistant messages during agent turns',
   stopDescription: 'Stop the currently running agent in this chat (like the WebUI stop button)',
   reasoningDescription: 'Show or change the model reasoning effort (thinking intensity)',
-  reasoningUsage: 'Usage: /reasoning [off|low|high|max]',
+  reasoningUsage: 'Usage: /reasoning [off|low|high|max] [show on|off]',
   reasoningCurrent: (effort: string) => `🧠 Current reasoning effort: **${effort}**`,
   reasoningCurrentDefault: '(provider default)',
   reasoningSwitched: (effort: string) => `🧠 Reasoning effort switched to **${effort}**. Persisted across restarts.`,
-  reasoningLevels: 'Available levels: `off` · `low` · `high` · `max`',
+  reasoningLevels: 'Available levels: `off` · `low` · `high` · `max`\nUse `/reasoning show on|off` to toggle reasoning content display.',
   reasoningUnknown: (level: string) => `Unknown reasoning level "${level}".`,
+  reasoningShowToggled: (enabled: boolean) => `🧠 Reasoning content display: **${enabled ? 'on' : 'off'}**. Persisted across restarts.`,
 }
 
 /** Render the /status result as a Feishu interactive card. */

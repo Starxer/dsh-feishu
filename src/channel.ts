@@ -133,6 +133,8 @@ export async function startChannel(
   slashCommand?: SlashCommandHandler,
   attachments?: AttachmentLike,
   replyCardMeta?: (coords: ChatCoordinates) => ReplyCardMeta | Promise<ReplyCardMeta>,
+  consumeReasoning?: (sessionId: string) => string | undefined,
+  consumeLastStepHadContent?: (sessionId: string) => boolean,
 ): Promise<{ stop: () => Promise<void>; channel: LarkChannel }> {
   const logError = (message: string) => {
     logger.error(message)
@@ -238,14 +240,14 @@ export async function startChannel(
           const sessionId = bridge.resolveSessionIdFor(inboundMessage)
           const intermediateSent = bridge.consumeIntermediateSent(sessionId)
           const meta = await replyCardMeta?.({ chatId, chatType, ...(threadId !== undefined ? { threadId } : {}) })
-          if (!intermediateSent) {
-            // Card JSON 2.0 supports full markdown (tables, headings, inline code)
-            const card = renderReplyCard(text, meta)
-            await channel.send(chatId, { card }, {
-              replyTo: messageId,
-              replyInThread,
-            })
-          }
+
+          // Send the reply card with footer metadata.
+          // This is the final card with workspace/preset/model info.
+          const card = renderReplyCard(text, meta)
+          await channel.send(chatId, { card }, {
+            replyTo: messageId,
+            replyInThread,
+          })
         }).catch((error: unknown) => {
           logError(`dsh-feishu: message handling failed: ${error instanceof Error ? error.message : String(error)}`)
           void channel.send(chatId, { text: config.errorMessage }, {
@@ -302,19 +304,44 @@ function formatTokenCount(n: number): string {
 }
 
 /**
+ * Render a reasoning-only card for the two-phase reply pattern.
+ * Shown first, then updated with the full reply content.
+ */
+function renderReasoningForReply(reasoning: string): object {
+  const displayReasoning = reasoning.length > 5000 ? reasoning.slice(0, 5000) + '\n…(truncated)' : reasoning
+  return {
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: 'Thinking' },
+      template: 'violet',
+    },
+    body: { elements: [{ tag: 'markdown', content: `\`\`\`\n${displayReasoning}\n\`\`\`` }] },
+  }
+}
+
+/**
  * Render an assistant reply as a Feishu interactive card with optional
  * workspace/preset footer metadata. Card JSON 2.0 supports full markdown
  * (tables, headings, inline code) natively.
  */
-function renderReplyCard(text: string, meta?: ReplyCardMeta): object {
+function renderReplyCard(text: string, meta?: ReplyCardMeta, reasoning?: string): object {
   // Ensure content is never empty - use a placeholder if needed
   const displayText = text.trim() === '' ? '(empty response)' : text
-  const elements: object[] = [
-    {
+  const elements: object[] = []
+  // Add reasoning section if present
+  if (reasoning !== undefined && reasoning !== '') {
+    const displayReasoning = reasoning.length > 2000 ? reasoning.slice(0, 2000) + '\n…(truncated)' : reasoning
+    elements.push({
       tag: 'markdown',
-      content: displayText,
-    },
-  ]
+      content: `🧠 **Reasoning**\n\`\`\`\n${displayReasoning}\n\`\`\``,
+    })
+    elements.push({ tag: 'hr' })
+  }
+  elements.push({
+    tag: 'markdown',
+    content: displayText,
+  })
   // Add footer with workspace/preset/model/context info when available
   const line1: string[] = []
   const line2: string[] = []
@@ -353,9 +380,47 @@ function renderReplyCard(text: string, meta?: ReplyCardMeta): object {
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: 'Assistant' },
+      title: { tag: 'plain_text', content: 'Response' },
       template: 'blue',
     },
     body: { elements },
+  }
+}
+
+/**
+ * Render a lightweight footer-only card when the last step already sent
+ * content but we still want to show workspace/preset/model metadata.
+ * Returns undefined when there's no metadata to show.
+ */
+function renderFooterCard(meta?: ReplyCardMeta): object | undefined {
+  const line1: string[] = []
+  const line2: string[] = []
+  if (meta?.workspace !== undefined && meta.workspace !== '') {
+    line1.push(`📂 ${meta.workspace}`)
+  }
+  if (meta?.agentPreset !== undefined && meta.agentPreset !== '') {
+    line1.push(`⚙️ ${meta.agentPreset}`)
+  }
+  if (meta?.model !== undefined && meta.model !== '') {
+    line2.push(`🧠 ${meta.model}`)
+  }
+  if (meta?.reasoningEffort !== undefined && meta.reasoningEffort !== '') {
+    line2.push(`💡 ${meta.reasoningEffort}`)
+  }
+  if (meta?.contextWindow !== undefined && meta.contextWindow > 0 && meta?.lastInputTokens !== undefined) {
+    const pct = Math.min(100, Math.round(meta.lastInputTokens / meta.contextWindow * 100))
+    line2.push(`📊 ${formatTokenCount(meta.lastInputTokens)}/${formatTokenCount(meta.contextWindow)} (${pct}%)`)
+  }
+  if (line1.length === 0 && line2.length === 0) return undefined
+
+  const footerContent = [line1.join(' · '), line2.join(' · ')].filter(Boolean).join('\n')
+  return {
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    body: {
+      elements: [
+        { tag: 'markdown', content: footerContent, text_size: 'notation' },
+      ],
+    },
   }
 }

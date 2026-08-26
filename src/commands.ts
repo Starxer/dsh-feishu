@@ -117,6 +117,7 @@ export interface CommandTranslations {
   readonly reasoningSwitched: (effort: string) => string
   readonly reasoningLevels: string
   readonly reasoningUnknown: (level: string) => string
+  readonly reasoningShowToggled: (enabled: boolean) => string
 }
 
 /**
@@ -201,6 +202,7 @@ export function registerLarkCommands(
   t: CommandTranslations,
   commands: Pick<CommandRuntime, 'list'>,
   approvals: ApprovalControl,
+  showReasoning: { get: () => boolean; toggle: () => void },
 ): void {
   ctx.effect(function* () {
     yield ctx.commands.register({
@@ -274,6 +276,7 @@ export function registerLarkCommands(
         bridge,
         chatMessageFor,
         t,
+        showReasoning,
       ),
     })
   }, 'dsh-feishu: /model /new /thread /help /approve /deny /approvals /status /stream /reasoning commands')
@@ -333,9 +336,9 @@ async function handleModelCommand(
 const VALID_REASONING_LEVELS = ['off', 'low', 'high', 'max'] as const
 
 /**
- * Handle `/reasoning [level]`. Show or change the reasoning effort.
+ * Handle `/reasoning [level] [show on|off]`. Show or change the reasoning effort.
  * The setting is persisted through agentDefaultModel.saveSelection so it
- * survives DSH restarts.
+ * survives DSH restarts. `show on|off` toggles reasoning content display.
  */
 async function handleReasoningCommand(
   invocation: CommandInvocation,
@@ -343,16 +346,34 @@ async function handleReasoningCommand(
   bridge: Pick<HarnessConversationService, 'setCurrentSelection' | 'currentSelectionFor'>,
   chatMessageFor: (invocation: CommandInvocation) => ConversationMessage,
   t: CommandTranslations,
+  showReasoning: { get: () => boolean; toggle: () => void },
 ): Promise<CommandResult> {
   const rawInput = invocation.rawInput.trim().toLowerCase()
   const current = agentDefaultModel.currentSelection()
   const currentEffort = current.reasoningEffort ? String(current.reasoningEffort) : undefined
 
-  // No argument → show current level
+  // Handle "show on/off" sub-command
+  if (rawInput.startsWith('show')) {
+    const arg = rawInput.slice(4).trim()
+    if (arg === 'on' || arg === 'off') {
+      const desired = arg === 'on'
+      if (showReasoning.get() !== desired) {
+        showReasoning.toggle()
+      }
+      return { kind: 'success', text: t.reasoningShowToggled(desired) }
+    }
+    // Show current state
+    const state = showReasoning.get() ? 'on' : 'off'
+    return { kind: 'success', text: `🧠 Reasoning content display: **${state}**\nUse \`/reasoning show on|off\` to toggle.` }
+  }
+
+  // No argument → show current level + show state
   if (rawInput === '') {
     const display = currentEffort ?? t.reasoningCurrentDefault
+    const showState = showReasoning.get() ? 'on' : 'off'
     const lines = [
       t.reasoningCurrent(display),
+      `🧠 Reasoning display: **${showState}**`,
       '',
       t.reasoningLevels,
     ]
