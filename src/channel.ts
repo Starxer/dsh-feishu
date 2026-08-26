@@ -148,7 +148,7 @@ export async function startChannel(
     transport: 'websocket',
     domain: config.domain === 'lark' ? Domain.Lark : Domain.Feishu,
     source: 'dsh-feishu',
-    loggerLevel: LoggerLevel.info,
+    loggerLevel: LoggerLevel.debug,
     handshakeTimeoutMs: 15_000,
     policy: {
       requireMention: config.requireMention,
