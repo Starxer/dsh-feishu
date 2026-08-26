@@ -32,6 +32,9 @@
 | — | Step token footer | ✅ 每个 step 卡片底部显示时长 + 输入输出 token |
 | — | Debounce + flush 同步 | ✅ 150ms debounce 合并快速更新，turn/end 时 flush 确保 footer 在 card update 之后发送 |
 | — | 防止卡片消失 | ✅ 内层 try/catch 保护 mux 事件处理，timer 回调 error-safe |
+| — | 不同步骤工具调用分离 | ✅ `resetStep` 不清除 `state.chat`（session 级坐标），每个 step 独立卡片 |
+| — | 审批按钮反馈 | ✅ 点击后卡片更新为 ✅ Approved / ❌ Rejected，移除按钮 |
+| — | 飞书事件订阅修复 | ✅ provision 新增 `card.action.trigger` 事件 + `im:message.reaction` 权限 |
 
 ## 待实现
 

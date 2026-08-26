@@ -53,6 +53,8 @@ interface PendingApproval {
   toolName: string
   shortCode: string
   createdAt: number
+  /** Message ID of the approval card, used to update it after settlement. */
+  cardMessageId?: string
 }
 
 /**
@@ -61,7 +63,8 @@ interface PendingApproval {
  * not strand live approvals.
  */
 export interface FeishuApprovalsChannel {
-  send(to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<unknown>
+  send(to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<{ messageId?: string }>
+  updateCard(messageId: string, card: object): Promise<void>
   onCardAction(handler: (evt: CardActionLike) => void | Promise<void>): () => void
 }
 
@@ -109,6 +112,9 @@ export function startFeishuApprovals(deps: FeishuApprovalsDeps): {
   stop: () => void
   pendingForSession: (sessionId: string) => PendingApprovalView[]
   findPending: (sessionId: string, rpcIdOrShort: string) => PendingApprovalView | undefined
+  /** Settle an approval by rpcId — handles both card-click and slash-command
+   *  paths.  Updates the approval card to show the final outcome. */
+  settle: (rpcId: string, outcome: ApprovalOutcomeKind) => Promise<void>
 } {
   const { apiProxy, channel, bridgeHolder, logger } = deps
   const controller = new AbortController()
@@ -148,6 +154,14 @@ export function startFeishuApprovals(deps: FeishuApprovalsDeps): {
       approvalId: entry.approvalId as never,
       outcome,
     })
+    // Update the approval card to show the settled outcome so the user
+    // gets immediate visual feedback that their click was processed.
+    if (entry.cardMessageId !== undefined) {
+      const settledCard = renderSettledCard(entry, outcome)
+      await channel.updateCard(entry.cardMessageId, settledCard).catch((error: unknown) => {
+        logger.warn(`dsh-feishu: failed to update approval card: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
   }
 
   const onCardAction = async (evt: CardActionLike): Promise<void> => {
@@ -191,7 +205,9 @@ export function startFeishuApprovals(deps: FeishuApprovalsDeps): {
         pending.set(entry.rpcId, entry)
         const card = renderApprovalCard(entry)
         try {
-          await channel.send(chat.chatId, { card }, chat.threadId !== undefined ? { replyInThread: true } : {})
+          const result = await channel.send(chat.chatId, { card }, chat.threadId !== undefined ? { replyInThread: true } : {})
+          const mid = (result as { messageId?: string })?.messageId
+          if (mid !== undefined) entry.cardMessageId = mid
         } catch (error: unknown) {
           // Sending failed; abandon so the agent isn't blocked on a user
           // who never sees the prompt.
@@ -242,7 +258,7 @@ export function startFeishuApprovals(deps: FeishuApprovalsDeps): {
     return out.sort((a, b) => a.createdAt - b.createdAt)
   }
 
-  return { stop, pendingForSession, findPending }
+  return { stop, pendingForSession, findPending, settle }
 }
 
 /** Derive a short, type-friendly code from the apiproxy rpcId. */
@@ -263,7 +279,6 @@ function renderApprovalCard(entry: PendingApproval): object {
   const body: object[] = [
     { tag: 'markdown', content: `**Tool:** \`${entry.toolName}\`\n${locationHint}` },
   ]
-  const value = JSON.stringify({ rpcId: entry.rpcId })
   return {
     schema: '2.0',
     config: { wide_screen_mode: true },
@@ -287,10 +302,31 @@ function renderApprovalCard(entry: PendingApproval): object {
               tag: 'button',
               text: { tag: 'plain_text', content: 'Approve once' },
               type: 'primary',
-              value,
+              value: JSON.stringify({ rpcId: entry.rpcId }),
             },
           ],
         },
+      ],
+    },
+  }
+}
+
+/**
+ * Build a settled (approved/rejected) card to replace the approval card.
+ * Buttons are removed; header and body show the final outcome.
+ */
+function renderSettledCard(entry: PendingApproval, outcome: ApprovalOutcomeKind): object {
+  const approved = outcome === 'allowed-once'
+  return {
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: approved ? '✅ Approved' : '❌ Rejected' },
+      template: approved ? 'green' : 'red',
+    },
+    body: {
+      elements: [
+        { tag: 'markdown', content: `${approved ? '✅' : '❌'} \`${entry.toolName}\` — ${approved ? 'approved once' : 'rejected'}` },
       ],
     },
   }

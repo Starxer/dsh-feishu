@@ -26,7 +26,7 @@ import { renderTerminalQr } from './provision.ts'
 import { ProvisionManager } from './provision-manager.ts'
 import { registerLarkCommands, formatRelativeTime, type ApprovalControl, type CommandTranslations } from './commands.ts'
 import { handleProvisionRequest, handleSettingsRequest, PROVISION_PATH, SETTINGS_PATH } from './web.ts'
-import { settleApprovalBySlash, startFeishuApprovals, type PendingApprovalView } from './feishu-approvals.ts'
+import { startFeishuApprovals, type PendingApprovalView } from './feishu-approvals.ts'
 import { startFeishuTodos } from './feishu-todos.ts'
 import { startFeishuStreaming } from './feishu-streaming.ts'
 import type { TurnStats } from './feishu-streaming.ts'
@@ -123,7 +123,9 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       pendingForSession: approvalsHandle.pendingForSession,
       findPending: approvalsHandle.findPending,
       async settle(view: PendingApprovalView, outcome: 'allowed-once' | 'rejected') {
-        await settleApprovalBySlash(apiProxy, view, outcome, ctx.logger('dsh-feishu'))
+        // Use the approvals handle's settle which tracks the card messageId
+        // and updates the approval card after settlement.
+        await approvalsHandle.settle(view.rpcId, outcome)
       },
     }
   }

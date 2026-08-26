@@ -162,7 +162,10 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
     state.toolCalls = []
     state.stepCardSent = false
     state.stepCardMessageId = undefined
-    state.chat = undefined
+    // NOTE: do NOT clear state.chat — it is session-level chat coordinates,
+    // not per-step data. Clearing it prevents step 2+ from sending cards
+    // when the step has only tool calls (no text/reasoning), causing tool
+    // calls from different steps to appear merged on the previous step's card.
     state.stepStartTime = 0
     state.firstTokenTime = 0
     state.messageTime = 0
