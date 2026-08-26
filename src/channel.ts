@@ -241,13 +241,24 @@ export async function startChannel(
           const intermediateSent = bridge.consumeIntermediateSent(sessionId)
           const meta = await replyCardMeta?.({ chatId, chatType, ...(threadId !== undefined ? { threadId } : {}) })
 
-          // Send the reply card with footer metadata.
-          // This is the final card with workspace/preset/model info.
-          const card = renderReplyCard(text, meta)
-          await channel.send(chatId, { card }, {
-            replyTo: messageId,
-            replyInThread,
-          })
+          if (intermediateSent) {
+            // Streaming already sent a step card with the text content.
+            // Only send the footer card (workspace/preset/model metadata).
+            const footerCard = renderFooterCard(meta)
+            if (footerCard !== undefined) {
+              await channel.send(chatId, { card: footerCard }, {
+                replyTo: messageId,
+                replyInThread,
+              })
+            }
+          } else {
+            // No intermediate card was sent — send the full reply card.
+            const card = renderReplyCard(text, meta)
+            await channel.send(chatId, { card }, {
+              replyTo: messageId,
+              replyInThread,
+            })
+          }
         }).catch((error: unknown) => {
           logError(`dsh-feishu: message handling failed: ${error instanceof Error ? error.message : String(error)}`)
           void channel.send(chatId, { text: config.errorMessage }, {
@@ -380,7 +391,7 @@ function renderReplyCard(text: string, meta?: ReplyCardMeta, reasoning?: string)
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: 'Response' },
+      title: { tag: 'plain_text', content: 'Reply' },
       template: 'blue',
     },
     body: { elements },
