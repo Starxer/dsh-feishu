@@ -40,6 +40,8 @@ interface PendingCard {
   question: AskUserQuestionItem
   sessionId: string
   abortController: AbortController
+  /** Message ID of the sent card, used to update it after selection. */
+  cardMessageId?: string
 }
 
 /**
@@ -52,7 +54,8 @@ interface PendingCard {
 export interface FeishuQuestionsChannel {
   /** Send a card to the chat. Resolves to `undefined` when no channel is
    *  connected (the listener drops the frame instead of awaiting forever). */
-  send(to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<unknown>
+  send(to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<{ messageId?: string }>
+  updateCard(messageId: string, card: object): Promise<void>
   /** Subscribe to interactive-card button clicks. The handler is invoked on
    *  every channel that connects for the lifetime of this subscription. */
   onCardAction(handler: (evt: CardActionLike) => void | Promise<void>): () => void
@@ -148,6 +151,11 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
     const pending = pendingCards.get(rpcId)
     if (pending === undefined) return
     pendingCards.delete(rpcId)
+    // Update the card to show the selected option and remove interactive elements.
+    if (pending.cardMessageId !== undefined) {
+      const settledCard = renderSettledQuestionCard(pending.question, selected)
+      await channel.updateCard(pending.cardMessageId, settledCard).catch(() => undefined)
+    }
     if (selected.length === 0 && custom === undefined) return
     await respondForQuestion(rpcId, pending.sessionId, pending.question, selected, custom)
   }
@@ -203,18 +211,44 @@ async function presentQuestions(
     const options = question.options ?? []
     const card = renderQuestionCard(question, options, rpcId, sessionId)
     try {
-      await channel.send(chat.chatId, { card }, chat.threadId !== undefined ? { replyInThread: true } : {})
+      const result = await channel.send(chat.chatId, { card }, chat.threadId !== undefined ? { replyInThread: true } : {})
+      const mid = (result as { messageId?: string })?.messageId
+      pendingCards.set(rpcId, {
+        rpcId,
+        sessionId,
+        question,
+        abortController: new AbortController(),
+        ...(mid !== undefined ? { cardMessageId: mid } : {}),
+      })
     } catch (error: unknown) {
       // Sending failed; abandon the prompt so the agent isn't blocked on a
       // user who never sees the question.
       return
     }
-    pendingCards.set(rpcId, {
-      rpcId,
-      sessionId,
-      question,
-      abortController: new AbortController(),
-    })
+  }
+}
+
+/**
+ * Build a settled question card — shows the selected option(s) with buttons removed.
+ */
+function renderSettledQuestionCard(
+  question: AskUserQuestionItem,
+  selected: readonly string[],
+): object {
+  const mdParts: string[] = []
+  if (question.header !== undefined && question.header !== '') {
+    mdParts.push(`**${question.header}**`)
+  }
+  mdParts.push(question.question)
+  mdParts.push('')
+  mdParts.push(`✅ **已选择：** ${selected.join(', ')}`)
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: question.header ?? 'Question' },
+      template: 'green',
+    },
+    body: { elements: [{ tag: 'markdown', content: mdParts.join('\n') }] },
   }
 }
 
