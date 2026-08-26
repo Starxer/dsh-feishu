@@ -42,10 +42,8 @@ describe('provisionApp', () => {
 
     expect(options.onStatusChange).toBeTypeOf('function')
     expect(options.createOnly).toBeUndefined()
-    expect(options.addons.scopes.tenant).toContain('im:message:send_as_bot')
-    expect(options.addons.scopes.tenant).toContain('im:message.reaction')
-    expect(options.addons.scopes.tenant).toContain('application:application:patch')
-    expect(options.addons.events.items.tenant).toContain('im.message.receive_v1')
+    // addons should NOT be passed — server uses defaults (includes card callbacks)
+    expect(options.addons).toBeUndefined()
     expect(states).toEqual([
       { phase: 'waiting', qrUrl: 'https://scan.example/verify', expireIn: 600 },
       { phase: 'configuring' },

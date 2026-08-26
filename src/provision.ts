@@ -66,10 +66,9 @@ export async function provisionApp(options: ProvisionOptions): Promise<Provision
       name: 'DSH 助手',
       desc: 'DeepSeek Harness 飞书入口',
     },
-    addons: {
-      scopes: { tenant: FEISHU_PROVISION_SCOPES },
-      events: { items: { tenant: [FEISHU_MESSAGE_EVENT] } },
-    },
+    // Don't pass addons — let the server use its default configuration
+    // (which includes card action callbacks). Passing addons overrides
+    // the server defaults and may disable card callback capability.
     onQRCodeReady: info => options.onState({ phase: 'waiting', qrUrl: info.url, expireIn: info.expireIn }),
     onStatusChange: () => undefined,
   })
