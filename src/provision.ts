@@ -46,9 +46,6 @@ export const FEISHU_PROVISION_SCOPES = [...FEISHU_BOT_SCOPES, FEISHU_APP_CONFIG_
 
 export const FEISHU_MESSAGE_EVENT = 'im.message.receive_v1'
 
-/** Card button/action callback — needed for approval and question cards. */
-export const FEISHU_CARD_ACTION_EVENT = 'card.action.trigger'
-
 export interface ProvisionLogger {
   info(message: string): unknown
   warn(message: string): unknown
@@ -71,7 +68,7 @@ export async function provisionApp(options: ProvisionOptions): Promise<Provision
     },
     addons: {
       scopes: { tenant: FEISHU_PROVISION_SCOPES },
-      events: { items: { tenant: [FEISHU_MESSAGE_EVENT, FEISHU_CARD_ACTION_EVENT] } },
+      events: { items: { tenant: [FEISHU_MESSAGE_EVENT] } },
     },
     onQRCodeReady: info => options.onState({ phase: 'waiting', qrUrl: info.url, expireIn: info.expireIn }),
     onStatusChange: () => undefined,
@@ -99,7 +96,7 @@ export async function enableWebsocketLongConnection(appId: string, appSecret: st
     data: {
       event: {
         subscription_type: 'websocket',
-        add_events: [FEISHU_MESSAGE_EVENT, FEISHU_CARD_ACTION_EVENT],
+        add_events: [FEISHU_MESSAGE_EVENT],
       },
     },
     path: { app_id: appId },
