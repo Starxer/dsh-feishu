@@ -36,6 +36,7 @@ interface BridgeHolder {
 export interface FeishuStreamingChannel {
   send(to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<{ messageId?: string }>
   updateCard(messageId: string, card: object): Promise<void>
+  recallMessage(messageId: string): Promise<void>
 }
 
 /** Public deps for the unified per-step module. */
@@ -102,6 +103,8 @@ interface SessionStepState {
   stepCardSent: boolean
   /** Message ID of the sent step card (for in-place updates). */
   stepCardMessageId: Promise<string | undefined> | undefined
+  /** The header template of the last sent/updated card (for detecting color changes). */
+  lastCardTemplate: string | undefined
   /** Chat info for the current step. */
   chat: ConversationMessage | undefined
   /** Whether the last assistant/message sent a step card with content. */
@@ -144,6 +147,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
         toolCalls: [],
         stepCardSent: false,
         stepCardMessageId: undefined,
+        lastCardTemplate: undefined,
         chat: undefined,
         lastStepHadContent: false,
         stepStartTime: 0,
@@ -164,6 +168,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
     state.toolCalls = []
     state.stepCardSent = false
     state.stepCardMessageId = undefined
+    state.lastCardTemplate = undefined
     // NOTE: do NOT clear state.chat — it is session-level chat coordinates,
     // not per-step data. Clearing it prevents step 2+ from sending cards
     // when the step has only tool calls (no text/reasoning), causing tool
@@ -194,8 +199,10 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
   /** Send the initial step card and track its messageId. */
   const sendStepCard = (chat: ConversationMessage, sessionId: string, state: SessionStepState): void => {
     const card = buildStepCard(state)
+    const header = (card as { header?: { title?: { content?: string }; template?: string } })?.header
     state.stepCardSent = true
     state.chat = chat
+    state.lastCardTemplate = header?.template
     // Mark this session as having sent intermediate content so channel.ts
     // can skip the duplicate reply card and only send the footer.
     const hasText = state.text.trim() !== ''
@@ -207,7 +214,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
       { card },
       chat.threadId !== undefined ? { replyInThread: true } : {},
     ).then((result) => {
-      console.log(`dsh-feishu: [send] step card sent, messageId=${result?.messageId}`)
+      console.log(`dsh-feishu: [send] step card sent, messageId=${result?.messageId} title="${header?.title?.content}" template="${header?.template}"`)
       return result?.messageId
     }).catch((error: unknown) => {
       console.log(`dsh-feishu: [send] step card send failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -242,7 +249,8 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
   ): Promise<void> => {
     return messageIdPromise.then((messageId) => {
       if (messageId !== undefined) {
-        console.log(`dsh-feishu: [update] updating card ${messageId}`)
+        const header = (card as { header?: { title?: { content?: string }; template?: string } })?.header
+        console.log(`dsh-feishu: [update] updating card ${messageId} title="${header?.title?.content}" template="${header?.template}"`)
         return channel.updateCard(messageId, card)
       }
       console.log('dsh-feishu: [update] messageId is undefined, skipping')
@@ -263,26 +271,64 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
     return Promise.resolve()
   }
 
-  /** Update the existing step card with current state (debounced). */
+  /** Update the existing step card with current state (debounced).
+   *  When the header template changes (e.g. blue→green), the old card is
+   *  recalled and a new one is sent because im.v1.message.patch does not
+   *  update the card header. */
   const updateStepCard = (state: SessionStepState): void => {
     if (!state.stepCardSent || state.stepCardMessageId === undefined) return
-    // Capture BOTH messageId and card NOW — resetStep may clear state before the timer fires
-    const messageIdPromise = state.stepCardMessageId
     const card = buildStepCard(state)
-    // Clear previous pending update
-    const existing = pendingUpdates.get(state)
-    if (existing !== undefined) clearTimeout(existing.timer)
-    // Debounce: merge rapid updates into one (150ms threshold)
-    pendingUpdates.set(state, {
-      messageIdPromise,
-      card,
-      timer: setTimeout(() => {
+    const newTemplate = (card as { header?: { template?: string } })?.header?.template
+    const templateChanged = newTemplate !== undefined && newTemplate !== state.lastCardTemplate
+
+    if (templateChanged) {
+      // Header color changed — must recall + resend (patch doesn't update header).
+      // Cancel any pending debounce first.
+      const existing = pendingUpdates.get(state)
+      if (existing !== undefined) {
+        clearTimeout(existing.timer)
         pendingUpdates.delete(state)
-        executeCardUpdate(messageIdPromise, card).catch((error: unknown) => {
-          console.log(`dsh-feishu: [update] timer callback error: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      const chat = state.chat
+      const oldMessageIdPromise = state.stepCardMessageId
+      if (chat === undefined) return
+      // Recall old card, then send new card with correct header.
+      oldMessageIdPromise.then((oldId) => {
+        if (oldId !== undefined) {
+          return channel.recallMessage(oldId).catch((error: unknown) => {
+            console.log(`dsh-feishu: [recall] failed: ${error instanceof Error ? error.message : String(error)}`)
+          })
+        }
+      }).then(() => {
+        const header = (card as { header?: { title?: { content?: string }; template?: string } })?.header
+        return channel.send(
+          chat.chatId,
+          { card },
+          chat.threadId !== undefined ? { replyInThread: true } : {},
+        ).then((result) => {
+          console.log(`dsh-feishu: [resend] card resent, messageId=${result?.messageId} title="${header?.title?.content}" template="${header?.template}"`)
+          state.stepCardMessageId = Promise.resolve(result?.messageId)
+          state.lastCardTemplate = newTemplate
         })
-      }, 150),
-    })
+      }).catch((error: unknown) => {
+        console.log(`dsh-feishu: [resend] failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    } else {
+      // Same template — debounce body-only update.
+      const messageIdPromise = state.stepCardMessageId
+      const existing = pendingUpdates.get(state)
+      if (existing !== undefined) clearTimeout(existing.timer)
+      pendingUpdates.set(state, {
+        messageIdPromise,
+        card,
+        timer: setTimeout(() => {
+          pendingUpdates.delete(state)
+          executeCardUpdate(messageIdPromise, card).catch((error: unknown) => {
+            console.log(`dsh-feishu: [update] timer callback error: ${error instanceof Error ? error.message : String(error)}`)
+          })
+        }, 150),
+      })
+    }
   }
 
   const iterate = async (): Promise<void> => {
