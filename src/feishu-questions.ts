@@ -153,8 +153,12 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
     pendingCards.delete(rpcId)
     // Update the card to show the selected option and remove interactive elements.
     if (pending.cardMessageId !== undefined) {
-      const settledCard = renderSettledQuestionCard(pending.question, selected)
-      await channel.updateCard(pending.cardMessageId, settledCard).catch(() => undefined)
+      const selectedLabels = selected.length > 0 ? selected : (action?.option !== undefined ? [action.option] : [])
+      const settledCard = renderSettledQuestionCard(pending.question, selectedLabels)
+      console.log('dsh-feishu: [questions] updating settled card, options:', pending.question.options?.length ?? 0, 'selected:', selectedLabels)
+      await channel.updateCard(pending.cardMessageId, settledCard).catch((error: unknown) => {
+        console.log('dsh-feishu: [questions] settled card update failed:', error instanceof Error ? error.message : String(error))
+      })
     }
     if (selected.length === 0 && custom === undefined) return
     await respondForQuestion(rpcId, pending.sessionId, pending.question, selected, custom)
@@ -245,12 +249,16 @@ function renderSettledQuestionCard(
   }
   mdParts.push(question.question)
   mdParts.push('')
-  for (const option of options) {
-    if (selectedSet.has(option.label)) {
-      mdParts.push(`✅ ~~${option.label}~~ — *已选择*`)
-    } else {
-      mdParts.push(`⬜ ${option.label}`)
+  if (options.length > 0) {
+    for (const option of options) {
+      if (selectedSet.has(option.label)) {
+        mdParts.push(`✅ ~~${option.label}~~ — *已选择*`)
+      } else {
+        mdParts.push(`⬜ ${option.label}`)
+      }
     }
+  } else {
+    mdParts.push(`✅ **已选择：** ${selected.join(', ')}`)
   }
   return {
     config: { wide_screen_mode: true },
