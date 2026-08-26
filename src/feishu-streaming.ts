@@ -176,11 +176,10 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
     const reasoning = showR ? state.reasoning.trim() : undefined
     const text = state.text.trim() !== '' ? state.text.trim() : undefined
     const tools = state.toolCalls
-    const stepDurationMs = state.completedTime > 0 && state.stepStartTime > 0
-      ? state.completedTime - state.stepStartTime
-      : undefined
 
-    return renderStepCard(reasoning, text, tools, state.usage, stepDurationMs)
+    // Only show token counts in step footer (not duration — duration is inaccurate
+    // while tools are running, and is only reliable in the Turn Complete card).
+    return renderStepCard(reasoning, text, tools, state.usage)
   }
 
   /** Send the initial step card and track its messageId. */
@@ -551,7 +550,6 @@ function renderStepCard(
   text: string | undefined,
   tools: StepToolCall[],
   usage?: StepUsage,
-  stepDurationMs?: number,
 ): object {
   const elements: object[] = []
 
@@ -613,18 +611,12 @@ function renderStepCard(
     elements.push({ tag: 'markdown', content: '*(empty)*' })
   }
 
-  // Step footer: duration + token counts
-  const footerParts: string[] = []
-  if (stepDurationMs !== undefined && stepDurationMs > 0) {
-    footerParts.push(stepDurationMs >= 1000
-      ? `⏱ ${(stepDurationMs / 1000).toFixed(1)}s`
-      : `⏱ ${stepDurationMs}ms`)
-  }
+  // Step footer: token counts only (duration is in Turn Complete card)
   if (usage !== undefined) {
-    footerParts.push(`📥 ${formatTokenCount(usage.inputTokens)} in`)
-    footerParts.push(`📤 ${formatTokenCount(usage.outputTokens)} out`)
-  }
-  if (footerParts.length > 0) {
+    const footerParts = [
+      `📥 ${formatTokenCount(usage.inputTokens)} in`,
+      `📤 ${formatTokenCount(usage.outputTokens)} out`,
+    ]
     elements.push({ tag: 'hr' })
     elements.push({ tag: 'markdown', content: footerParts.join(' · '), text_size: 'notation' })
   }

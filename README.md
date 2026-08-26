@@ -25,7 +25,7 @@
 npx @deepseek-ai/dsh plugin --profile web add @starxer/dsh-feishu
 ```
 
-然后在 DSH Settings → 飞书与 Lark 中配置 App ID 和 App Secret。支持扫码一键配置（推荐）或手动创建应用。
+然后在 DSH **Settings** → 飞书与 Lark 中配置 App ID 和 App Secret。支持扫码一键配置（推荐）或手动创建应用。
 
 详见 [docs/feishu-setup.md](docs/feishu-setup.md)。
 
