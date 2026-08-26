@@ -148,11 +148,6 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       if (ch === undefined) return Promise.reject(new Error('dsh-feishu: channel not connected'))
       return ch.updateCard(messageId, card)
     },
-    recallMessage: (messageId: string): Promise<void> => {
-      const ch = channelHolder.current
-      if (ch === undefined) return Promise.reject(new Error('dsh-feishu: channel not connected'))
-      return ch.recallMessage(messageId)
-    },
     onCardAction: (handler: (evt: CardActionEvent) => void | Promise<void>): (() => void) => {
       cardActionHandlers.add(handler)
       const attach = (ch: LarkChannel): (() => void) => {
