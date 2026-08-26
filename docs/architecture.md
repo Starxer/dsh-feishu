@@ -1,44 +1,60 @@
 # Architecture
 
 ```text
-Feishu/Lark user
-      │ im.message.receive_v1
-      ▼
-Official Lark Channel (WebSocket, reconnect, dedup, policy, chat queue)
-      │ NormalizedMessage
-      ▼
-dsh-feishu conversation adapter
-      │ chat/thread → opaque SessionId
-      ▼
-Workspace selection + Agent Preset composition
-      │ cwd + mounted tools/system prompt
-      ▼
-Harness Agent (selected model, tools, system prompt, session log)
-      │ current turn assistant text
-      ▼
-Official Channel.send() → reply to original message/thread
+飞书用户
+  │ im.message.receive_v1 (WebSocket)
+  ▼
+Lark SDK (自动重连、去重、串行处理)
+  │ NormalizedMessage
+  ▼
+dsh-feishu 会话适配器
+  │ chat/thread → SessionId
+  ▼
+Workspace + Agent Preset 组合
+  │ cwd + tools + system prompt
+  ▼
+Harness Agent (模型、工具、会话日志)
+  │ assistant text + tool results
+  ▼
+飞书卡片 (per-step card + Turn Complete)
 ```
 
-The plugin runs inside the Harness Host. It does not launch another Harness process and does not expose an HTTP endpoint. A lazy Agent is created for each conversation key and reused for later messages. Before creation, the plugin resolves the configured Agent Preset (or the Harness default), selects the configured Workspace (or the first registered Workspace), records both in session metadata, mounts the preset in the Agent scope, and attaches the Session to the matching Workspace. `agent.whenIdle()` brackets each submitted prompt; only assistant events at or after the captured starting sequence are eligible for the reply.
+## 核心模块
 
-The official Channel owns transport and ingress safety. `chatQueue.enabled` prevents overlapping handlers in the same chat, deduplication suppresses repeated event delivery, and a five-minute stale window avoids processing delayed events as new requests. On each accepted message the plugin first adds the configured emoji reaction (`reactEmoji`, default `THUMBSUP`; empty disables it) as a best-effort acknowledgement — a reaction failure is logged and never blocks the reply. Cordis disposal removes listeners, disconnects the WebSocket, flushes completed turns, and disposes owned Agents.
+| 文件 | 职责 |
+|---|---|
+| `src/index.ts` | 插件入口，注册服务和命令 |
+| `src/channel.ts` | 飞书 Channel 封装，回复卡片渲染，Turn Complete 卡片 |
+| `src/harness.ts` | Harness 会话服务，session 映射持久化 |
+| `src/feishu-streaming.ts` | 统一 per-step 卡片：订阅 mux 事件流，渲染 reasoning + text + 工具调用 + 结果预览 + 时长/token footer |
+| `src/feishu-todos.ts` | Todo 进度卡片 |
+| `src/feishu-approvals.ts` | 工具审批处理 |
+| `src/feishu-questions.ts` | ask_user_question 卡片 |
+| `src/commands.ts` | 斜杠命令注册和处理 |
 
-## Chat-side slash commands
+## 事件流
 
-Inbound messages starting with `/<name>` are routed through the Harness command plane instead of the Agent. The plugin injects `commands` and `llm` (the `compaction` service is intentionally **not** injected — see AGENTS.md「关键坑」) and registers the chat-facing commands:
+每个 agent step 的事件流：
 
-- `/model` — reports, lists, or switches the active default model. The handler reads `ctx.llm.listProviders()` and `ctx.llm.listModels()` to enumerate routes, and writes new selections through `AgentDefaultModelConfig.saveSelection()`. A bare keyword with no `/` falls through to a case-insensitive fuzzy search across provider ids, model ids, and model names, marking the current selection.
-- `/new [--workspace <path>] [--preset <id>]` — starts a new conversation in the chat; optionally pins the workspace and agent preset for that new session (persisted — takes effect only on the new session, never a running one).
-- `/thread [N]` — lists persisted sessions, or switches the chat to one by index. Archived sessions are filtered out and rejected on switch.
-- `/help` — lists every slash command currently registered on the receiving agent (including DSH's own `compact` / `goal` / `feedback` / `export`).
-- `/status` — shows the WebUI session state: id/title/last-active, workspace, agent preset, current model, running status, archived.
-- `/approve` / `/deny` / `/approvals` — settle pending tool approvals (shared with the Feishu approval card).
-- `/stop` — calls `agent.cancel({ kind: 'user' })` to abort the running turn. The chat stays usable; the next inbound message opens a new turn. When the agent is already idle the command reports a no-op success rather than failing.
+```
+step/start       → 记录开始时间
+assistant/chunk  → 累积 reasoning/text，记录首 token 时间
+assistant/message → 发送 step 卡片，记录 usage
+tool/call        → 追加工具调用信息，更新卡片
+tool/result      → 追加工具结果和预览，更新卡片，记录完成时间
+turn/end         → flush debounce，发送 Turn Complete 卡片
+```
 
-> `/compact` is **not** registered here: it would collide with DSH's own `command-compact` plugin (`name: "compact"`) and fail boot with `command "compact" is already registered`. Use the WebUI's `/compact`, which routes through DSH's own command-compact once `compaction-basic` + `command-compact` are pulled back to the host plane in `~/.dsh/profiles/web/cordis.patch.yml`.
+## 卡片设计
 
-`commands.execute()` requires a live `Agent`; `HarnessConversationService.resolveAgent()` reuses `agents.get()` or an in-flight handle for the chat's conversation key without spawning a new session, so slash commands against an empty chat return a clear "send a message first" reply rather than silently creating an empty session. Slash-command failures fall through to the configured `errorMessage` fallback so users never see Harness-internal stack traces.
+- **Step 卡片**：每个 agent step 一张，wathet→green/red 颜色变化，底部显示时长和 token
+- **Turn Complete 卡片**：turn 结束后发送，绿色，展示性能指标和配置信息
+- **Todo 卡片**：turquoise，含进度条
+- **审批卡片**：orange，含 approve/deny 按钮
 
-## Reply cards
+## 技术要点
 
-Every final assistant turn is rendered as a Feishu interactive card (`channel.ts` `{ card }`), with a read-only footer naming the session's **workspace path** and **agent preset** (the "mode"). This footer is injected by the plugin from session metadata (`cwd` / `agentPreset`, persisted in the session header) — **no LLM call** and no model tokens are consumed for it.
+- **Debounce**：150ms 合并快速更新，减少 API 调用
+- **Flush 同步**：`turn/end` 时 flush pending debounce，确保卡片更新在 Turn Complete 之前完成
+- **Error-safe**：内层 try/catch 保护 mux 事件处理，防止单个事件错误导致整个流断开
+- **Card JSON 2.0**：所有卡片使用 `schema: '2.0'` + `body.elements`，原生支持 markdown

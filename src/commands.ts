@@ -107,7 +107,7 @@ export interface CommandTranslations {
   readonly approvalsAgeMinutes: (n: number) => string
   readonly approvalsAgeHours: (n: number) => string
   readonly statusDescription: string
-  readonly statusOutput: (meta: { sessionId: string; workspace: string; agentPreset: string; model: string; title: string; turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number; contextWindow: number; lastInputTokens: number }) => string
+  readonly statusOutput: (meta: { sessionId: string; workspace: string; agentPreset: string; model: string; title: string; turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number; contextWindow: number; lastInputTokens: number; cacheHitRate: number; ttftAvgMs: number; tokensPerSecond: number; llmDurationMs: number; toolDurationMs: number }) => string
   readonly streamDescription: string
   readonly stopDescription: string
   readonly reasoningDescription: string

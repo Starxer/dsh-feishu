@@ -29,6 +29,7 @@ import { handleProvisionRequest, handleSettingsRequest, PROVISION_PATH, SETTINGS
 import { settleApprovalBySlash, startFeishuApprovals, type PendingApprovalView } from './feishu-approvals.ts'
 import { startFeishuTodos } from './feishu-todos.ts'
 import { startFeishuStreaming } from './feishu-streaming.ts'
+import type { TurnStats } from './feishu-streaming.ts'
 
 export const name = 'lark-channel'
 export const inject = [
@@ -107,6 +108,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   let stopStreaming: () => void = () => undefined
   let consumeReasoning: (sessionId: string) => string | undefined = () => undefined
   let consumeLastStepHadContent: (sessionId: string) => boolean = () => false
+  let flushed: (sessionId: string) => Promise<TurnStats | undefined> = () => Promise.resolve(undefined)
   let stopTodos: () => void = () => undefined
   const channelHolder: { current: LarkChannel | undefined } = { current: undefined }
   const buildApprovalControl = (apiProxy: ApiProxy): ApprovalControl => {
@@ -214,6 +216,9 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
             lastInputTokens: meta.lastInputTokens,
           }
         },
+        undefined,  // consumeReasoning (unused; bridge handles intermediate tracking)
+        undefined,  // consumeLastStepHadContent (unused)
+        flushed,
       )
     },
   })
@@ -246,6 +251,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     stopStreaming = streamingResult.stop
     consumeReasoning = streamingResult.consumeReasoning
     consumeLastStepHadContent = streamingResult.consumeLastStepHadContent
+    flushed = streamingResult.flushed
   }
   registerLarkCommands(
     ctx,
@@ -257,7 +263,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       startNewSession: (chatMessage, salt) => bridgeHolder.current?.startNewSession(chatMessage, salt) ?? '',
       switchToSession: (chatMessage, sessionId) => bridgeHolder.current?.switchToSession(chatMessage, sessionId) ?? false,
       listSessions: async () => bridgeHolder.current?.listSessions() ?? [],
-      getSessionMeta: async (chatMessage) => bridgeHolder.current?.getSessionMeta(chatMessage) ?? { sessionId: '', workspace: '', agentPreset: '', model: '', reasoningEffort: '', title: '', turns: 0, steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, contextWindow: 0, lastInputTokens: 0 },
+      getSessionMeta: async (chatMessage) => bridgeHolder.current?.getSessionMeta(chatMessage) ?? { sessionId: '', workspace: '', agentPreset: '', model: '', reasoningEffort: '', title: '', turns: 0, steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, contextWindow: 0, lastInputTokens: 0, cacheHitRate: 0, ttftAvgMs: 0, tokensPerSecond: 0, llmDurationMs: 0, toolDurationMs: 0 },
     },
     () => {
       const last = bridgeHolder.lastChatMessage
@@ -369,6 +375,14 @@ function formatTokenCount(n: number): string {
   return `${Math.round(n / 100_000) / 10}M`
 }
 
+function formatDuration(ms: number): string {
+  if (ms < 1_000) return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  const m = Math.floor(ms / 60_000)
+  const s = Math.round((ms % 60_000) / 1000)
+  return `${m}m${s}s`
+}
+
 const larkCommandTranslations: CommandTranslations = {
   modelDescription: 'Show, list, or switch the active model',
   modelCurrentHeader: 'Current model:',
@@ -437,6 +451,21 @@ const larkCommandTranslations: CommandTranslations = {
       lines.push(`• Activity: ${parts.join(' · ')}`)
       if (meta.inputTokens > 0 || meta.outputTokens > 0) {
         lines.push(`• Tokens: ${formatTokenCount(meta.inputTokens)} in · ${formatTokenCount(meta.outputTokens)} out`)
+      }
+      if (meta.cacheHitRate > 0) {
+        lines.push(`• Cache hit: ${meta.cacheHitRate}%`)
+      }
+      if (meta.llmDurationMs > 0 || meta.toolDurationMs > 0) {
+        const durParts: string[] = []
+        if (meta.llmDurationMs > 0) durParts.push(`LLM ${formatDuration(meta.llmDurationMs)}`)
+        if (meta.toolDurationMs > 0) durParts.push(`Tools ${formatDuration(meta.toolDurationMs)}`)
+        lines.push(`• Duration: ${durParts.join(' · ')}`)
+      }
+      if (meta.ttftAvgMs > 0) {
+        lines.push(`• TTFT avg: ${formatDuration(meta.ttftAvgMs)}`)
+      }
+      if (meta.tokensPerSecond > 0) {
+        lines.push(`• Throughput: ${meta.tokensPerSecond} tok/s`)
       }
     }
     if (meta.contextWindow > 0) {

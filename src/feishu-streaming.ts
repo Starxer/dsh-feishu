@@ -48,6 +48,32 @@ export interface FeishuStreamingDeps {
   showReasoning?: () => boolean
 }
 
+/** Per-step usage from assistant/message event. */
+interface StepUsage {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens?: number | undefined
+  cacheWriteTokens?: number | undefined
+}
+
+/** Aggregated turn stats for the Turn Complete card. */
+export interface TurnStats {
+  turnStartTime: number
+  stepCount: number
+  toolCallCount: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalCacheReadTokens: number
+  totalCacheWriteTokens: number
+  firstStepTtftMs: number | null
+  /** Sum of (firstToken → message) across steps — pure LLM decode time for throughput. */
+  totalDecodeMs: number
+  /** Sum of (stepStart → completed) across steps — includes tool execution. */
+  totalStepMs: number
+  /** Sum of tool elapsed times. */
+  totalToolMs: number
+}
+
 /** One tool call tracked within a step. */
 interface StepToolCall {
   toolName: string
@@ -78,6 +104,16 @@ interface SessionStepState {
   chat: ConversationMessage | undefined
   /** Whether the last assistant/message sent a step card with content. */
   lastStepHadContent: boolean
+  // --- Timing fields (event.time from mux stream) ---
+  stepStartTime: number
+  firstTokenTime: number
+  /** Time of assistant/message event (LLM inference complete). */
+  messageTime: number
+  /** Time of last tool/result or assistant/message (step fully complete). */
+  completedTime: number
+  usage: StepUsage | undefined
+  // --- Turn-level aggregation ---
+  turnStats: TurnStats | undefined
 }
 
 /**
@@ -90,6 +126,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
   stop: () => void
   consumeReasoning: (sessionId: string) => string | undefined
   consumeLastStepHadContent: (sessionId: string) => boolean
+  flushed: (sessionId: string) => Promise<TurnStats | undefined>
 } {
   const { apiProxy, channel, bridgeHolder, logger, showReasoning } = deps
   console.log('dsh-feishu: startFeishuStreaming (unified per-step cards)')
@@ -107,6 +144,12 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
         stepCardMessageId: undefined,
         chat: undefined,
         lastStepHadContent: false,
+        stepStartTime: 0,
+        firstTokenTime: 0,
+        messageTime: 0,
+        completedTime: 0,
+        usage: undefined,
+        turnStats: undefined,
       }
       sessionStates.set(sessionId, state)
     }
@@ -120,6 +163,11 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
     state.stepCardSent = false
     state.stepCardMessageId = undefined
     state.chat = undefined
+    state.stepStartTime = 0
+    state.firstTokenTime = 0
+    state.messageTime = 0
+    state.completedTime = 0
+    state.usage = undefined
   }
 
   /** Build the unified card content for the current step state. */
@@ -128,8 +176,11 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
     const reasoning = showR ? state.reasoning.trim() : undefined
     const text = state.text.trim() !== '' ? state.text.trim() : undefined
     const tools = state.toolCalls
+    const stepDurationMs = state.completedTime > 0 && state.stepStartTime > 0
+      ? state.completedTime - state.stepStartTime
+      : undefined
 
-    return renderStepCard(reasoning, text, tools)
+    return renderStepCard(reasoning, text, tools, state.usage, stepDurationMs)
   }
 
   /** Send the initial step card and track its messageId. */
@@ -157,8 +208,52 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
     })
   }
 
-  /** Debounce timer for updateStepCard to merge rapid updates. */
-  const updateTimers = new Map<SessionStepState, ReturnType<typeof setTimeout>>()
+  /**
+   * Pending debounce entries keyed by session state.  Each entry stores the
+   * timer handle AND the captured messageIdPromise + card so that both the
+   * normal timer callback and a premature flush (turn/end) use the exact same
+   * data — the card captured at schedule time, not rebuilt from state that may
+   * have been cleared by resetStep.
+   */
+  const pendingUpdates = new Map<SessionStepState, {
+    timer: ReturnType<typeof setTimeout>
+    messageIdPromise: Promise<string | undefined>
+    card: object
+  }>()
+
+  /** Flush promises: resolved by turn/end after the final card update. */
+  const flushPromises = new Map<string, { promise: Promise<void>; resolve: () => void }>()
+
+  /** Turn stats per session, stored independently of flush promise timing. */
+  const turnStatsMap = new Map<string, TurnStats>()
+
+  /** Execute a card update (shared by debounce timer and flush). */
+  const executeCardUpdate = (
+    messageIdPromise: Promise<string | undefined>,
+    card: object,
+  ): Promise<void> => {
+    return messageIdPromise.then((messageId) => {
+      if (messageId !== undefined) {
+        console.log(`dsh-feishu: [update] updating card ${messageId}`)
+        return channel.updateCard(messageId, card)
+      }
+      console.log('dsh-feishu: [update] messageId is undefined, skipping')
+    }).catch((error: unknown) => {
+      console.log(`dsh-feishu: [update] failed: ${error instanceof Error ? error.message : String(error)}`)
+      logger.warn(`dsh-feishu: step card update failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
+
+  /** Flush the pending debounce timer for a state, executing the updateCard immediately. */
+  const flushPendingUpdate = (state: SessionStepState): Promise<void> => {
+    const entry = pendingUpdates.get(state)
+    if (entry !== undefined) {
+      clearTimeout(entry.timer)
+      pendingUpdates.delete(state)
+      return executeCardUpdate(entry.messageIdPromise, entry.card)
+    }
+    return Promise.resolve()
+  }
 
   /** Update the existing step card with current state (debounced). */
   const updateStepCard = (state: SessionStepState): void => {
@@ -167,22 +262,19 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
     const messageIdPromise = state.stepCardMessageId
     const card = buildStepCard(state)
     // Clear previous pending update
-    const existing = updateTimers.get(state)
-    if (existing !== undefined) clearTimeout(existing)
+    const existing = pendingUpdates.get(state)
+    if (existing !== undefined) clearTimeout(existing.timer)
     // Debounce: merge rapid updates into one (150ms threshold)
-    updateTimers.set(state, setTimeout(() => {
-      updateTimers.delete(state)
-      void messageIdPromise.then((messageId) => {
-        if (messageId !== undefined) {
-          console.log(`dsh-feishu: [update] updating card ${messageId}`)
-          return channel.updateCard(messageId, card)
-        }
-        console.log('dsh-feishu: [update] messageId is undefined, skipping')
-      }).catch((error: unknown) => {
-        console.log(`dsh-feishu: [update] failed: ${error instanceof Error ? error.message : String(error)}`)
-        logger.warn(`dsh-feishu: step card update failed: ${error instanceof Error ? error.message : String(error)}`)
-      })
-    }, 150))
+    pendingUpdates.set(state, {
+      messageIdPromise,
+      card,
+      timer: setTimeout(() => {
+        pendingUpdates.delete(state)
+        executeCardUpdate(messageIdPromise, card).catch((error: unknown) => {
+          console.log(`dsh-feishu: [update] timer callback error: ${error instanceof Error ? error.message : String(error)}`)
+        })
+      }, 150),
+    })
   }
 
   const iterate = async (): Promise<void> => {
@@ -191,18 +283,19 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
         { rpcId: RpcId(`feishu-streaming-${Date.now()}`), payload: {} },
         controller.signal,
       )) {
-        const frame = envelope.payload as MuxFrame
-        if (frame.type !== 'session/event') continue
+        try {
+          const frame = envelope.payload as MuxFrame
+          if (frame.type !== 'session/event') continue
 
-        const event = frame.event
-        if (event === undefined) continue
-        const sessionId = frame.sessionId
-        const bridge = bridgeHolder.current
-        if (bridge === undefined) continue
-        const chat = bridge.resolveChat(sessionId)
-        if (chat === undefined) continue
+          const event = frame.event
+          if (event === undefined) continue
+          const sessionId = frame.sessionId
+          const bridge = bridgeHolder.current
+          if (bridge === undefined) continue
+          const chat = bridge.resolveChat(sessionId)
+          if (chat === undefined) continue
 
-        const state = getState(sessionId)
+          const state = getState(sessionId)
 
         if (event.type === 'assistant/chunk') {
           // Accumulate reasoning-delta and text-delta chunks.
@@ -212,11 +305,56 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
               state.reasoning += chunk.text
             } else if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
               state.text += chunk.text
+              // Record first token time (TTFT anchor).
+              if (state.firstTokenTime === 0) {
+                state.firstTokenTime = event.time ?? Date.now()
+              }
             }
           }
         } else if (event.type === 'assistant/message') {
-          // The assembled message arrived. If there's reasoning or text,
-          // send the step card now (before tool calls).
+          // The assembled message arrived. Record usage and message time.
+          state.messageTime = event.time ?? Date.now()
+          state.completedTime = state.messageTime  // Will be overwritten by tool/result if tools run
+          const usage = event.data?.usage
+          if (usage !== undefined && usage !== null) {
+            state.usage = {
+              inputTokens: (usage.inputTokens as number) ?? 0,
+              outputTokens: (usage.outputTokens as number) ?? 0,
+              cacheReadTokens: (usage.cacheReadTokens as number | undefined),
+              cacheWriteTokens: (usage.cacheWriteTokens as number | undefined),
+            }
+          }
+
+          // Accumulate turn stats.
+          if (state.turnStats !== undefined) {
+            const ts = state.turnStats
+            ts.stepCount++
+            ts.toolCallCount += state.toolCalls.length
+            if (state.usage !== undefined) {
+              ts.totalInputTokens += state.usage.inputTokens
+              ts.totalOutputTokens += state.usage.outputTokens
+              ts.totalCacheReadTokens += state.usage.cacheReadTokens ?? 0
+              ts.totalCacheWriteTokens += state.usage.cacheWriteTokens ?? 0
+            }
+            // TTFT: only record from the first step that has one.
+            if (ts.firstStepTtftMs === null && state.firstTokenTime > 0 && state.stepStartTime > 0) {
+              ts.firstStepTtftMs = state.firstTokenTime - state.stepStartTime
+            }
+            // Decode time: first token → assistant/message (pure LLM output time, for throughput).
+            if (state.firstTokenTime > 0 && state.messageTime > state.firstTokenTime) {
+              ts.totalDecodeMs += state.messageTime - state.firstTokenTime
+            }
+            // Step time: step start → completed (includes tool execution).
+            if (state.stepStartTime > 0 && state.completedTime > state.stepStartTime) {
+              ts.totalStepMs += state.completedTime - state.stepStartTime
+            }
+            // Tool time: sum of tool elapsed.
+            for (const tc of state.toolCalls) {
+              if (tc.result !== undefined) ts.totalToolMs += tc.result.elapsed
+            }
+          }
+
+          // If there's reasoning or text, send the step card now (before tool calls).
           const hasContent = state.reasoning.trim() !== '' || state.text.trim() !== ''
           if (hasContent) {
             sendStepCard(chat, sessionId, state)
@@ -274,17 +412,65 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
             if (state.stepCardSent) {
               updateStepCard(state)
             }
+            // Update completedTime so step duration includes tool execution.
+            state.completedTime = event.time ?? Date.now()
           }
         } else if (event.type === 'step/start') {
-          // New step starting — reset for the new step.
+          // New step starting — reset for the new step and record start time.
           resetStep(state)
+          state.stepStartTime = event.time ?? Date.now()
         } else if (event.type === 'turn/start') {
-          // New turn — reset step state. Don't reset lastStepHadContent here;
+          // New turn — reset step state and create flush entry for this turn.
+          // Don't reset lastStepHadContent here;
           // it's consumed by channel.ts after bridge.reply() returns.
           resetStep(state)
+          state.turnStats = {
+            turnStartTime: event.time ?? Date.now(),
+            stepCount: 0,
+            toolCallCount: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            totalCacheReadTokens: 0,
+            totalCacheWriteTokens: 0,
+            firstStepTtftMs: null,
+            totalDecodeMs: 0,
+            totalStepMs: 0,
+            totalToolMs: 0,
+          }
+          // Create the flush entry now so channel.ts's flushed() call can find it
+          // even if bridge.reply() resolves before turn/end fires.
+          let resolve!: () => void
+          const promise = new Promise<void>((r) => { resolve = r })
+          flushPromises.set(sessionId, { promise, resolve })
         } else if (event.type === 'turn/end') {
-          // Turn ended — reset.
+          // Flush any pending debounced updateCard before resetting, so the
+          // final card content is committed before channel.ts sends the footer.
+          const turnStats = state.turnStats
+          // Compute final turn duration.
+          if (turnStats !== undefined) {
+            const now = event.time ?? Date.now()
+            turnStats.totalStepMs = now - turnStats.turnStartTime
+            turnStatsMap.set(sessionId, turnStats)
+          }
+          flushPendingUpdate(state).then(() => {
+            const entry = flushPromises.get(sessionId)
+            if (entry !== undefined) {
+              entry.resolve()
+              flushPromises.delete(sessionId)
+            }
+          }).catch((error: unknown) => {
+            console.log(`dsh-feishu: turn/end flush error: ${error instanceof Error ? error.message : String(error)}`)
+            const entry = flushPromises.get(sessionId)
+            if (entry !== undefined) {
+              entry.resolve()
+              flushPromises.delete(sessionId)
+            }
+          })
           resetStep(state)
+        }
+        } catch (eventError: unknown) {
+          // Log per-event errors but keep the mux loop alive.
+          console.log(`dsh-feishu: streaming event handler error: ${eventError instanceof Error ? eventError.message : String(eventError)}`)
         }
       }
     } catch (error: unknown) {
@@ -312,15 +498,31 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
     return had
   }
 
+  /** Wait for the final step card update to complete before sending footer. Returns turn stats. */
+  const flushed = (sessionId: string): Promise<TurnStats | undefined> => {
+    const entry = flushPromises.get(sessionId)
+    if (entry !== undefined) {
+      // Wait for turn/end to flush, then read turn stats.
+      return entry.promise.then(() => turnStatsMap.get(sessionId))
+    }
+    // No flush entry — turn/end already fired or never started.
+    // Return turn stats directly if available.
+    return Promise.resolve(turnStatsMap.get(sessionId))
+  }
+
   return {
     stop: () => {
       controller.abort()
-      for (const timer of updateTimers.values()) clearTimeout(timer)
-      updateTimers.clear()
+      for (const entry of pendingUpdates.values()) clearTimeout(entry.timer)
+      pendingUpdates.clear()
       sessionStates.clear()
+      turnStatsMap.clear()
+      for (const entry of flushPromises.values()) entry.resolve()
+      flushPromises.clear()
     },
     consumeReasoning,
     consumeLastStepHadContent,
+    flushed,
   }
 }
 
@@ -334,6 +536,13 @@ function summarizeValue(value: unknown, maxLen: number = 200): string {
   return str.slice(0, maxLen) + '…'
 }
 
+/** Format a token count for display (e.g. 1234 → "1.2K"). */
+function formatTokenCount(n: number): string {
+  if (n < 1_000) return String(n)
+  if (n < 1_000_000) return `${Math.round(n / 100) / 10}K`
+  return `${Math.round(n / 100_000) / 10}M`
+}
+
 /**
  * Render a unified per-step card with reasoning, text, and tool calls.
  */
@@ -341,6 +550,8 @@ function renderStepCard(
   reasoning: string | undefined,
   text: string | undefined,
   tools: StepToolCall[],
+  usage?: StepUsage,
+  stepDurationMs?: number,
 ): object {
   const elements: object[] = []
 
@@ -375,12 +586,12 @@ function renderStepCard(
         toolLines.push(`> ${description}`)
       }
 
-      // Always show the tool function name (read, bash, web_search, etc.)
+      // Always show the tool function name (read, bash, web_search, etc.) as inline code
       if (tool.result !== undefined) {
         const icon = tool.result.isError ? '❌' : '✅'
-        toolLines.push(`${icon} **${tool.toolName}** — ${tool.result.elapsed >= 1000 ? `${(tool.result.elapsed / 1000).toFixed(1)}s` : `${tool.result.elapsed}ms`}`)
+        toolLines.push(`${icon} \`${tool.toolName}\` — ${tool.result.elapsed >= 1000 ? `${(tool.result.elapsed / 1000).toFixed(1)}s` : `${tool.result.elapsed}ms`}`)
       } else {
-        toolLines.push(`⏳ **${tool.toolName}** — running…`)
+        toolLines.push(`⏳ \`${tool.toolName}\` — running…`)
       }
 
       // Args: always show when available (inline code)
@@ -400,6 +611,22 @@ function renderStepCard(
   // Fallback
   if (elements.length === 0) {
     elements.push({ tag: 'markdown', content: '*(empty)*' })
+  }
+
+  // Step footer: duration + token counts
+  const footerParts: string[] = []
+  if (stepDurationMs !== undefined && stepDurationMs > 0) {
+    footerParts.push(stepDurationMs >= 1000
+      ? `⏱ ${(stepDurationMs / 1000).toFixed(1)}s`
+      : `⏱ ${stepDurationMs}ms`)
+  }
+  if (usage !== undefined) {
+    footerParts.push(`📥 ${formatTokenCount(usage.inputTokens)} in`)
+    footerParts.push(`📤 ${formatTokenCount(usage.outputTokens)} out`)
+  }
+  if (footerParts.length > 0) {
+    elements.push({ tag: 'hr' })
+    elements.push({ tag: 'markdown', content: footerParts.join(' · '), text_size: 'notation' })
   }
 
   // Card title and color: determined only by tool status, not thinking content
@@ -452,7 +679,7 @@ function renderResultPreview(tool: StepToolCall): object[] {
   }
 
   // Web search card: structured source list
-  if (rv?.card === 'web' && rv.kind === 'search') {
+  if (rv?.card === 'web' && rv.kind === 'search' && Array.isArray(rv.sources)) {
     const lines: string[] = []
     if (rv.answer !== undefined && rv.answer.trim() !== '') {
       lines.push(rv.answer.length > 300 ? rv.answer.slice(0, 300) + '…' : rv.answer)
@@ -482,19 +709,21 @@ function renderResultPreview(tool: StepToolCall): object[] {
 
   // Search card (grep/glob): file matches or paths
   if (rv?.card === 'search') {
-    if (rv.shape === 'paths') {
+    if (rv.shape === 'paths' && Array.isArray(rv.paths)) {
       const paths = rv.paths.slice(0, 20)
       const lines = paths.map((p: string) => `- \`${p}\``)
       if (rv.truncated) lines.push(`*(showing ${paths.length} of ${rv.total})*`)
       if (lines.length > 0) {
         elements.push({ tag: 'markdown', content: lines.join('\n') })
       }
-    } else if (rv.shape === 'matches') {
+    } else if (rv.shape === 'matches' && Array.isArray(rv.files)) {
       const lines: string[] = []
       for (const file of rv.files.slice(0, 5)) {
         lines.push(`**${file.path}**`)
-        for (const m of file.matches.slice(0, 3)) {
-          lines.push(`  ${m.lineNumber}: \`${m.line.trim()}\``)
+        if (Array.isArray(file.matches)) {
+          for (const m of file.matches.slice(0, 3)) {
+            lines.push(`  ${m.lineNumber}: \`${m.line.trim()}\``)
+          }
         }
       }
       if (rv.truncated) lines.push(`*(showing ${rv.files.length} files of ${rv.total} matches)*`)
@@ -506,7 +735,7 @@ function renderResultPreview(tool: StepToolCall): object[] {
   }
 
   // Read card: file content with line numbers
-  if (rv?.card === 'read') {
+  if (rv?.card === 'read' && Array.isArray(rv.lines)) {
     if (rv.lines.length > 0) {
       const content = rv.lines
         .map((l: any) => `${String(l.number).padStart(4)}│ ${l.text}`)
@@ -519,8 +748,9 @@ function renderResultPreview(tool: StepToolCall): object[] {
   }
 
   // Diff card: show diff hunks
-  if (rv?.card === 'diff') {
+  if (rv?.card === 'diff' && Array.isArray(rv.diffs)) {
     for (const diff of rv.diffs.slice(0, 3)) {
+      if (!Array.isArray(diff.hunks)) continue
       const lines = diff.hunks
         .flatMap((h: any) => h.lines.map((l: any) => {
           if (l.type === 'add') return `+ ${l.text}`
@@ -536,7 +766,7 @@ function renderResultPreview(tool: StepToolCall): object[] {
   }
 
   // Generic card or fallback: use content blocks or raw result
-  if (rv?.card === 'generic' && rv.content !== undefined) {
+  if (rv?.card === 'generic' && Array.isArray(rv.content)) {
     const text = rv.content
       .filter((b: any) => b.type === 'text' && b.text !== undefined)
       .map((b: any) => b.text ?? '')

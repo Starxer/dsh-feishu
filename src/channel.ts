@@ -4,6 +4,7 @@ import type { LarkChannel, LarkChannelOptions, NormalizedMessage, ResourceDescri
 import type { AttachmentStore, ImageAttachmentRef, SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
 import type { RuntimeConfig } from './config.ts'
 import type { HarnessConversationService, InboundMessage } from './harness.ts'
+import type { TurnStats } from './feishu-streaming.ts'
 
 export type ChannelFactory = (options: LarkChannelOptions) => LarkChannel
 export interface PluginLogger {
@@ -135,6 +136,7 @@ export async function startChannel(
   replyCardMeta?: (coords: ChatCoordinates) => ReplyCardMeta | Promise<ReplyCardMeta>,
   consumeReasoning?: (sessionId: string) => string | undefined,
   consumeLastStepHadContent?: (sessionId: string) => boolean,
+  flushed?: (sessionId: string) => Promise<TurnStats | undefined>,
 ): Promise<{ stop: () => Promise<void>; channel: LarkChannel }> {
   const logError = (message: string) => {
     logger.error(message)
@@ -243,8 +245,9 @@ export async function startChannel(
 
           if (intermediateSent) {
             // Streaming already sent a step card with the text content.
-            // Only send the footer card (workspace/preset/model metadata).
-            const footerCard = renderFooterCard(meta)
+            // Wait for the final step card update to complete, then send the footer.
+            const turnStats = await flushed?.(sessionId)
+            const footerCard = renderFooterCard(meta, turnStats)
             if (footerCard !== undefined) {
               await channel.send(chatId, { card: footerCard }, {
                 replyTo: messageId,
@@ -312,6 +315,14 @@ function formatTokenCount(n: number): string {
   if (n < 1_000) return String(n)
   if (n < 1_000_000) return `${Math.round(n / 100) / 10}K`
   return `${Math.round(n / 100_000) / 10}M`
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1_000) return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  const m = Math.floor(ms / 60_000)
+  const s = Math.round((ms % 60_000) / 1000)
+  return `${m}m${s}s`
 }
 
 /**
@@ -399,39 +410,96 @@ function renderReplyCard(text: string, meta?: ReplyCardMeta, reasoning?: string)
 }
 
 /**
- * Render a lightweight footer-only card when the last step already sent
- * content but we still want to show workspace/preset/model metadata.
- * Returns undefined when there's no metadata to show.
+ * Render a Turn Complete card with turn stats and optional session metadata.
+ * Returns undefined when there's nothing to show.
  */
-function renderFooterCard(meta?: ReplyCardMeta): object | undefined {
-  const line1: string[] = []
-  const line2: string[] = []
-  if (meta?.workspace !== undefined && meta.workspace !== '') {
-    line1.push(`📂 ${meta.workspace}`)
+function renderFooterCard(
+  meta?: ReplyCardMeta,
+  turnStats?: TurnStats,
+): object | undefined {
+  const elements: object[] = []
+
+  // Turn stats section — all notation size
+  if (turnStats !== undefined) {
+    // Duration: total / LLM / tools (always show all three)
+    const totalMs = turnStats.totalStepMs
+    const toolMs = turnStats.totalToolMs
+    const llmMs = totalMs - toolMs
+    const durParts: string[] = [
+      `⏱ ${formatMs(totalMs)}`,
+      `🧠 LLM ${formatMs(Math.max(0, llmMs))}`,
+      `🔧 Tools ${formatMs(toolMs)}`,
+    ]
+    elements.push({ tag: 'markdown', content: durParts.join(' · '), text_size: 'notation' })
+
+    // Performance: TTFT · tok/s · steps
+    const perfParts: string[] = []
+    if (turnStats.firstStepTtftMs !== null && turnStats.firstStepTtftMs > 0) {
+      perfParts.push(`⚡ TTFT ${formatMs(turnStats.firstStepTtftMs)}`)
+    }
+    if (turnStats.totalDecodeMs > 0 && turnStats.totalOutputTokens > 0) {
+      const tps = turnStats.totalOutputTokens / (turnStats.totalDecodeMs / 1000)
+      perfParts.push(`🚀 ${tps.toFixed(0)} tok/s`)
+    }
+    if (turnStats.stepCount > 0) {
+      perfParts.push(`🔄 ${turnStats.stepCount} steps`)
+    }
+    if (perfParts.length > 0) {
+      elements.push({ tag: 'markdown', content: perfParts.join(' · '), text_size: 'notation' })
+    }
+
+    // Tokens: in/out · cache
+    const tokenParts: string[] = []
+    if (turnStats.totalInputTokens > 0 || turnStats.totalOutputTokens > 0) {
+      tokenParts.push(`📥 ${formatTokenCount(turnStats.totalInputTokens)} in · 📤 ${formatTokenCount(turnStats.totalOutputTokens)} out`)
+    }
+    const totalInput = turnStats.totalInputTokens + turnStats.totalCacheReadTokens + turnStats.totalCacheWriteTokens
+    if (totalInput > 0 && turnStats.totalCacheReadTokens > 0) {
+      const cacheHitPct = Math.round(turnStats.totalCacheReadTokens / totalInput * 100)
+      tokenParts.push(`💾 cache ${cacheHitPct}%`)
+    }
+    if (tokenParts.length > 0) {
+      elements.push({ tag: 'markdown', content: tokenParts.join(' · '), text_size: 'notation' })
+    }
   }
-  if (meta?.agentPreset !== undefined && meta.agentPreset !== '') {
-    line1.push(`⚙️ ${meta.agentPreset}`)
+
+  // Metadata section — simplified (short names only)
+  const metaParts: string[] = []
+  if (meta?.workspace !== undefined && meta.workspace !== '') {
+    // Show only the last directory name, not the full path.
+    const short = meta.workspace.includes('/') ? meta.workspace.split('/').pop()! : meta.workspace
+    metaParts.push(`📂 ${short}`)
   }
   if (meta?.model !== undefined && meta.model !== '') {
-    line2.push(`🧠 ${meta.model}`)
-  }
-  if (meta?.reasoningEffort !== undefined && meta.reasoningEffort !== '') {
-    line2.push(`💡 ${meta.reasoningEffort}`)
+    // Show only the model name, not the provider prefix.
+    const short = meta.model.includes('/') ? meta.model.split('/').pop()! : meta.model
+    metaParts.push(`🧠 ${short}`)
   }
   if (meta?.contextWindow !== undefined && meta.contextWindow > 0 && meta?.lastInputTokens !== undefined) {
     const pct = Math.min(100, Math.round(meta.lastInputTokens / meta.contextWindow * 100))
-    line2.push(`📊 ${formatTokenCount(meta.lastInputTokens)}/${formatTokenCount(meta.contextWindow)} (${pct}%)`)
+    metaParts.push(`📊 ${formatTokenCount(meta.lastInputTokens)}/${formatTokenCount(meta.contextWindow)} (${pct}%)`)
   }
-  if (line1.length === 0 && line2.length === 0) return undefined
 
-  const footerContent = [line1.join(' · '), line2.join(' · ')].filter(Boolean).join('\n')
+  // If nothing to show, return undefined.
+  if (elements.length === 0 && metaParts.length === 0) return undefined
+
+  // Append metadata with divider if both stats and metadata exist.
+  if (metaParts.length > 0) {
+    if (elements.length > 0) elements.push({ tag: 'hr' })
+    // Two items per line for mobile readability.
+    const line1 = metaParts.slice(0, 2).join(' · ')
+    const line2 = metaParts.slice(2).join(' · ')
+    const metaContent = [line1, line2].filter(Boolean).join('\n')
+    elements.push({ tag: 'markdown', content: metaContent, text_size: 'notation' })
+  }
+
   return {
     schema: '2.0',
     config: { wide_screen_mode: true },
-    body: {
-      elements: [
-        { tag: 'markdown', content: footerContent, text_size: 'notation' },
-      ],
+    header: {
+      title: { tag: 'plain_text', content: 'Turn Complete' },
+      template: 'green',
     },
+    body: { elements },
   }
 }

@@ -413,11 +413,12 @@ export class HarnessConversationService {
     sessionId: string; workspace: string; agentPreset: string; model: string; reasoningEffort: string; title: string
     turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number
     contextWindow: number; lastInputTokens: number
+    cacheHitRate: number; ttftAvgMs: number; tokensPerSecond: number; llmDurationMs: number; toolDurationMs: number
   }> {
     const sessionId = this.resolveSessionId(message)
     const model = this.selections.get(sessionId)?.current ?? this.deps.selection()
     const reasoningEffort = model.reasoningEffort ? String(model.reasoningEffort) : ''
-    const empty = { title: '', turns: 0, steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, contextWindow: 0, lastInputTokens: 0 }
+    const empty = { title: '', turns: 0, steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, contextWindow: 0, lastInputTokens: 0, cacheHitRate: 0, ttftAvgMs: 0, tokensPerSecond: 0, llmDurationMs: 0, toolDurationMs: 0 }
     // Try reading the session header + events from persistence
     const readFrom = this.deps.sessionPersistence.readFrom
     if (typeof readFrom === 'function') {
@@ -446,9 +447,10 @@ export class HarnessConversationService {
    * Also processes `assistant/chunk` events with `chunk.type === 'usage'`
    * for early usage samples (same last-wins semantics per turn/step).
    */
-  private deriveSessionStats(events: ReadonlyArray<{ type: string; data: any }>): {
+  private deriveSessionStats(events: ReadonlyArray<{ type: string; data: any; time?: number }>): {
     title: string; turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number
     contextWindow: number; lastInputTokens: number
+    cacheHitRate: number; ttftAvgMs: number; tokensPerSecond: number; llmDurationMs: number; toolDurationMs: number
   } {
     const turns = new Set<number>()
     let steps = 0
@@ -460,17 +462,50 @@ export class HarnessConversationService {
     // key = `${turn}:${step}` → billed input tokens for that step.
     const stepInput = new Map<string, number>()
     let totalOutput = 0
+    let totalCacheRead = 0
+    let totalUncachedInput = 0
 
     // Track the latest usage sample for context % display.
     let lastInputTokens = 0
 
+    // Timing: track per-step anchors for TTFT and decode.
+    let stepStartTime = 0
+    let firstTokenTime = 0
+    let ttftSum = 0
+    let ttftCount = 0
+    let decodeMsSum = 0
+    let outputForDecode = 0
+
+    // Tool call timing: callId → startTime.
+    const toolStarts = new Map<string, number>()
+    let toolDurationMs = 0
+
     for (const event of events) {
+      const t = event.time ?? 0
       if (event.type === 'turn/start') {
         turns.add((event.data?.turn as number | undefined) ?? turns.size)
       } else if (event.type === 'step/start') {
         steps++
+        stepStartTime = t
+        firstTokenTime = 0
+      } else if (event.type === 'assistant/chunk') {
+        const chunk = event.data?.chunk
+        if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0 && firstTokenTime === 0) {
+          firstTokenTime = t
+        }
       } else if (event.type === 'tool/call') {
         toolCalls++
+        const callId = event.data?.callId as string | undefined
+        if (callId !== undefined) toolStarts.set(callId, t)
+      } else if (event.type === 'tool/result') {
+        const callId = event.data?.message?.source?.callId as string | undefined
+        if (callId !== undefined) {
+          const start = toolStarts.get(callId)
+          if (start !== undefined && t > start) {
+            toolDurationMs += t - start
+            toolStarts.delete(callId)
+          }
+        }
       } else if (event.type === 'assistant/message' || (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'usage')) {
         const turn = event.data?.turn as number | undefined
         const step = event.data?.step as number | undefined
@@ -478,20 +513,35 @@ export class HarnessConversationService {
         const usage = event.type === 'assistant/message'
           ? event.data?.usage
           : event.data?.chunk?.usage
-        if (usage === undefined || usage === null) continue
-        const iTokens = usage.inputTokens as number | undefined
-        const oTokens = usage.outputTokens as number | undefined
-        const crTokens = (usage.cacheReadTokens ?? 0) as number
-        const cwTokens = (usage.cacheWriteTokens ?? 0) as number
-        if (turn !== undefined && step !== undefined && iTokens !== undefined) {
-          // Last-wins: replace previous value for same turn+step.
-          const key = `${turn}:${step}`
-          const billed = iTokens + crTokens + cwTokens
-          stepInput.set(key, billed)
+        if (usage !== undefined && usage !== null) {
+          const iTokens = usage.inputTokens as number | undefined
+          const oTokens = usage.outputTokens as number | undefined
+          const crTokens = (usage.cacheReadTokens ?? 0) as number
+          const cwTokens = (usage.cacheWriteTokens ?? 0) as number
+          if (turn !== undefined && step !== undefined && iTokens !== undefined) {
+            // Last-wins: replace previous value for same turn+step.
+            const key = `${turn}:${step}`
+            const billed = iTokens + crTokens + cwTokens
+            stepInput.set(key, billed)
+          }
+          if (oTokens !== undefined) totalOutput += oTokens
+          if (iTokens !== undefined) {
+            lastInputTokens = iTokens + crTokens + cwTokens
+            totalUncachedInput += iTokens
+            totalCacheRead += crTokens
+          }
         }
-        if (oTokens !== undefined) totalOutput += oTokens
-        if (iTokens !== undefined) {
-          lastInputTokens = iTokens + crTokens + cwTokens
+        // TTFT and decode time for assistant/message events.
+        if (event.type === 'assistant/message' && stepStartTime > 0) {
+          if (firstTokenTime > 0 && firstTokenTime >= stepStartTime) {
+            ttftSum += firstTokenTime - stepStartTime
+            ttftCount++
+          }
+          if (firstTokenTime > 0 && t > firstTokenTime) {
+            decodeMsSum += t - firstTokenTime
+            const oTokens = usage?.outputTokens as number | undefined
+            if (oTokens !== undefined) outputForDecode += oTokens
+          }
         }
       } else if (event.type === 'session/title') {
         const next = event.data?.title
@@ -506,7 +556,17 @@ export class HarnessConversationService {
     let inputTokens = 0
     for (const v of stepInput.values()) inputTokens += v
 
-    return { title, turns: turns.size, steps, toolCalls, inputTokens, outputTokens: totalOutput, contextWindow, lastInputTokens }
+    // Derived metrics.
+    const totalInputForCache = totalUncachedInput + totalCacheRead
+    const cacheHitRate = totalInputForCache > 0 ? Math.round(totalCacheRead / totalInputForCache * 100) : 0
+    const ttftAvgMs = ttftCount > 0 ? Math.round(ttftSum / ttftCount) : 0
+    const tokensPerSecond = decodeMsSum > 0 && outputForDecode > 0
+      ? Math.round(outputForDecode / (decodeMsSum / 1000))
+      : 0
+    const llmDurationMs = decodeMsSum + ttftSum
+
+
+    return { title, turns: turns.size, steps, toolCalls, inputTokens, outputTokens: totalOutput, contextWindow, lastInputTokens, cacheHitRate, ttftAvgMs, tokensPerSecond, llmDurationMs, toolDurationMs }
   }
 
   /** Mark a session as having sent intermediate assistant message cards. */
