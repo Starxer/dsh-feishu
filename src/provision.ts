@@ -76,6 +76,7 @@ export async function provisionApp(options: ProvisionOptions): Promise<Provision
 
   options.onState({ phase: 'configuring' })
   await enableWebsocketLongConnection(registered.client_id, registered.client_secret, options.domain)
+  await enableCardCallbacks(registered.client_id, registered.client_secret, options.domain)
 
   return { appId: registered.client_id, appSecret: registered.client_secret }
 }
@@ -103,6 +104,31 @@ export async function enableWebsocketLongConnection(appId: string, appSecret: st
   })
   if (response.code !== undefined && response.code !== 0) {
     throw new Error(`飞书应用配置更新失败: ${response.code} ${response.msg ?? ''}`)
+  }
+}
+
+/**
+ * Enable card action callbacks via the applicationAbility.patch API.
+ * Without this, interactive card buttons/selectors do not fire
+ * `card.action.trigger` events and appear unresponsive.
+ */
+export async function enableCardCallbacks(appId: string, appSecret: string, domain: DomainName): Promise<void> {
+  const client = new Client({
+    appId,
+    appSecret,
+    domain: domain === 'lark' ? Domain.Lark : Domain.Feishu,
+    source: 'dsh-feishu-scan',
+  })
+  const response = await client.application.v7.applicationAbility.patch({
+    path: { app_id: appId },
+    data: {
+      card_action_callback: {
+        enable: true,
+      },
+    } as any,
+  })
+  if (response.code !== undefined && response.code !== 0) {
+    throw new Error(`飞书卡片回调配置失败: ${response.code} ${response.msg ?? ''}`)
   }
 }
 

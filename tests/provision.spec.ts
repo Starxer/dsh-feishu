@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   registerApp: vi.fn(),
   Client: vi.fn(),
   patch: vi.fn(),
+  abilityPatch: vi.fn(),
 }))
 
 vi.mock('@larksuiteoapi/node-sdk', () => ({
@@ -12,13 +13,14 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
   Domain: { Feishu: 0, Lark: 1 },
 }))
 
-import { enableWebsocketLongConnection, provisionApp, renderTerminalQr } from '../src/provision.ts'
+import { enableCardCallbacks, enableWebsocketLongConnection, provisionApp, renderTerminalQr } from '../src/provision.ts'
 
 beforeEach(() => {
   vi.resetAllMocks()
   mocks.patch.mockResolvedValue({ code: 0, msg: 'success' })
+  mocks.abilityPatch.mockResolvedValue({ code: 0, msg: 'success' })
   mocks.Client.mockReturnValue({
-    application: { v7: { applicationConfig: { patch: mocks.patch } } },
+    application: { v7: { applicationConfig: { patch: mocks.patch }, applicationAbility: { patch: mocks.abilityPatch } } },
   })
 })
 
