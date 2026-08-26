@@ -421,13 +421,13 @@ function renderFooterCard(
 
   // Turn stats section — all notation size
   if (turnStats !== undefined) {
-    // Duration: total / LLM / tools (always show all three)
-    const totalMs = turnStats.totalStepMs
+    // Duration: total (wall-clock) / LLM / tools
+    const totalMs = turnStats.totalTurnMs || turnStats.totalStepMs
+    const llmMs = turnStats.totalStepMs
     const toolMs = turnStats.totalToolMs
-    const llmMs = totalMs - toolMs
     const durParts: string[] = [
       `⏱ ${formatMs(totalMs)}`,
-      `🧠 LLM ${formatMs(Math.max(0, llmMs))}`,
+      `🧠 LLM ${formatMs(llmMs)}`,
       `🔧 Tools ${formatMs(toolMs)}`,
     ]
     elements.push({ tag: 'markdown', content: durParts.join(' · '), text_size: 'notation' })

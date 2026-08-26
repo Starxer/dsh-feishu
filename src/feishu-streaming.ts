@@ -68,10 +68,12 @@ export interface TurnStats {
   firstStepTtftMs: number | null
   /** Sum of (firstToken → message) across steps — pure LLM decode time for throughput. */
   totalDecodeMs: number
-  /** Sum of (stepStart → completed) across steps — includes tool execution. */
+  /** Sum of (stepStart → assistant/message) across steps — LLM-only time. */
   totalStepMs: number
   /** Sum of tool elapsed times. */
   totalToolMs: number
+  /** Full wall-clock turn duration (turnStart → turnEnd), includes LLM + tools + gaps. */
+  totalTurnMs: number
 }
 
 /** One tool call tracked within a step. */
@@ -336,6 +338,9 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
           }
 
           // Accumulate turn stats.
+          // NOTE: tool time is NOT accumulated here — at assistant/message time,
+          // tool calls haven't executed yet (state.toolCalls is empty).
+          // Tool time is accumulated at tool/result instead.
           if (state.turnStats !== undefined) {
             const ts = state.turnStats
             ts.stepCount++
@@ -354,13 +359,9 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
             if (state.firstTokenTime > 0 && state.messageTime > state.firstTokenTime) {
               ts.totalDecodeMs += state.messageTime - state.firstTokenTime
             }
-            // Step time: step start → completed (includes tool execution).
-            if (state.stepStartTime > 0 && state.completedTime > state.stepStartTime) {
-              ts.totalStepMs += state.completedTime - state.stepStartTime
-            }
-            // Tool time: sum of tool elapsed.
-            for (const tc of state.toolCalls) {
-              if (tc.result !== undefined) ts.totalToolMs += tc.result.elapsed
+            // Step time: step start → assistant/message (LLM-only, tools not yet executed).
+            if (state.stepStartTime > 0 && state.messageTime > state.stepStartTime) {
+              ts.totalStepMs += state.messageTime - state.stepStartTime
             }
           }
 
@@ -424,6 +425,11 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
             }
             // Update completedTime so step duration includes tool execution.
             state.completedTime = event.time ?? Date.now()
+            // Accumulate tool time in turn stats (tools haven't run at
+            // assistant/message time, so we must track them here).
+            if (state.turnStats !== undefined) {
+              state.turnStats.totalToolMs += elapsed
+            }
           }
         } else if (event.type === 'step/start') {
           // New step starting — reset for the new step and record start time.
@@ -446,6 +452,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
             totalDecodeMs: 0,
             totalStepMs: 0,
             totalToolMs: 0,
+            totalTurnMs: 0,
           }
           // Create the flush entry now so channel.ts's flushed() call can find it
           // even if bridge.reply() resolves before turn/end fires.
@@ -456,10 +463,12 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
           // Flush any pending debounced updateCard before resetting, so the
           // final card content is committed before channel.ts sends the footer.
           const turnStats = state.turnStats
-          // Compute final turn duration.
           if (turnStats !== undefined) {
             const now = event.time ?? Date.now()
-            turnStats.totalStepMs = now - turnStats.turnStartTime
+            // totalTurnMs: full wall-clock turn duration (LLM + tools + gaps).
+            // totalStepMs: accumulated LLM-only time (set at each assistant/message).
+            // totalToolMs: accumulated tool execution time (set at each tool/result).
+            turnStats.totalTurnMs = now - turnStats.turnStartTime
             turnStatsMap.set(sessionId, turnStats)
           }
           flushPendingUpdate(state).then(() => {
