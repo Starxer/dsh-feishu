@@ -166,11 +166,14 @@ export function startFeishuApprovals(deps: FeishuApprovalsDeps): {
 
   const onCardAction = async (evt: CardActionLike): Promise<void> => {
     const action = evt.action
-    const raw = action?.value
+    let raw = action?.value
     if (typeof raw !== 'string') return
     let parsed: { rpcId?: unknown; outcome?: unknown }
     try {
-      parsed = JSON.parse(raw) as typeof parsed
+      let result = JSON.parse(raw)
+      // Feishu may double-encode the value (JSON string containing JSON)
+      if (typeof result === 'string') result = JSON.parse(result)
+      parsed = result as typeof parsed
     } catch {
       return
     }
