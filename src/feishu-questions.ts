@@ -155,10 +155,7 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
     if (pending.cardMessageId !== undefined) {
       const selectedLabels = selected.length > 0 ? selected : (action?.option !== undefined ? [action.option] : [])
       const settledCard = renderSettledQuestionCard(pending.question, selectedLabels)
-      console.log('dsh-feishu: [questions] updating settled card, options:', pending.question.options?.length ?? 0, 'selected:', selectedLabels)
-      await channel.updateCard(pending.cardMessageId, settledCard).catch((error: unknown) => {
-        console.log('dsh-feishu: [questions] settled card update failed:', error instanceof Error ? error.message : String(error))
-      })
+      await channel.updateCard(pending.cardMessageId, settledCard).catch(() => undefined)
     }
     if (selected.length === 0 && custom === undefined) return
     await respondForQuestion(rpcId, pending.sessionId, pending.question, selected, custom)
