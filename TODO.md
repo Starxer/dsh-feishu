@@ -27,6 +27,9 @@
 
 | # | 功能 | 优先级 | 说明 |
 |---|---|---|---|
+| 20 | 工具调用摘要 | **高** | WebUI 每次工具调用都有摘要（来自 `presentCall`/`presentResult`），需接入到工具卡片中 |
+| 21 | 卡片颜色区分 | **高** | 工具卡片：调用中蓝色→成功绿色→失败红色；中间消息紫色；Reply 蓝色 |
+| 22 | Reply 标题命名 | **中** | "Reply" vs "Response"，需统一 |
 | 16 | 权限系统接入 | **中** | 新增 `/permission` `/sandbox`，对齐 WebUI 权限设定 |
 | 18 | 思考内容展示 | **中** | 显示模型 reasoning/thinking 内容，内容放在代码块里防止占用过多行 |
 | 2 | `/new` 带参数 | **中** | `/new --workspace <path> --preset <id>` |
@@ -43,10 +46,10 @@
 |---|---|---|
 | blue | 最终回复卡片、问题卡片 | `channel.ts`、`feishu-questions.ts` |
 | turquoise (青绿) | Status 状态卡片、Todo 列表卡片 | `index.ts`、`feishu-todos.ts` |
-| wathet (浅蓝) | Tool Call 调用中 | `feishu-toolcalls.ts` |
-| green | Tool Result 成功 | `feishu-toolcalls.ts` |
-| red | Tool Error 失败 | `feishu-toolcalls.ts` |
-| violet (紫色) | 中间消息 (tool call 之前的 assistant 文字) | `feishu-streaming.ts` |
+| wathet (浅蓝) | Tool Call 调用中 | `feishu-streaming.ts` |
+| green | Tool Result 成功 | `feishu-streaming.ts`（待实现 #21） |
+| red | Tool Error 失败 | `feishu-streaming.ts`（待实现 #21） |
+| violet (紫色) | 中间消息（reasoning + text + tool calls） | `feishu-streaming.ts` |
 | orange | 审批请求 | `feishu-approvals.ts` |
 | grey | 无选项问题 | `feishu-questions.ts` |
 
@@ -95,6 +98,42 @@
 - **目标**：模型 reasoning/thinking 内容以卡片形式展示，内容放在代码块里防止占用过多行
 - **数据源**：`assistant/chunk` 事件中 `chunk.type === 'reasoning-delta'` 的文本
 - **UI 方案**：紫色卡片（同中间消息），reasoning 文字包裹在 ` ``` ` 代码块中，可折叠
+
+## #20 工具调用摘要
+
+- **目标**：每个工具调用卡片显示摘要（WebUI 已有），提升可读性
+- **数据源**：DSH tool registry 的 `presentCall(args)` 和 `presentResult(args, result)` 方法
+- **现状**：`feishu-streaming.ts` 只显示工具名 + args 原始 JSON，无摘要
+- **方案**：在 `tool/result` 时调用 `presentResult` 获取摘要，追加到卡片中
+- **注意**：`presentCall`/`presentResult` 需要 tool scope，需通过 `apiProxy` 或 `ctx.tools` 调用
+
+## #21 卡片颜色区分
+
+- **目标**：不同阶段的卡片用不同颜色，提升视觉区分度
+- **方案**：
+  - 工具调用中（`tool/call`）：**wathet（浅蓝）**
+  - 工具成功（`tool/result` 无错误）：**green（绿色）**
+  - 工具失败（`tool/result` 有错误）：**red（红色）**
+  - Assistant 中间消息（reasoning + text）：**violet（紫色）**
+  - 最终 Reply 卡片：**blue（蓝色）**
+- **实现**：`feishu-streaming.ts` 的 `renderStepCard` 需根据工具状态动态切换颜色
+- **注意**：飞书 Card JSON 2.0 的 `header.template` 支持颜色切换，`updateCard` 可更新颜色
+
+## #22 Reply 标题命名
+
+- **问题**：最终回复卡片标题用 "Reply" 还是 "Response"？
+- **参考**：WebUI 用 "Assistant"，DSH 内部用 "assistant/message"
+- **建议**：用 "Reply"（更口语化，符合聊天场景）
+
+## #18 思考内容展示 —— 部分完成
+
+- **已完成**：
+  - `feishu-streaming.ts` 累积 `reasoning-delta` chunks
+  - 在 `assistant/message` 时发送 step 卡片，reasoning 放在代码块中
+  - `/reasoning show on|off` 控制是否显示 reasoning 内容
+- **待优化**：
+  - reasoning 代码块可折叠（飞书 Card JSON 2.0 支持 `collapsible` 组件）
+  - reasoning 长度截断策略（当前 3000 字符）
 
 ## #19 tool_call / tool_done 顺序问题 —— ✅ 已修复
 
