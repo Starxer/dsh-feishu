@@ -51,6 +51,7 @@
 | 9 | 流式输出 → CardKit | **低** | 解决 5 QPS 瓶颈，需调研 CardKit API |
 | 7 | 多 thread 话题导航 | **低** | 飞书话题映射 DSH session，底层已通 |
 | 8 | 文档与版本一致性 | **低** | README 过期、版本号不一致 |
+| — | 飞书 SDK 卡片回调补丁追踪 | **低** | 检查 `@larksuiteoapi/node-sdk` 是否有新版本修复 `MessageType.CARD` 被过滤的问题；确认补丁是修复 SDK 本身还是 DSH 的消息处理链路（见「已知问题」Node.js SDK MessageType.CARD 被过滤） |
 
 ---
 
