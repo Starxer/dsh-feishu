@@ -151,6 +151,7 @@ export async function startChannel(
     source: 'dsh-feishu',
     loggerLevel: LoggerLevel.info,
     handshakeTimeoutMs: 15_000,
+    includeRawEvent: true,
     policy: {
       requireMention: config.requireMention,
       dmMode: config.dmMode,

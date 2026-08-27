@@ -17,9 +17,7 @@ const QUESTION: AskUserQuestionItem = {
 interface Harness {
   respondCalls: Array<{ rpcId: string; questionId: string; selected: string[]; custom?: string }>
   sentCards: Array<{ to: string; card: { header?: { title?: { content?: string } }; elements?: unknown[] } }>
-  sentTexts: Array<{ to: string; text: string }>
   cardActionHandler: ((evt: unknown) => void | Promise<void>) | undefined
-  messageHandler: ((msg: unknown) => void | Promise<void>) | undefined
   resolveChatCalls: string[]
 }
 
@@ -90,29 +88,15 @@ interface ChannelHandle {
 function buildChannel(harness: Harness): ChannelHandle {
   const cardUnsubFns: Array<() => void> = []
   const channel = {
-    send: vi.fn(async (to: string, input: { card?: { header?: { title?: { content?: string } }; elements?: unknown[] }; text?: string }) => {
+    send: vi.fn(async (to: string, input: { card?: object; text?: string }) => {
       if (input.card !== undefined) {
-        harness.sentCards.push({ to, card: input.card })
-      } else if (input.text !== undefined) {
-        harness.sentTexts.push({ to, text: input.text })
+        harness.sentCards.push({ to, card: input.card as Harness['sentCards'][0]['card'] })
       }
     }),
     updateCard: vi.fn(async () => {}),
     onCardAction: (handler: (evt: unknown) => void | Promise<void>) => {
       harness.cardActionHandler = handler
       const unsub = () => { harness.cardActionHandler = undefined }
-      cardUnsubFns.push(unsub)
-      return unsub
-    },
-    onMessage: (handler: (msg: unknown) => void | Promise<void>) => {
-      harness.messageHandler = handler
-      const unsub = () => { harness.messageHandler = undefined }
-      cardUnsubFns.push(unsub)
-      return unsub
-    },
-    onMessageInterceptor: (handler: (msg: unknown) => boolean | Promise<boolean>) => {
-      harness.messageHandler = handler as (msg: unknown) => void | Promise<void>
-      const unsub = () => { harness.messageHandler = undefined }
       cardUnsubFns.push(unsub)
       return unsub
     },
@@ -137,7 +121,7 @@ const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 
 describe('startFeishuQuestions', () => {
   it('renders an interactive card and resolves when the user clicks an option', async () => {
-    const harness: Harness = { respondCalls: [], sentCards: [], sentTexts: [], cardActionHandler: undefined, messageHandler: undefined, resolveChatCalls: [] }
+    const harness: Harness = { respondCalls: [], sentCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
     const api = buildApiProxy(harness)
     const { channel, cleanup } = buildChannel(harness)
     const bridgeHolder = buildBridgeHolder(
@@ -167,8 +151,78 @@ describe('startFeishuQuestions', () => {
     }
   })
 
+  it('resolves custom answer from form_value', async () => {
+    const harness: Harness = { respondCalls: [], sentCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
+    const api = buildApiProxy(harness)
+    const { channel, cleanup } = buildChannel(harness)
+    const bridgeHolder = buildBridgeHolder(
+      () => ({ chatId: 'oc_chat', chatType: 'p2p' as const }),
+      harness,
+    )
+    const stop = startFeishuQuestions({ apiProxy: api.apiProxy, channel, bridgeHolder, logger })
+    try {
+      api.push('rpc-1', 'oc_session', [QUESTION])
+      await new Promise(resolve => setImmediate(resolve))
+      expect(harness.sentCards).toHaveLength(1)
+      // Simulate form submission: custom button click with form_value containing custom_text.
+      await harness.cardActionHandler!({
+        action: {
+          tag: 'button',
+          value: JSON.stringify({ rpcId: 'rpc-1', questionId: 'q1', type: 'custom' }),
+        },
+        raw: {
+          action: {
+            value: JSON.stringify({ rpcId: 'rpc-1', questionId: 'q1', type: 'custom' }),
+            form_value: { custom_text: '自定义回答' },
+          },
+        },
+      })
+      await new Promise(resolve => setImmediate(resolve))
+      expect(harness.respondCalls).toEqual([
+        { rpcId: 'rpc-1', questionId: 'q1', selected: [], custom: '自定义回答' },
+      ])
+    } finally {
+      stop()
+      cleanup()
+    }
+  })
+
+  it('ignores custom submit with empty input', async () => {
+    const harness: Harness = { respondCalls: [], sentCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
+    const api = buildApiProxy(harness)
+    const { channel, cleanup } = buildChannel(harness)
+    const bridgeHolder = buildBridgeHolder(
+      () => ({ chatId: 'oc_chat', chatType: 'p2p' as const }),
+      harness,
+    )
+    const stop = startFeishuQuestions({ apiProxy: api.apiProxy, channel, bridgeHolder, logger })
+    try {
+      api.push('rpc-1', 'oc_session', [QUESTION])
+      await new Promise(resolve => setImmediate(resolve))
+      // Simulate custom button click with empty form_value.
+      await harness.cardActionHandler!({
+        action: {
+          tag: 'button',
+          value: JSON.stringify({ rpcId: 'rpc-1', questionId: 'q1', type: 'custom' }),
+        },
+        raw: {
+          action: {
+            value: JSON.stringify({ rpcId: 'rpc-1', questionId: 'q1', type: 'custom' }),
+            form_value: { custom_text: '' },
+          },
+        },
+      })
+      await new Promise(resolve => setImmediate(resolve))
+      // Should not respond because custom_text is empty.
+      expect(harness.respondCalls).toEqual([])
+    } finally {
+      stop()
+      cleanup()
+    }
+  })
+
   it('ignores clicks that do not match any pending question', async () => {
-    const harness: Harness = { respondCalls: [], sentCards: [], sentTexts: [], cardActionHandler: undefined, messageHandler: undefined, resolveChatCalls: [] }
+    const harness: Harness = { respondCalls: [], sentCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
     const api = buildApiProxy(harness)
     const { channel, cleanup } = buildChannel(harness)
     const bridgeHolder = buildBridgeHolder(
@@ -191,7 +245,7 @@ describe('startFeishuQuestions', () => {
   })
 
   it('skips rendering when the question targets a non-Feishu session', async () => {
-    const harness: Harness = { respondCalls: [], sentCards: [], sentTexts: [], cardActionHandler: undefined, messageHandler: undefined, resolveChatCalls: [] }
+    const harness: Harness = { respondCalls: [], sentCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
     const api = buildApiProxy(harness)
     const { channel, cleanup } = buildChannel(harness)
     const bridgeHolder = buildBridgeHolder(
@@ -212,7 +266,7 @@ describe('startFeishuQuestions', () => {
   })
 
   it('clears the cardAction handler on dispose', async () => {
-    const harness: Harness = { respondCalls: [], sentCards: [], sentTexts: [], cardActionHandler: undefined, messageHandler: undefined, resolveChatCalls: [] }
+    const harness: Harness = { respondCalls: [], sentCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
     const api = buildApiProxy(harness)
     const { channel, cleanup } = buildChannel(harness)
     const bridgeHolder = buildBridgeHolder(
