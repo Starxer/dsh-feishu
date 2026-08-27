@@ -137,6 +137,7 @@ export async function startChannel(
   consumeReasoning?: (sessionId: string) => string | undefined,
   consumeLastStepHadContent?: (sessionId: string) => boolean,
   flushed?: (sessionId: string) => Promise<TurnStats | undefined>,
+  messageInterceptor?: (msg: NormalizedMessage) => boolean | Promise<boolean>,
 ): Promise<{ stop: () => Promise<void>; channel: LarkChannel }> {
   const logError = (message: string) => {
     logger.error(message)
@@ -166,6 +167,16 @@ export async function startChannel(
 
   const unsubscribers = [
     channel.on('message', async (message: NormalizedMessage) => {
+      // Message interceptor (e.g., for question custom-input collection).
+      // If the interceptor returns true, the message is consumed.
+      if (messageInterceptor !== undefined) {
+        try {
+          const consumed = await messageInterceptor(message)
+          if (consumed) return
+        } catch (error: unknown) {
+          logger.warn(`dsh-feishu: message interceptor error: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
       const replyInThread = message.threadId !== undefined
       if (config.reactEmoji !== '') {
         try {

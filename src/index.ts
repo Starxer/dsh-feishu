@@ -137,8 +137,9 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   }
   const cardActionHandlers = new Set<(evt: CardActionEvent) => void | Promise<void>>()
   const attachedChannels = new Set<LarkChannel>()
+  const messageInterceptors = new Set<(msg: NormalizedMessage) => boolean | Promise<boolean>>()
   const cardChannel = {
-    send: (to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<{ messageId?: string }> => {
+    send: (to: string, input: { card: object } | { text: string }, opts?: { replyInThread?: boolean }): Promise<{ messageId?: string }> => {
       const ch = channelHolder.current
       if (ch === undefined) return Promise.reject(new Error('dsh-feishu: channel not connected'))
       return ch.send(to, input, opts) as Promise<{ messageId?: string }>
@@ -177,6 +178,11 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         cardActionHandlers.delete(handler)
         for (const u of unsubList) u()
       }
+    },
+    /** Register a message interceptor. Returns true if the message was consumed. */
+    onMessageInterceptor: (handler: (msg: NormalizedMessage) => boolean | Promise<boolean>): (() => void) => {
+      messageInterceptors.add(handler)
+      return () => { messageInterceptors.delete(handler) }
     },
   }
   // The questions listener is paired with the approvals listener: they share
@@ -226,6 +232,14 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         undefined,  // consumeReasoning (unused; bridge handles intermediate tracking)
         undefined,  // consumeLastStepHadContent (unused)
         flushed,
+        // Message interceptor: runs before slash commands and agent replies.
+        async (msg) => {
+          for (const interceptor of messageInterceptors) {
+            const consumed = await interceptor(msg)
+            if (consumed) return true
+          }
+          return false
+        },
       )
     },
   })

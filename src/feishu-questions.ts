@@ -52,14 +52,14 @@ interface PendingCard {
  * automatically on reconcile.
  */
 export interface FeishuQuestionsChannel {
-  /** Send a card to the chat. Resolves to `undefined` when no channel is
-   *  connected (the listener drops the frame instead of awaiting forever). */
-  send(to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<{ messageId?: string }>
+  /** Send a card or text to the chat. */
+  send(to: string, input: { card: object } | { text: string }, opts?: { replyInThread?: boolean }): Promise<{ messageId?: string }>
   updateCard(messageId: string, card: object): Promise<void>
-  recallMessage(messageId: string): Promise<void>
   /** Subscribe to interactive-card button clicks. The handler is invoked on
    *  every channel that connects for the lifetime of this subscription. */
   onCardAction(handler: (evt: CardActionLike) => void | Promise<void>): () => void
+  /** Register a message interceptor. Returns true if the message was consumed. */
+  onMessageInterceptor(handler: (msg: NormalizedMessage) => boolean | Promise<boolean>): () => void
 }
 
 /** Subset of CardActionEvent the listener consumes. */
@@ -92,6 +92,8 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
   const { apiProxy, channel, bridgeHolder, logger } = deps
   const controller = new AbortController()
   const pendingCards = new Map<string, PendingCard>()
+  /** Pending custom-input requests: rpcId → { pending, chatId } */
+  const pendingCustomInputs = new Map<string, { pending: PendingCard; chatId: string }>()
 
   const respondForQuestion = async (
     rpcId: string,
@@ -133,7 +135,7 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
     const action = evt.action
     let raw = action?.value
     if (typeof raw !== 'string') return
-    let parsed: { rpcId?: unknown; questionId?: unknown; selected?: unknown; custom?: unknown }
+    let parsed: { rpcId?: unknown; questionId?: unknown; selected?: unknown; custom?: unknown; type?: unknown }
     try {
       let result = JSON.parse(raw)
       // Feishu may double-encode the value (JSON string containing JSON)
@@ -144,33 +146,78 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
     }
     const rpcId = typeof parsed.rpcId === 'string' ? parsed.rpcId : ''
     const questionId = typeof parsed.questionId === 'string' ? parsed.questionId : ''
+    if (rpcId === '' || questionId === '') return
+    const pending = pendingCards.get(rpcId)
+    if (pending === undefined) return
+
+    // Custom answer button clicked: send prompt and wait for text reply.
+    if (parsed.type === 'custom') {
+      const chatId = evt.chatId
+      if (chatId === undefined) return
+      // Don't delete from pendingCards yet — we need it for the reply.
+      pendingCustomInputs.set(rpcId, {
+        pending,
+        chatId,
+      })
+      await channel.send(chatId, { text: '✏️ 请输入你的回答（直接发送文字即可）：' }).catch((error: unknown) => {
+        logger.warn(`dsh-feishu: failed to send custom-input prompt: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      return
+    }
+
     const selected = Array.isArray(parsed.selected)
       ? parsed.selected.filter((item: unknown): item is string => typeof item === 'string')
       : action?.option !== undefined ? [action.option] : []
     const custom = typeof parsed.custom === 'string' && parsed.custom !== '' ? parsed.custom : undefined
-    if (rpcId === '' || questionId === '') return
-    const pending = pendingCards.get(rpcId)
-    if (pending === undefined) return
     pendingCards.delete(rpcId)
-    // Recall old card and send settled card (patch doesn't update header).
+    // Update the card to show selected answer (remove buttons, show feedback).
+    // Note: im.v1.message.patch cannot update header color; we update body only.
     const selectedLabels = selected.length > 0 ? selected : (action?.option !== undefined ? [action.option] : [])
-    console.log('dsh-feishu: [questions] onCardAction rpcId=', rpcId, 'pending=', pending !== undefined, 'cardMessageId=', pending?.cardMessageId, 'chatId=', evt.chatId, 'selected=', selectedLabels)
-    if (pending.cardMessageId !== undefined && evt.chatId !== undefined) {
+    if (pending.cardMessageId !== undefined && selectedLabels.length > 0) {
       const settledCard = renderSettledQuestionCard(pending.question, selectedLabels)
-      try {
-        console.log('dsh-feishu: [questions] recalling card:', pending.cardMessageId)
-        await channel.recallMessage(pending.cardMessageId)
-        console.log('dsh-feishu: [questions] recall done, sending settled card to:', evt.chatId)
-        await channel.send(evt.chatId, { card: settledCard })
-        console.log('dsh-feishu: [questions] settled card sent')
-      } catch (error: unknown) {
-        console.log('dsh-feishu: [questions] settled card error:', error instanceof Error ? error.message : String(error))
-      }
+      await channel.updateCard(pending.cardMessageId, settledCard).catch((error: unknown) => {
+        logger.warn(`dsh-feishu: failed to update question card: ${error instanceof Error ? error.message : String(error)}`)
+      })
     }
     if (selected.length === 0 && custom === undefined) return
     await respondForQuestion(rpcId, pending.sessionId, pending.question, selected, custom)
   }
   const unsubscribeCardAction = channel.onCardAction(onCardAction)
+
+  // Listen for text replies to pending custom-input requests.
+  const messageInterceptor = (msg: NormalizedMessage): boolean => {
+    // Only process text messages.
+    if (msg.rawContentType !== 'text') return false
+    const chatId = msg.chatId
+    // Find a pending custom input for this chat.
+    let matchedRpcId: string | undefined
+    let matchedEntry: { pending: PendingCard; chatId: string } | undefined
+    for (const [rpcId, entry] of pendingCustomInputs) {
+      if (entry.chatId === chatId) {
+        matchedRpcId = rpcId
+        matchedEntry = entry
+        break
+      }
+    }
+    if (matchedRpcId === undefined || matchedEntry === undefined) return false
+    const text = msg.content?.trim()
+    if (text === undefined || text === '') return false
+    // Consume the pending request.
+    pendingCustomInputs.delete(matchedRpcId)
+    pendingCards.delete(matchedRpcId)
+    const { pending } = matchedEntry
+    // Update the card to show the custom answer (fire-and-forget).
+    if (pending.cardMessageId !== undefined) {
+      const settledCard = renderSettledQuestionCard(pending.question, [`✏️ ${text}`])
+      void channel.updateCard(pending.cardMessageId, settledCard).catch((error: unknown) => {
+        logger.warn(`dsh-feishu: failed to update question card: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
+    // Respond with the custom text (fire-and-forget so we don't block the message handler).
+    void respondForQuestion(matchedRpcId, pending.sessionId, pending.question, [], text)
+    return true  // Consume the message.
+  }
+  const unsubscribeMessage = channel.onMessageInterceptor(messageInterceptor)
 
   const iterate = async (): Promise<void> => {
     try {
@@ -199,8 +246,10 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
   return () => {
     controller.abort()
     unsubscribeCardAction()
+    unsubscribeMessage()
     for (const pending of pendingCards.values()) pending.abortController.abort()
     pendingCards.clear()
+    pendingCustomInputs.clear()
   }
 }
 
@@ -257,6 +306,8 @@ function renderSettledQuestionCard(
   mdParts.push(question.question)
   mdParts.push('')
   if (options.length > 0) {
+    // Check if the answer is a custom text (prefixed with ✏️).
+    const customAnswer = selected.find(s => s.startsWith('✏️ '))
     for (const option of options) {
       if (selectedSet.has(option.label)) {
         mdParts.push(`✅ ~~${option.label}~~ — *已选择*`)
@@ -264,16 +315,26 @@ function renderSettledQuestionCard(
         mdParts.push(`⬜ ${option.label}`)
       }
     }
+    if (customAnswer !== undefined) {
+      mdParts.push(`\n✅ **自定义回答：** ${customAnswer.slice(3)}`)
+    }
   } else {
     mdParts.push(`✅ **已选择：** ${selected.join(', ')}`)
   }
+  // Use Card JSON 2.0 format (schema + body.elements) for the settled card.
+  // This is necessary because im.v1.message.patch only supports v2 format.
+  // The original question card uses old format (top-level elements) because
+  // v2 does not support the 'action' tag (buttons).
   return {
+    schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
       title: { tag: 'plain_text', content: question.header ?? 'Question' },
       template: 'turquoise',
     },
-    body: { elements: [{ tag: 'markdown', content: mdParts.join('\n') }] },
+    body: {
+      elements: [{ tag: 'markdown', content: mdParts.join('\n') }],
+    },
   }
 }
 
@@ -298,27 +359,53 @@ function renderQuestionCard(
   }
   const body: object[] = [{ tag: 'markdown', content: mdParts.join('\n') }]
   const multiSelect = question.multiSelect === true
-  const elements: object[] = []
   if (options.length > 0) {
-    const buttons = options.slice(0, 6).map((option) => ({
+    // In Card JSON 2.0, buttons go directly in body.elements (no 'action' wrapper).
+    for (const option of options.slice(0, 6)) {
+      body.push({
+        tag: 'button',
+        text: { tag: 'plain_text', content: option.label },
+        type: multiSelect ? 'default' : 'primary',
+        value: JSON.stringify({
+          rpcId,
+          questionId: question.id,
+          selected: [option.label],
+        }),
+      })
+    }
+    // Add custom answer button.
+    body.push({
       tag: 'button',
-      text: { tag: 'plain_text', content: option.label },
-      type: multiSelect ? 'default' : 'primary',
+      text: { tag: 'plain_text', content: '✏️ 自定义回答' },
+      type: 'default',
       value: JSON.stringify({
         rpcId,
         questionId: question.id,
-        selected: [option.label],
+        type: 'custom',
       }),
-    }))
-    elements.push({ tag: 'action', actions: buttons })
+    })
+  } else {
+    // No options: show a custom-input button as the only action.
+    body.push({
+      tag: 'button',
+      text: { tag: 'plain_text', content: '✏️ 输入回答' },
+      type: 'primary',
+      value: JSON.stringify({
+        rpcId,
+        questionId: question.id,
+        type: 'custom',
+      }),
+    })
   }
-  body.push(...elements)
   return {
+    schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
       title: { tag: 'plain_text', content: question.header ?? 'Question' },
       template: options.length > 0 ? 'blue' : 'grey',
     },
-    elements: body,
+    body: {
+      elements: body,
+    },
   }
 }

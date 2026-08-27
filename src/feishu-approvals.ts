@@ -282,6 +282,7 @@ function renderApprovalCard(entry: PendingApproval): object {
   const body: object[] = [
     { tag: 'markdown', content: `**Tool:** \`${entry.toolName}\`\n${locationHint}` },
   ]
+  // Card JSON 2.0: buttons go directly in body.elements (no 'action' wrapper).
   return {
     schema: '2.0',
     config: { wide_screen_mode: true },
@@ -293,21 +294,16 @@ function renderApprovalCard(entry: PendingApproval): object {
       elements: [
         ...body,
         {
-          tag: 'action',
-          actions: [
-            {
-              tag: 'button',
-              text: { tag: 'plain_text', content: 'Reject' },
-              type: 'danger',
-              value: JSON.stringify({ rpcId: entry.rpcId, outcome: 'rejected' }),
-            },
-            {
-              tag: 'button',
-              text: { tag: 'plain_text', content: 'Approve once' },
-              type: 'primary',
-              value: JSON.stringify({ rpcId: entry.rpcId }),
-            },
-          ],
+          tag: 'button',
+          text: { tag: 'plain_text', content: 'Reject' },
+          type: 'danger',
+          value: JSON.stringify({ rpcId: entry.rpcId, outcome: 'rejected' }),
+        },
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: 'Approve once' },
+          type: 'primary',
+          value: JSON.stringify({ rpcId: entry.rpcId }),
         },
       ],
     },
