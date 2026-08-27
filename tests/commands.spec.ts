@@ -135,6 +135,8 @@ function fakeBridge(overrides?: {
       switchToSession,
       listSessions,
       getSessionMeta,
+      resolveAgent: vi.fn(async () => undefined),
+      resolveSessionIdFor: vi.fn(() => 'test-session'),
     },
     setCurrentSelection,
     startNewSession,

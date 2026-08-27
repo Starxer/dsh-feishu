@@ -271,6 +271,8 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       switchToSession: (chatMessage, sessionId) => bridgeHolder.current?.switchToSession(chatMessage, sessionId) ?? false,
       listSessions: async () => bridgeHolder.current?.listSessions() ?? [],
       getSessionMeta: async (chatMessage) => bridgeHolder.current?.getSessionMeta(chatMessage) ?? { sessionId: '', workspace: '', agentPreset: '', model: '', reasoningEffort: '', title: '', turns: 0, steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, contextWindow: 0, lastInputTokens: 0, cacheHitRate: 0, ttftAvgMs: 0, tokensPerSecond: 0, llmDurationMs: 0, toolDurationMs: 0 },
+      resolveAgent: async (chatMessage) => bridgeHolder.current?.resolveAgent(chatMessage),
+      resolveSessionIdFor: (chatMessage) => bridgeHolder.current?.resolveSessionIdFor(chatMessage) ?? '',
     },
     () => {
       const last = bridgeHolder.lastChatMessage
@@ -295,6 +297,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         void settings.mutate(namespace, [{ op: 'set', path: ['showReasoning'], value: !current }], currentRevision())
       },
     },
+    apiProxy,
   )
   ctx.effect(() => () => {
     stopQuestions()

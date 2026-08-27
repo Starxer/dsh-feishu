@@ -16,7 +16,7 @@ const QUESTION: AskUserQuestionItem = {
 
 interface Harness {
   respondCalls: Array<{ rpcId: string; questionId: string; selected: string[]; custom?: string }>
-  sentCards: Array<{ to: string; card: { header?: { title?: { content?: string } }; elements?: unknown[] } }>
+  sentCards: Array<{ to: string; card: { schema?: string; header?: { title?: { content?: string } }; body?: { elements?: unknown[] }; elements?: unknown[] } }>
   cardActionHandler: ((evt: unknown) => void | Promise<void>) | undefined
   resolveChatCalls: string[]
 }
@@ -134,7 +134,7 @@ describe('startFeishuQuestions', () => {
       await new Promise(resolve => setImmediate(resolve))
       expect(harness.sentCards).toHaveLength(1)
       expect(harness.sentCards[0]!.to).toBe('oc_chat')
-      expect(harness.sentCards[0]!.card.body.elements).toBeDefined()
+      expect(harness.sentCards[0]!.card.body?.elements).toBeDefined()
       await harness.cardActionHandler!({
         action: {
           tag: 'button',
