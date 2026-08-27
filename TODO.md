@@ -34,7 +34,11 @@
 | — | 防止卡片消失 | ✅ 内层 try/catch 保护 mux 事件处理，timer 回调 error-safe |
 | — | 不同步骤工具调用分离 | ✅ `resetStep` 不清除 `state.chat`（session 级坐标），每个 step 独立卡片 |
 | — | 审批按钮反馈 | ✅ 点击后卡片更新为 ✅ Approved / ❌ Rejected，移除按钮 |
-| — | 飞书事件订阅修复 | ✅ provision 新增 `card.action.trigger` 事件 + `im:message.reaction` 权限 |
+| — | 飞书事件订阅修复 | ✅ provision 新增 `im:message.reaction` 权限 |
+| — | 卡片按钮回调修复 | ✅ Node.js SDK `MessageType.CARD` 被过滤 → 补丁修复 + postinstall 脚本 |
+| — | 选项卡片反馈 | ✅ 选择后 recall 旧卡 + 发新卡（青绿色头部，显示所有选项，已选高亮） |
+| — | 双重编码 JSON | ✅ Feishu `action.value` 双重编码 → 二次 `JSON.parse`（questions + approvals） |
+| — | Turn Complete 时间修复 | ✅ LLM 时间（assistant/message 累加）与工具时间（tool/result 累加）分开统计 |
 
 ## 待实现
 
@@ -50,12 +54,44 @@
 
 ---
 
+## 已知问题
+
+### `im.v1.message.patch` 不更新卡片头部
+
+**现象**：`updateCard`（底层调 `im.v1.message.patch`）只更新 body，不更新 header（标题、颜色）。
+
+**影响**：
+- Tool Call → Tool Done 颜色变化不生效（保持初始颜色）
+- 选项卡片选择后颜色变化不生效
+
+**解决**：需要改 header 时，recall 旧卡 + 发新卡。已用于：
+- 选项卡片（feishu-questions.ts）— 选择后 recall + resend
+- 审批卡片（feishu-approvals.ts）— 使用 updateCard（仅 body 变化，header 橙→绿 需要 recall）
+
+**待优化**：审批卡片的 header 颜色变化目前依赖 updateCard，实际上不会生效。需要改为 recall + resend。
+
+### Node.js SDK `MessageType.CARD` 被过滤
+
+**现象**：飞书卡片回调事件（`card.action.trigger`）通过 WebSocket 推送时 `type='card'`，Node.js SDK 的 `handleEventData` 过滤了 `type !== 'event'` 的消息。
+
+**解决**：`scripts/patch-sdk-card-action.sh` 补丁 + `postinstall` 脚本自动应用。
+
+**长期方案**：向 @larksuiteoapi/node-sdk 提 issue/PR 修复。
+
+### `action.value` 双重编码
+
+**现象**：飞书返回的 `action.value` 是 JSON 字符串内嵌 JSON 字符串（双重编码）。
+
+**解决**：`JSON.parse` 两次（feishu-questions.ts、feishu-approvals.ts）。
+
+---
+
 ## 卡片颜色参考
 
 | 颜色 | 用途 | 文件 |
 |---|---|---|
 | blue | Reply 回复卡片、问题卡片 | `channel.ts`、`feishu-questions.ts` |
-| turquoise (青绿) | Todo 列表卡片 | `feishu-todos.ts` |
+| turquoise (青绿) | Todo 列表卡片、已选问题卡片 | `feishu-todos.ts`、`feishu-questions.ts` |
 | wathet (浅蓝) | Tool Call 调用中 | `feishu-streaming.ts` |
 | green | Tool Result 成功 / Turn Complete | `feishu-streaming.ts`、`channel.ts` |
 | red | Tool Error 失败 | `feishu-streaming.ts` |

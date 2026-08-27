@@ -56,6 +56,7 @@ export interface FeishuQuestionsChannel {
    *  connected (the listener drops the frame instead of awaiting forever). */
   send(to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<{ messageId?: string }>
   updateCard(messageId: string, card: object): Promise<void>
+  recallMessage(messageId: string): Promise<void>
   /** Subscribe to interactive-card button clicks. The handler is invoked on
    *  every channel that connects for the lifetime of this subscription. */
   onCardAction(handler: (evt: CardActionLike) => void | Promise<void>): () => void
@@ -151,11 +152,20 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
     const pending = pendingCards.get(rpcId)
     if (pending === undefined) return
     pendingCards.delete(rpcId)
-    // Update the card to show the selected option and remove interactive elements.
-    if (pending.cardMessageId !== undefined) {
-      const selectedLabels = selected.length > 0 ? selected : (action?.option !== undefined ? [action.option] : [])
+    // Recall old card and send settled card (patch doesn't update header).
+    const selectedLabels = selected.length > 0 ? selected : (action?.option !== undefined ? [action.option] : [])
+    console.log('dsh-feishu: [questions] onCardAction rpcId=', rpcId, 'pending=', pending !== undefined, 'cardMessageId=', pending?.cardMessageId, 'chatId=', evt.chatId, 'selected=', selectedLabels)
+    if (pending.cardMessageId !== undefined && evt.chatId !== undefined) {
       const settledCard = renderSettledQuestionCard(pending.question, selectedLabels)
-      await channel.updateCard(pending.cardMessageId, settledCard).catch(() => undefined)
+      try {
+        console.log('dsh-feishu: [questions] recalling card:', pending.cardMessageId)
+        await channel.recallMessage(pending.cardMessageId)
+        console.log('dsh-feishu: [questions] recall done, sending settled card to:', evt.chatId)
+        await channel.send(evt.chatId, { card: settledCard })
+        console.log('dsh-feishu: [questions] settled card sent')
+      } catch (error: unknown) {
+        console.log('dsh-feishu: [questions] settled card error:', error instanceof Error ? error.message : String(error))
+      }
     }
     if (selected.length === 0 && custom === undefined) return
     await respondForQuestion(rpcId, pending.sessionId, pending.question, selected, custom)
