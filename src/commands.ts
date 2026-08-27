@@ -285,6 +285,7 @@ export function registerLarkCommands(
         chatMessageFor,
         t,
         showReasoning,
+        apiProxy,
       ),
     })
   }, 'dsh-feishu: /model /new /thread /help /approve /deny /approvals /status /stream /reasoning commands')
@@ -373,10 +374,11 @@ const VALID_REASONING_LEVELS = ['off', 'low', 'high', 'max'] as const
 async function handleReasoningCommand(
   invocation: CommandInvocation,
   agentDefaultModel: AgentDefaultModelConfig,
-  bridge: Pick<HarnessConversationService, 'setCurrentSelection' | 'currentSelectionFor'>,
+  bridge: Pick<HarnessConversationService, 'setCurrentSelection' | 'currentSelectionFor' | 'resolveSessionIdFor'>,
   chatMessageFor: (invocation: CommandInvocation) => ConversationMessage,
   t: CommandTranslations,
   showReasoning: { get: () => boolean; toggle: () => void },
+  apiProxy?: ApiProxyLike,
 ): Promise<CommandResult> {
   const rawInput = invocation.rawInput.trim().toLowerCase()
   const current = agentDefaultModel.currentSelection()
@@ -425,6 +427,25 @@ async function handleReasoningCommand(
   }
   await agentDefaultModel.saveSelection(selection)
   bridge.setCurrentSelection(chatMessageFor(invocation), selection)
+  // Sync reasoning effort to apiProxy so WebUI shows the same effort.
+  // Without this, WebUI reads from its own selections Map (populated by
+  // apiProxy's selectionFor()) which is separate from bridge.selections.
+  if (apiProxy !== undefined) {
+    try {
+      const message = chatMessageFor(invocation)
+      const sessionId = bridge.resolveSessionIdFor(message)
+      await apiProxy.sessions.selectModel({
+        payload: {
+          sessionId,
+          provider: current.provider,
+          model: current.model,
+          reasoningEffort: level,
+        },
+      })
+    } catch {
+      // Non-fatal: reasoning effort is already saved to settings and bridge selections
+    }
+  }
   return { kind: 'success', text: t.reasoningSwitched(level) }
 }
 

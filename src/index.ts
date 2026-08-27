@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { homedir } from 'node:os'
 import type {} from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type { AgentDefaultModelConfig } from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type { CommandRuntime, CommandResult, CommandExecution } from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -43,6 +43,7 @@ export { ConfigSchema } from './config.ts'
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy'
 import { startFeishuQuestions } from './feishu-questions.ts'
+import { startFeishuModelSelect, renderCurrentModelCard } from './feishu-model-select.ts'
 
 export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void> {
   console.log('dsh-feishu: apply() called, apiProxy=', ctx.get('apiProxy') !== undefined ? 'available' : 'UNDEFINED')
@@ -110,6 +111,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   let consumeLastStepHadContent: (sessionId: string) => boolean = () => false
   let flushed: (sessionId: string) => Promise<TurnStats | undefined> = () => Promise.resolve(undefined)
   let stopTodos: () => void = () => undefined
+  let stopModelSelect: () => void = () => undefined
   const channelHolder: { current: LarkChannel | undefined } = { current: undefined }
   const buildApprovalControl = (apiProxy: ApiProxy): ApprovalControl => {
     const approvalsHandle = startFeishuApprovals({
@@ -210,7 +212,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
           ctx.logger('dsh-feishu').info(`dsh-feishu: /stream toggle: ${current} → ${next}`)
           void settings.mutate(namespace, [{ op: 'set', path: ['showIntermediateMessages'], value: next }], currentRevision())
           return { enabled: next as boolean }
-        }, apiProxy),
+        }, apiProxy, llm, defaultModel),
         attachments,
         async (coords) => {
           const meta = await bridge.getSessionMeta(coords as ConversationMessage)
@@ -259,6 +261,14 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     consumeReasoning = streamingResult.consumeReasoning
     consumeLastStepHadContent = streamingResult.consumeLastStepHadContent
     flushed = streamingResult.flushed
+    stopModelSelect = startFeishuModelSelect({
+      llm,
+      agentDefaultModel: defaultModel,
+      bridgeHolder,
+      apiProxy,
+      channel: cardChannel,
+      logger: ctx.logger('dsh-feishu'),
+    })
   }
   registerLarkCommands(
     ctx,
@@ -584,6 +594,8 @@ async function executeSlashCommand(
   bridgeHolder: { lastChatMessage: { chatId: string; chatType: 'p2p' | 'group'; threadId?: string } | undefined },
   toggleStream?: () => { enabled: boolean },
   apiProxy?: ApiProxy,
+  llm?: LlmRuntime,
+  agentDefaultModel?: AgentDefaultModelConfig,
 ): Promise<{ kind: 'success' | 'error'; text: string; card?: object } | undefined> {
   const parsed = parseCommand(message.content)
   if (parsed === undefined) return undefined
@@ -648,6 +660,21 @@ async function executeSlashCommand(
       const msg = error instanceof Error ? error.message : String(error)
       return { kind: 'error', text: `⚠️ 停止失败: ${msg}` }
     }
+  }
+  // /model with no arguments renders the model selector card instead of
+  // falling through to commands.execute. The card's buttons drive the
+  // feishu-model-select flow; `/model provider/model` and `/model list`
+  // still go through commands.execute as before.
+  if (parsed.name === 'model' && parsed.rawInput.trim() === '') {
+    if (agentDefaultModel === undefined) {
+      return { kind: 'error', text: '⚠️ Agent default model service is not available.' }
+    }
+    const current = agentDefaultModel.currentSelection()
+    return { kind: 'success', text: '', card: renderCurrentModelCard({
+      provider: current.provider,
+      model: current.model,
+      ...(current.reasoningEffort !== undefined ? { reasoningEffort: String(current.reasoningEffort) } : {}),
+    }) }
   }
   // Stash the chat coordinates so the registered handler can find them
   // without holding per-invocation state on the agent. The bridge serializes

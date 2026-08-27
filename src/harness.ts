@@ -416,8 +416,8 @@ export class HarnessConversationService {
     cacheHitRate: number; ttftAvgMs: number; tokensPerSecond: number; llmDurationMs: number; toolDurationMs: number
   }> {
     const sessionId = this.resolveSessionId(message)
-    const model = this.selections.get(sessionId)?.current ?? this.deps.selection()
-    const reasoningEffort = model.reasoningEffort ? String(model.reasoningEffort) : ''
+    let model = this.selections.get(sessionId)?.current ?? this.deps.selection()
+    let reasoningEffort = model.reasoningEffort ? String(model.reasoningEffort) : ''
     const empty = { title: '', turns: 0, steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, contextWindow: 0, lastInputTokens: 0, cacheHitRate: 0, ttftAvgMs: 0, tokensPerSecond: 0, llmDurationMs: 0, toolDurationMs: 0 }
     // Try reading the session header + events from persistence
     const readFrom = this.deps.sessionPersistence.readFrom
@@ -427,7 +427,27 @@ export class HarnessConversationService {
         const header = result.meta as { cwd?: string; agentPreset?: string } | undefined
         const ws = header?.cwd ?? this.config.workspace ?? ''
         const preset = header?.agentPreset ?? this.config.agentPreset ?? ''
-        const stats = this.deriveSessionStats(result.events as ReadonlyArray<{ type: string; data: any }>)
+        const events = result.events as ReadonlyArray<{ type: string; data: any }>
+        const stats = this.deriveSessionStats(events)
+        // Prefer the latest request header recorded in the session log over the
+        // bridge's in-memory selection ref: a WebUI model switch updates
+        // apiProxy's selectionFor(agent).current without touching bridge.selections,
+        // so the ref here can lag behind the model actually used in the last turn.
+        let latestConfig: { provider?: string; model?: string; reasoningEffort?: string } | undefined
+        for (const event of events) {
+          if (event?.type === 'request/header' && event.data?.header?.config) {
+            latestConfig = event.data.header.config
+          }
+        }
+        if (latestConfig?.provider !== undefined && latestConfig?.model !== undefined) {
+          const effort = latestConfig.reasoningEffort
+          model = {
+            provider: latestConfig.provider,
+            model: latestConfig.model,
+            ...(effort === undefined ? {} : { reasoningEffort: effort as ReasoningEffortId }),
+          }
+          reasoningEffort = effort ? String(effort) : ''
+        }
         return { sessionId, workspace: ws, agentPreset: preset, model: `${model.provider}/${model.model}`, reasoningEffort, ...stats }
       } catch { /* fall through to config defaults */ }
     }

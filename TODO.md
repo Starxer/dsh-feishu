@@ -87,6 +87,40 @@
 
 ---
 
+## 问题追踪（2025-08-27）
+
+### ❌ WebUI 改模型后 status 命令显示不更新
+
+**现象**：
+- WebUI 里切换模型后，`/status` 命令显示的模型名仍是旧模型
+- 即使在 WebUI 切换后进行一轮对话，`/status` 仍显示旧模型
+- 在飞书继续对话后，`/status` 仍不更新，但实际对话的模型已经是 WebUI 切换后的模型
+
+**复现**：WebUI 修改模型 → `/status`（显示旧模型）
+
+**根因分析**：`/status` 命令读取的是 `bridge.selections`（飞书侧的 per-chat selection ref），而 WebUI 切换模型只更新了 `apiProxy.selections`（WeakMap，WebUI 侧）。两者是独立的缓存，没有同步。
+
+**修复方向**：`/status` 命令需要优先从 `apiProxy.sessions.selectModel` 的结果或 `selectionFor(agent).current` 读取当前实际模型，而不是只读 bridge 的 selection ref。
+
+---
+
+### ❌ MiniMax M3 关闭思考后重新打开不思考
+
+**现象**：新建 session，把 M3 模型的思考强度关掉后进行一轮对话，再重新打开思考强度，模型不再进行思考（不输出 reasoning 内容）。
+
+**复现步骤**：
+1. 新建 session，模型选 MiniMax-M3
+2. `/reasoning off`（关闭思考）
+3. 进行一轮对话
+4. `/reasoning high`（重新打开思考）
+5. 模型不输出 reasoning 内容（不思考）
+
+**根因分析**：关闭思考时 `selection` 被设为无 `reasoningEffort`，且这个状态被 apiProxy 的 `selectionFor(agent).current`（读 requestHeader）持久化了。重新打开思考时，新的 `reasoningEffort` 虽然被设置，但 apiProxy 的外层 `agent/request` listener 用 requestHeader 的旧 config（无 effort）覆盖，导致请求仍不带 thinking 参数。
+
+**修复方向**：检查 `installModelSelection` 的 `agent/request` listener 在 `selection.assembled.reasoningEffort === undefined` 时删除继承的 effort 是否合理；考虑保留继承的 effort 而不是删除。
+
+---
+
 ## 卡片颜色参考
 
 | 颜色 | 用途 | 文件 |
