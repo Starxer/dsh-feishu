@@ -191,13 +191,15 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
       ? Date.now() - state.stepStartTime
       : undefined
 
-    // Token output speed: output tokens ÷ decode time (first token → message).
-    // Falls back to now when the assembled message hasn't arrived yet.
+    // Token output speed: output tokens ÷ LLM decode time (first token →
+    // assembled message). TTFT and tool time are excluded — the same
+    // semantics as the Turn Complete card and /status. Only computed once
+    // the assembled message's timestamp is known: falling back to Date.now()
+    // here would keep growing while tools run and show a misleadingly low
+    // tok/s on every refresh.
     let tps: number | undefined
-    if (state.usage !== undefined && state.usage.outputTokens > 0 && state.firstTokenTime > 0) {
-      const decodeMs = state.messageTime > state.firstTokenTime
-        ? state.messageTime - state.firstTokenTime
-        : Date.now() - state.firstTokenTime
+    if (state.usage !== undefined && state.usage.outputTokens > 0 && state.firstTokenTime > 0 && state.messageTime > state.firstTokenTime) {
+      const decodeMs = state.messageTime - state.firstTokenTime
       if (decodeMs > 0) tps = state.usage.outputTokens / (decodeMs / 1000)
     }
 
@@ -362,6 +364,19 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
               cacheWriteTokens: (usage.cacheWriteTokens as number | undefined),
             }
           }
+          // Live context usage: each LLM call's billed input is the context the
+          // model saw at that step (same semantics as the WebUI's context %).
+          // Update per step so the footer's 📊 percentage reflects the
+          // accumulated context instead of the stale turn-start value.
+          if (state.usage !== undefined) {
+            const billed = state.usage.inputTokens + (state.usage.cacheReadTokens ?? 0) + (state.usage.cacheWriteTokens ?? 0)
+            if (billed > 0 && (state.contextMeta === undefined || billed > state.contextMeta.lastInputTokens)) {
+              state.contextMeta = {
+                contextWindow: state.contextMeta?.contextWindow ?? 0,
+                lastInputTokens: billed,
+              }
+            }
+          }
 
           // Accumulate turn stats.
           // NOTE: tool time is NOT accumulated here — at assistant/message time,
@@ -487,12 +502,34 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
           const promise = new Promise<void>((r) => { resolve = r })
           flushPromises.set(sessionId, { promise, resolve })
           // Fetch context-window info once per turn so step-card footers can
-          // show the context percentage. Refreshes the live card on arrival.
+          // show the context percentage. Merge with the live value captured
+          // from per-step usage: the persisted log is only flushed at turn
+          // end, so re-fetching here would return a stale pre-turn context.
+          // Never regress the live value. Refreshes the live card on arrival.
           if (chat !== undefined) {
             bridge.getSessionMeta(chat).then((meta) => {
-              state.contextMeta = { contextWindow: meta.contextWindow, lastInputTokens: meta.lastInputTokens }
+              // `??` keeps a fresher live contextWindow (set by the
+              // request/context handler below) when this resolves after it.
+              state.contextMeta = {
+                contextWindow: state.contextMeta?.contextWindow ?? meta.contextWindow,
+                lastInputTokens: Math.max(state.contextMeta?.lastInputTokens ?? 0, meta.lastInputTokens),
+              }
               if (state.stepCardSent) updateStepCard(state)
             }).catch(() => undefined)
+          }
+        } else if (event.type === 'request/context') {
+          // Keep the footer's context-window denominator current. The window
+          // is per-model/route and can change mid-session (e.g. after /model),
+          // while the turn/start getSessionMeta snapshot only reflects the
+          // last flushed turn. This live event is the same value /status
+          // derives from the post-turn log.
+          const cw = event.data?.contextWindow as number | undefined
+          if (cw !== undefined && cw > 0) {
+            state.contextMeta = {
+              contextWindow: cw,
+              lastInputTokens: state.contextMeta?.lastInputTokens ?? 0,
+            }
+            if (state.stepCardSent) updateStepCard(state)
           }
         } else if (event.type === 'turn/end') {
           // Flush any pending debounced updateCard before resetting, so the
