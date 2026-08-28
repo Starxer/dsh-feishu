@@ -365,12 +365,15 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
             }
           }
           // Live context usage: each LLM call's billed input is the context the
-          // model saw at that step (same semantics as the WebUI's context %).
-          // Update per step so the footer's 📊 percentage reflects the
-          // accumulated context instead of the stale turn-start value.
+          // model saw at that step (same semantics as /status's
+          // deriveSessionStats, which takes the LAST usage sample). Last-wins,
+          // no monotonic guard: after a compaction the context legitimately
+          // shrinks (e.g. 267K → 22K), and a stale high numerator would pin
+          // the footer at the pre-compaction value forever — the "numerator
+          // doesn't update" bug.
           if (state.usage !== undefined) {
             const billed = state.usage.inputTokens + (state.usage.cacheReadTokens ?? 0) + (state.usage.cacheWriteTokens ?? 0)
-            if (billed > 0 && (state.contextMeta === undefined || billed > state.contextMeta.lastInputTokens)) {
+            if (billed > 0) {
               state.contextMeta = {
                 contextWindow: state.contextMeta?.contextWindow ?? 0,
                 lastInputTokens: billed,
@@ -505,14 +508,19 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
           // show the context percentage. Merge with the live value captured
           // from per-step usage: the persisted log is only flushed at turn
           // end, so re-fetching here would return a stale pre-turn context.
-          // Never regress the live value. Refreshes the live card on arrival.
+          // The baseline is only a starting point: it fills fields that are
+          // still unknown (0 = not yet seen) and never overrides a fresher
+          // live value — a stale high pre-compaction baseline must not pin
+          // the numerator, and an early live 0 must not drop the baseline.
           if (chat !== undefined) {
             bridge.getSessionMeta(chat).then((meta) => {
-              // `??` keeps a fresher live contextWindow (set by the
-              // request/context handler below) when this resolves after it.
+              // `||` (not `??`): a live 0 means "not seen yet", so fall back
+              // to the baseline; a live > 0 (request/context window, per-step
+              // billed input) always wins. lastInputTokens is last-wins,
+              // matching /status — never Math.max, never `billed > previous`.
               state.contextMeta = {
-                contextWindow: state.contextMeta?.contextWindow ?? meta.contextWindow,
-                lastInputTokens: Math.max(state.contextMeta?.lastInputTokens ?? 0, meta.lastInputTokens),
+                contextWindow: state.contextMeta?.contextWindow || meta.contextWindow,
+                lastInputTokens: state.contextMeta?.lastInputTokens || meta.lastInputTokens,
               }
               if (state.stepCardSent) updateStepCard(state)
             }).catch(() => undefined)
