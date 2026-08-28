@@ -25,7 +25,7 @@ interface BridgeHolder {
 
 /** Channel adapter for sending cards. */
 export interface FeishuTodosChannel {
-  send(to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<unknown>
+  send(to: string, input: { card: object }, opts?: { replyInThread?: boolean; replyTo?: string }): Promise<unknown>
 }
 
 /** Public deps for the todos module. */
@@ -82,7 +82,9 @@ export function startFeishuTodos(deps: FeishuTodosDeps): () => void {
     void channel.send(
       chat.chatId,
       { card },
-      chat.threadId !== undefined ? { replyInThread: true } : {},
+      chat.threadId !== undefined
+        ? { replyInThread: true, ...(chat.rootId !== undefined ? { replyTo: chat.rootId } : {}) }
+        : {},
     ).catch((error: unknown) => {
       logger.warn(`dsh-feishu: todo card send failed: ${error instanceof Error ? error.message : String(error)}`)
     })

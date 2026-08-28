@@ -43,7 +43,9 @@ export { ConfigSchema } from './config.ts'
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy'
 import { startFeishuQuestions } from './feishu-questions.ts'
-import { startFeishuModelSelect, renderCurrentModelCard } from './feishu-model-select.ts'
+import { startFeishuModelSelect, renderProviderSelectCard, sendModelCardV2, type ModelSelectChannel } from './feishu-model-select.ts'
+import { startFeishuOnboarding, type FeishuOnboardingHandle } from './feishu-onboarding.ts'
+import type { ChatCreationOptions } from './harness.ts'
 
 export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void> {
   console.log('dsh-feishu: apply() called, apiProxy=', ctx.get('apiProxy') !== undefined ? 'available' : 'UNDEFINED')
@@ -111,7 +113,8 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   let consumeLastStepHadContent: (sessionId: string) => boolean = () => false
   let flushed: (sessionId: string) => Promise<TurnStats | undefined> = () => Promise.resolve(undefined)
   let stopTodos: () => void = () => undefined
-  let stopModelSelect: () => void = () => undefined
+  let modelSelectHandle: { dispose: () => void; cardByMessage: Map<string, string>; sequenceByCard: Map<string, number> } | undefined = undefined
+  let onboardingHandle: FeishuOnboardingHandle | undefined = undefined
   const channelHolder: { current: LarkChannel | undefined } = { current: undefined }
   const buildApprovalControl = (apiProxy: ApiProxy): ApprovalControl => {
     const approvalsHandle = startFeishuApprovals({
@@ -144,6 +147,94 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       const ch = channelHolder.current
       if (ch === undefined) return Promise.reject(new Error('dsh-feishu: channel not connected'))
       return ch.send(to, input, opts) as Promise<{ messageId?: string }>
+    },
+    /**
+     * Create a Feishu card instance (cardkit.v1.card.create) and return its
+     * `card_id`. The instance can be referenced from messages and updated
+     * unlimited times via {@link updateCardInstance} — unlike
+     * {@link updateCard} (im.v1.message.patch) which caps at ~20 edits per
+     * message and silently disables the card's buttons afterwards.
+     */
+    createCardInstance: (card: object): Promise<string> => {
+      const ch = channelHolder.current
+      if (ch === undefined) return Promise.reject(new Error('dsh-feishu: channel not connected'))
+      return ch.rawClient.cardkit.v1.card.create({
+        data: { type: 'card_json', data: JSON.stringify(card) },
+      }).then((r: any) => {
+        const cardId = r.data?.card_id as string | undefined
+        if (cardId === undefined) throw new Error('dsh-feishu: cardkit.card.create returned no card_id')
+        return cardId
+      })
+    },
+    /**
+     * Send a message that references a card instance by `card_id` instead of
+     * embedding the card JSON. Used together with {@link createCardInstance}
+     * and {@link updateCardInstance} for the V2 card flow.
+     *
+     * When `replyTo` is set (a topic root message id), the message goes
+     * through `im.v1.message.reply` with `reply_in_thread` — the only SDK
+     * path that lands inside a Feishu topic. Without it, `message.create` is
+     * used (main-chat fallback).
+     */
+    sendCardByReference: (to: string, cardId: string, opts?: { replyInThread?: boolean; replyTo?: string }): Promise<{ messageId?: string }> => {
+      const ch = channelHolder.current
+      if (ch === undefined) return Promise.reject(new Error('dsh-feishu: channel not connected'))
+      const content = JSON.stringify({ type: 'card', data: { card_id: cardId } })
+      if (opts?.replyTo !== undefined && opts.replyTo !== '') {
+        return ch.rawClient.im.v1.message.reply({
+          path: { message_id: opts.replyTo },
+          data: {
+            content,
+            msg_type: 'interactive',
+            reply_in_thread: opts.replyInThread === true,
+          },
+        }).then((r: any) => {
+          const id = r.data?.message_id as string | undefined
+          return id === undefined ? {} : { messageId: id }
+        })
+      }
+      // Infer receive_id_type from the target id prefix (same logic as the
+      // SDK's detectReceiveIdType): oc_→chat_id, ou_→open_id, on_→union_id.
+      const receiveIdType = to.startsWith('oc_') ? 'chat_id'
+        : to.startsWith('ou_') ? 'open_id'
+        : to.startsWith('on_') ? 'union_id'
+        : to.includes('@') ? 'email' : 'user_id'
+      return ch.rawClient.im.v1.message.create({
+        params: { receive_id_type: receiveIdType },
+        data: {
+          receive_id: to,
+          msg_type: 'interactive',
+          // The SDK's `im.v1.message.create` expects `content` to be a JSON
+          // string. The content object follows the same format as the
+          // SDK's rawSend: { type: 'card', data: { card_id: cardId } }.
+          content,
+        },
+      }).then((r: any) => {
+        const id = r.data?.message_id as string | undefined
+        return id === undefined ? {} : { messageId: id }
+      })
+    },
+    /**
+     * Full-update a card instance (cardkit.v1.card.update). The message that
+     * references this card_id automatically reflects the new content — no
+     * im.v1.message.patch needed, so there is no 20-edit cap.
+     *
+     * `sequence` must be monotonically increasing per card instance.
+     */
+    updateCardInstance: (cardId: string, card: object, sequence: number): Promise<void> => {
+      const ch = channelHolder.current
+      if (ch === undefined) return Promise.reject(new Error('dsh-feishu: channel not connected'))
+      return ch.rawClient.cardkit.v1.card.update({
+        path: { card_id: cardId },
+        data: {
+          card: { type: 'card_json', data: JSON.stringify(card) },
+          sequence,
+        },
+      }).then((r: any) => {
+        if (r.code !== undefined && r.code !== 0) {
+          throw new Error(`dsh-feishu: cardkit.card.update failed: code=${r.code} msg=${r.msg ?? 'unknown'}`)
+        }
+      })
     },
     updateCard: (messageId: string, card: object): Promise<void> => {
       const ch = channelHolder.current
@@ -212,7 +303,9 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
           ctx.logger('dsh-feishu').info(`dsh-feishu: /stream toggle: ${current} → ${next}`)
           void settings.mutate(namespace, [{ op: 'set', path: ['showIntermediateMessages'], value: next }], currentRevision())
           return { enabled: next as boolean }
-        }, apiProxy, llm, defaultModel),
+        }, apiProxy, llm, defaultModel, cardChannel,
+        modelSelectHandle !== undefined ? { cardByMessage: modelSelectHandle.cardByMessage, sequenceByCard: modelSelectHandle.sequenceByCard } : undefined,
+        onboardingHandle, workspaceRegistry, agentPresets),
         attachments,
         async (coords) => {
           const meta = await bridge.getSessionMeta(coords as ConversationMessage)
@@ -228,6 +321,33 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         undefined,  // consumeReasoning (unused; bridge handles intermediate tracking)
         undefined,  // consumeLastStepHadContent (unused)
         flushed,
+        undefined,  // messageInterceptor (unused here)
+        onboardingHandle === undefined ? undefined : {
+          needsOnboarding: async (message) => {
+            const bridge = bridgeHolder.current
+            if (bridge === undefined) return false
+            const coords: ConversationMessage = {
+              chatId: message.chatId,
+              chatType: message.chatType,
+              ...message.threadId === undefined ? {} : { threadId: message.threadId },
+            }
+            return bridge.needsOnboarding(coords)
+          },
+          sendOnboardingCard: async (message) => {
+            const threadLabel = message.threadId === undefined ? '这个对话框' : '这个话题'
+            // Feishu topic replies must target the topic ROOT message; for the
+            // root message itself rootId is absent and the message is its own
+            // reply target (same rule as channel.ts's replyToId).
+            const replyToId = message.rootId ?? message.messageId
+            const coords: ConversationMessage = {
+              chatId: message.chatId,
+              chatType: message.chatType,
+              ...message.threadId === undefined ? {} : { threadId: message.threadId },
+              ...message.threadId === undefined ? {} : { rootId: replyToId },
+            }
+            await onboardingHandle?.sendOnboardingCard(coords, threadLabel)
+          },
+        },
       )
     },
   })
@@ -261,13 +381,62 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     consumeReasoning = streamingResult.consumeReasoning
     consumeLastStepHadContent = streamingResult.consumeLastStepHadContent
     flushed = streamingResult.flushed
-    stopModelSelect = startFeishuModelSelect({
+    modelSelectHandle = startFeishuModelSelect({
       llm,
       agentDefaultModel: defaultModel,
       bridgeHolder,
       apiProxy,
       channel: cardChannel,
       logger: ctx.logger('dsh-feishu'),
+      topicFor: chatId => onboardingHandle?.topicFor(chatId) ?? {},
+      onNewSessionConfirm: async (chatMessage, selection, messageId) => {
+        // The `/new` card flow's model step confirmed — create the session
+        // with the workspace/preset captured by the onboarding flow and the
+        // model chosen here.
+        const bridge = bridgeHolder.current
+        if (bridge === undefined) return
+        const flowOptions = onboardingHandle?.creationOptionsFor(chatMessage.chatId) ?? {}
+        await commitNewSession(bridge, cardChannel, chatMessage, {
+          ...(flowOptions.workspace !== undefined ? { workspace: flowOptions.workspace } : {}),
+          ...(flowOptions.agentPreset !== undefined ? { agentPreset: flowOptions.agentPreset } : {}),
+          provider: selection.provider,
+          model: selection.model,
+          ...(selection.reasoningEffort !== undefined ? { reasoningEffort: selection.reasoningEffort as never } : {}),
+        }, messageId, onboardingHandle?.topicFor(chatMessage.chatId))
+      },
+    })
+    onboardingHandle = startFeishuOnboarding({
+      bridgeHolder,
+      channel: cardChannel,
+      logger: ctx.logger('dsh-feishu'),
+      workspaceRegistry,
+      agentPresets,
+      agentDefaultModel: defaultModel,
+      config: {
+        workspace: currentSettings().workspace,
+        agentPreset: currentSettings().agentPreset,
+        provider: currentSettings().provider,
+        model: currentSettings().model,
+      },
+      onModelStep: async (chatMessage, messageId, flowState) => {
+        // Advance the `/new` flow to the model card, reusing the
+        // model-select provider card with the `new-session` flow marker.
+        const bridge = bridgeHolder.current
+        if (bridge === undefined || modelSelectHandle === undefined) return
+        const current = bridge.currentSelectionFor(chatMessage) ?? defaultModel.currentSelection()
+        const card = renderProviderSelectCard(llm.listProviders(), current, 'new-session')
+        const cardId = await cardChannel.createCardInstance(card)
+        const topic = onboardingHandle?.topicFor(chatMessage.chatId) ?? {}
+        const opts = topic.threadId !== undefined && topic.rootId !== undefined
+          ? { replyInThread: true, replyTo: topic.rootId }
+          : {}
+        const result = await cardChannel.sendCardByReference(chatMessage.chatId, cardId, opts)
+        const sentId = result.messageId ?? ''
+        if (sentId !== '') {
+          modelSelectHandle.cardByMessage.set(sentId, cardId)
+          modelSelectHandle.sequenceByCard.set(cardId, 0)
+        }
+      },
     })
   }
   registerLarkCommands(
@@ -278,7 +447,9 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       setCurrentSelection: (chatMessage, next) => bridgeHolder.current?.setCurrentSelection(chatMessage, next),
       currentSelectionFor: chatMessage => bridgeHolder.current?.currentSelectionFor(chatMessage),
       startNewSession: (chatMessage, salt) => bridgeHolder.current?.startNewSession(chatMessage, salt) ?? '',
-      switchToSession: (chatMessage, sessionId) => bridgeHolder.current?.switchToSession(chatMessage, sessionId) ?? false,
+      switchToSession: (chatMessage, sessionId) => bridgeHolder.current?.switchToSession(chatMessage, sessionId) ?? 'archived',
+      detachSession: sessionId => bridgeHolder.current?.detachSession(sessionId) ?? { kind: 'free' as const },
+      describeChatKey: key => bridgeHolder.current?.describeChatKey(key) ?? key,
       listSessions: async () => bridgeHolder.current?.listSessions() ?? [],
       getSessionMeta: async (chatMessage) => bridgeHolder.current?.getSessionMeta(chatMessage) ?? { sessionId: '', workspace: '', agentPreset: '', model: '', reasoningEffort: '', title: '', turns: 0, steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, contextWindow: 0, lastInputTokens: 0, cacheHitRate: 0, ttftAvgMs: 0, tokensPerSecond: 0, llmDurationMs: 0, toolDurationMs: 0 },
       resolveAgent: async (chatMessage) => bridgeHolder.current?.resolveAgent(chatMessage),
@@ -314,7 +485,8 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     stopApprovals()
     stopTodos()
     stopStreaming()
-  }, 'dsh-feishu: feishu questions + approvals + todos + streaming listeners')
+    modelSelectHandle?.dispose()
+  }, 'dsh-feishu: feishu questions + approvals + todos + streaming + model-select listeners')
 
   let lastPrintedQrUrl: string | undefined
   const provisionManager = new ProvisionManager({
@@ -413,17 +585,25 @@ const larkCommandTranslations: CommandTranslations = {
   modelUnknown: route => `Unknown model route "${route}".`,
   modelPersisted: 'The change is persisted; the next message in this chat will use it.',
   modelLiveApplied: 'The change applies to this chat immediately on the next message.',
-  newDescription: 'Start a fresh conversation in this chat',
+  newDescription: 'Create a new session in this chat (card flow, or /new <workspace> <preset> [model])',
+  newUsage: 'Usage: /new <workspace> <agentPreset> [provider/model[:reasoning]] — or run `/new` with no arguments for the card flow.',
   newSessionReady: sessionId => `Started a new conversation. Next message uses session \`${sessionId}\`.`,
   threadDescription: 'List persisted sessions or switch the chat to one by index',
   threadUsage: 'Usage: /thread [N]',
   threadListHeader: 'Available sessions (reply with `/thread N` to switch):',
   threadListEmpty: 'No persisted sessions yet.',
   threadListEntry: (index, id, title, lastActive) => `${index}. ${title} — ${lastActive} (\`${id}\`)`,
+  threadListEntryOwned: (index, id, title, lastActive, ownerLabel) => `${index}. ${title} — ${lastActive} — 🔒 ${ownerLabel} 正在使用 (\`${id}\`)`,
   threadSwitched: (index, id) => `Switched to session #${index} (\`${id}\`).`,
   threadInvalidIndex: 'Invalid session index.',
   threadArchived: 'That session is archived — unarchive it from the workspace webui first.',
+  threadOccupied: ownerLabel => `That session is already in use by ${ownerLabel}. Pick a free session, or run \`/detach\` on it to force-release it.`,
   threadIdle: id => `(idle: ${id.slice(-12)})`,
+  detachDescription: 'Force-release a session so any dialog can switch to it',
+  detachUsage: 'Usage: /detach <N>',
+  detachInvalidIndex: 'Invalid session index.',
+  detachFree: 'That session is already free — no dialog owns it.',
+  detachReleased: (index, id, ownerLabel) => `🔓 Released session #${index} (\`${id}\`). ${ownerLabel} was reset to a brand-new session and can no longer hold it.`,
   threadLastActiveJustNow: 'just now',
   threadLastActiveMinutesAgo: n => `${n}m ago`,
   threadLastActiveHoursAgo: n => `${n}h ago`,
@@ -561,7 +741,10 @@ async function handleThreadDirect(
     sessions.forEach((entry, index) => {
       const title = entry.title === '' ? t.threadIdle(entry.id) : entry.title.replace(/\s+/g, ' ').slice(0, 60)
       const lastActive = formatRelativeTime(entry.updatedAt, t)
-      lines.push(t.threadListEntry(index + 1, entry.id, title, lastActive))
+      const ownerLabel = entry.ownedBy === undefined ? undefined : bridge.describeChatKey(entry.ownedBy)
+      lines.push(ownerLabel === undefined
+        ? t.threadListEntry(index + 1, entry.id, title, lastActive)
+        : t.threadListEntryOwned(index + 1, entry.id, title, lastActive, ownerLabel))
     })
     lines.push(t.threadUsage)
     return { kind: 'success', text: lines.join('\n') }
@@ -575,10 +758,97 @@ async function handleThreadDirect(
   if (entry === undefined) {
     return { kind: 'error', text: `${t.threadInvalidIndex}\n${t.threadUsage}` }
   }
-  if (!bridge.switchToSession(chatMessage, entry.id)) {
+  const result = bridge.switchToSession(chatMessage, entry.id)
+  if (result === 'archived') {
     return { kind: 'error', text: t.threadArchived }
   }
+  if (result === 'occupied') {
+    const ownerLabel = entry.ownedBy === undefined ? '另一个对话框' : bridge.describeChatKey(entry.ownedBy)
+    return { kind: 'error', text: t.threadOccupied(ownerLabel) }
+  }
   return { kind: 'success', text: t.threadSwitched(index, entry.id) }
+}
+
+/** Handle /detach directly: force-release a session so any dialog can switch to it. */
+async function handleDetachDirect(
+  rawInput: string,
+  bridge: HarnessConversationService,
+): Promise<{ kind: 'success' | 'error'; text: string }> {
+  const t = larkCommandTranslations
+  const index = Number.parseInt(rawInput.trim(), 10)
+  if (!Number.isInteger(index) || index < 1) {
+    return { kind: 'error', text: `${t.detachInvalidIndex}\n${t.detachUsage}` }
+  }
+  const sessions = await bridge.listSessions()
+  const entry = sessions[index - 1]
+  if (entry === undefined) {
+    return { kind: 'error', text: `${t.detachInvalidIndex}\n${t.detachUsage}` }
+  }
+  const outcome = bridge.detachSession(entry.id)
+  if (outcome.kind === 'free') {
+    return { kind: 'success', text: t.detachFree }
+  }
+  return { kind: 'success', text: t.detachReleased(index, entry.id, outcome.ownerLabel) }
+}
+
+/** Parse `provider/model` or `provider/model:reasoning-effort` for the
+ *  optional model argument of the `/new` text command. */
+function parseNewModelRoute(rawInput: string): { provider: string; model: string; reasoningEffort?: string } | undefined {
+  const trimmed = rawInput.trim()
+  if (trimmed === '') return undefined
+  const segments = trimmed.split('/')
+  if (segments.length !== 2) return undefined
+  const provider = segments[0]?.trim() ?? ''
+  const modelSegment = segments[1]?.trim() ?? ''
+  if (provider === '' || modelSegment === '') return undefined
+  const modelParts = modelSegment.split(':')
+  const model = modelParts[0]?.trim() ?? ''
+  const reasoningEffort = modelParts[1]?.trim()
+  if (model === '') return undefined
+  return reasoningEffort === undefined || reasoningEffort === ''
+    ? { provider, model }
+    : { provider, model, reasoningEffort }
+}
+
+/** Create a fresh session for a chat with explicit creation options, and
+ *  render the confirmation card. Shared by the `/new` card flow (model step
+ *  confirmed) and the `/new <workspace> <preset> [model]` text command. */
+async function commitNewSession(
+  bridge: HarnessConversationService,
+  cardChannel: ModelSelectChannel,
+  chatMessage: ConversationMessage,
+  options: ChatCreationOptions,
+  messageId?: string,
+  topic?: { rootId?: string; threadId?: string },
+): Promise<{ messageId?: string }> {
+  const salt = `new-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  const sessionId = bridge.startNewSession(chatMessage, salt, options)
+  const parts: string[] = []
+  if (options.workspace !== undefined) parts.push(`📁 \`${options.workspace}\``)
+  if (options.agentPreset !== undefined) parts.push(`🧩 \`${options.agentPreset}\``)
+  if (options.provider !== undefined && options.model !== undefined) {
+    parts.push(`🤖 \`${options.provider}/${options.model}\``)
+  }
+  const summary = parts.length > 0 ? parts.join(' · ') : '使用默认设置'
+  const card = {
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    header: { title: { tag: 'plain_text', content: '✅ 会话已创建' }, template: 'green' },
+    body: {
+      elements: [
+        { tag: 'markdown', content: `**Session** \`${sessionId}\`\n\n${summary}\n\n现在可以发送消息开始对话了。` },
+      ],
+    },
+  }
+  const opts = topic?.threadId !== undefined && topic.rootId !== undefined
+    ? { replyInThread: true, replyTo: topic.rootId }
+    : {}
+  if (messageId === undefined) {
+    const cardId = await cardChannel.createCardInstance(card)
+    return cardChannel.sendCardByReference(chatMessage.chatId, cardId, opts)
+  }
+  await cardChannel.updateCard(messageId, card)
+  return {}
 }
 
 /**
@@ -596,13 +866,31 @@ async function executeSlashCommand(
   apiProxy?: ApiProxy,
   llm?: LlmRuntime,
   agentDefaultModel?: AgentDefaultModelConfig,
-): Promise<{ kind: 'success' | 'error'; text: string; card?: object } | undefined> {
+  cardChannel?: ModelSelectChannel,
+  modelSelectMaps?: { cardByMessage: Map<string, string>; sequenceByCard: Map<string, number> },
+  onboardingHandle?: FeishuOnboardingHandle,
+  workspaceRegistry?: { list(): { path: string; name?: string }[] },
+  agentPresets?: { list(): Promise<Array<{ id: string; title?: string }>> },
+): Promise<
+  | { kind: 'success' | 'error'; text: string; card?: object }
+  | { kind: 'consumed' }
+  | undefined
+> {
   const parsed = parseCommand(message.content)
   if (parsed === undefined) return undefined
   const chatMessage = {
     chatId: message.chatId,
     chatType: message.chatType,
     ...message.threadId === undefined ? {} : { threadId: message.threadId },
+    // Topic root id (fallback: the message itself is the root) so cards sent
+    // from slash commands land inside the topic and `recordTopic` captures it.
+    ...message.threadId === undefined ? {} : { rootId: message.rootId ?? message.messageId },
+  }
+  // Record topic context so later card actions (model selector, onboarding)
+  // can recover the thread key even though card action events carry no
+  // thread id.
+  if (message.threadId !== undefined) {
+    onboardingHandle?.noteTopic(chatMessage)
   }
   // /status, /new, /thread are handled directly — they don't need a live agent.
   if (parsed.name === 'status') {
@@ -611,12 +899,80 @@ async function executeSlashCommand(
     return { kind: 'success', text: '', card: renderStatusCard(meta, agentRunning) }
   }
   if (parsed.name === 'new') {
-    const salt = `new-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-    const sessionId = bridge.startNewSession(chatMessage, salt)
-    return { kind: 'success', text: larkCommandTranslations.newSessionReady(sessionId) }
+    const args = parsed.rawInput.trim().split(/\s+/).filter(s => s !== '')
+    if (args.length === 0) {
+      // Card flow: workspace → preset → model → create. Consumed so the
+      // channel does not send a text follow-up.
+      if (onboardingHandle === undefined) {
+        return { kind: 'error', text: '⚠️ 新建会话卡片不可用。' }
+      }
+      await onboardingHandle.startNewFlow(chatMessage)
+      return { kind: 'consumed' }
+    }
+    // Text form: /new <workspace> <agentPreset> [provider/model[:reasoning]]
+    if (args.length < 2) {
+      return { kind: 'error', text: larkCommandTranslations.newUsage }
+    }
+    const [workspaceArg, presetArg, modelArg] = args
+    if (workspaceArg === undefined || presetArg === undefined) {
+      return { kind: 'error', text: larkCommandTranslations.newUsage }
+    }
+    // Validate workspace exists
+    if (workspaceRegistry === undefined) {
+      return { kind: 'error', text: '⚠️ 工作区服务不可用。' }
+    }
+    const workspaces = workspaceRegistry.list()
+    const workspace = workspaces.find(w => w.path === workspaceArg || w.name === workspaceArg)
+    if (workspace === undefined) {
+      const names = workspaces.map(w => w.name !== undefined && w.name !== '' ? w.name : w.path).join('`, `')
+      return { kind: 'error', text: `⚠️ 未知工作区 \`${workspaceArg}\`。可用：\`${names}\`` }
+    }
+    // Validate preset exists
+    if (agentPresets === undefined) {
+      return { kind: 'error', text: '⚠️ Agent 模板服务不可用。' }
+    }
+    const presets = await agentPresets.list()
+    if (!presets.some(p => p.id === presetArg)) {
+      const ids = presets.map(p => p.id).join('`, `')
+      return { kind: 'error', text: `⚠️ 未知 Agent 模板 \`${presetArg}\`。可用：\`${ids}\`` }
+    }
+    // Optional model route: provider/model[:reasoning]
+    let modelOptions: ChatCreationOptions = {}
+    if (modelArg !== undefined && modelArg !== '') {
+      const route = parseNewModelRoute(modelArg)
+      if (route === undefined) {
+        return { kind: 'error', text: `⚠️ 无法解析模型参数 \`${modelArg}\`，格式：\`provider/model\` 或 \`provider/model:reasoning\`` }
+      }
+      modelOptions = {
+        provider: route.provider,
+        model: route.model,
+        ...(route.reasoningEffort !== undefined ? { reasoningEffort: route.reasoningEffort as never } : {}),
+      }
+    }
+    const options: ChatCreationOptions = {
+      workspace: workspace.path,
+      agentPreset: presetArg,
+      ...(modelOptions.provider !== undefined ? { provider: modelOptions.provider } : {}),
+      ...(modelOptions.model !== undefined ? { model: modelOptions.model } : {}),
+      ...(modelOptions.reasoningEffort !== undefined ? { reasoningEffort: modelOptions.reasoningEffort } : {}),
+    }
+    if (options.agentPreset === undefined) {
+      return { kind: 'error', text: larkCommandTranslations.newUsage }
+    }
+    if (cardChannel === undefined) {
+      return { kind: 'error', text: '⚠️ 卡片通道不可用。' }
+    }
+    await commitNewSession(bridge, cardChannel, chatMessage, options, undefined, {
+      ...(message.threadId === undefined ? {} : { threadId: message.threadId }),
+      ...(message.threadId === undefined ? {} : { rootId: message.rootId ?? message.messageId }),
+    })
+    return { kind: 'consumed' }
   }
   if (parsed.name === 'thread') {
     return await handleThreadDirect(parsed.rawInput.trim(), bridge, chatMessage)
+  }
+  if (parsed.name === 'detach') {
+    return await handleDetachDirect(parsed.rawInput.trim(), bridge)
   }
   if (parsed.name === 'stream') {
     if (toggleStream === undefined) {
@@ -661,20 +1017,46 @@ async function executeSlashCommand(
       return { kind: 'error', text: `⚠️ 停止失败: ${msg}` }
     }
   }
-  // /model with no arguments renders the model selector card instead of
-  // falling through to commands.execute. The card's buttons drive the
-  // feishu-model-select flow; `/model provider/model` and `/model list`
-  // still go through commands.execute as before.
+  // /model with no arguments renders the model selector card (V2 card
+  // instance) instead of falling through to commands.execute. The card's
+  // dropdowns drive the feishu-model-select flow; `/model provider/model`
+  // and `/model list` still go through commands.execute as before.
   if (parsed.name === 'model' && parsed.rawInput.trim() === '') {
     if (agentDefaultModel === undefined) {
       return { kind: 'error', text: '⚠️ Agent default model service is not available.' }
     }
+    if (llm === undefined) {
+      return { kind: 'error', text: '⚠️ LLM service is not available.' }
+    }
+    if (cardChannel === undefined || modelSelectMaps === undefined) {
+      // Fallback: return the card in the old format (embedded JSON).
+      const current = agentDefaultModel.currentSelection()
+      const providers = llm.listProviders()
+      return { kind: 'success', text: '', card: renderProviderSelectCard(providers, {
+        provider: current.provider,
+        model: current.model,
+        ...(current.reasoningEffort !== undefined ? { reasoningEffort: String(current.reasoningEffort) } : {}),
+      }) }
+    }
+    // V2 flow: create card instance + send by card_id reference.
     const current = agentDefaultModel.currentSelection()
-    return { kind: 'success', text: '', card: renderCurrentModelCard({
+    const providers = llm.listProviders()
+    const card = renderProviderSelectCard(providers, {
       provider: current.provider,
       model: current.model,
       ...(current.reasoningEffort !== undefined ? { reasoningEffort: String(current.reasoningEffort) } : {}),
-    }) }
+    })
+    try {
+      await sendModelCardV2(cardChannel, chatMessage, card, modelSelectMaps.cardByMessage, modelSelectMaps.sequenceByCard)
+      // V2 card was sent directly via cardkit. Signal "consumed" so channel.ts
+      // sends no follow-up message AND does not fall through into the agent
+      // loop (returning `undefined` would treat `/model` as a regular message).
+      return { kind: 'consumed' }
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error)
+      // Fallback: send as embedded card (old format).
+      return { kind: 'success', text: '', card }
+    }
   }
   // Stash the chat coordinates so the registered handler can find them
   // without holding per-invocation state on the agent. The bridge serializes

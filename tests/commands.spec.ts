@@ -15,15 +15,23 @@ const translations: CommandTranslations = {
   modelPersisted: 'persisted',
   modelLiveApplied: 'live applied',
   newDescription: 'new desc',
+  newUsage: 'Usage: /new <workspace> <preset> [model]',
   newSessionReady: sessionId => `ready ${sessionId}`,
   threadDescription: 'thread desc',
   threadUsage: 'Usage: /thread [N]',
   threadListHeader: 'sessions:',
   threadListEmpty: 'empty',
   threadListEntry: (index, id, title, lastActive) => `${index}. ${title} - ${lastActive} (${id})`,
+  threadListEntryOwned: (index, id, title, lastActive, ownerLabel) => `${index}. ${title} - ${lastActive} - LOCK ${ownerLabel} (${id})`,
   threadSwitched: (index, id) => `switched ${index} ${id}`,
   threadInvalidIndex: 'invalid',
   threadArchived: 'archived',
+  threadOccupied: ownerLabel => `occupied by ${ownerLabel}`,
+  detachDescription: 'detach desc',
+  detachUsage: 'Usage: /detach [N]',
+  detachInvalidIndex: 'invalid detach index',
+  detachFree: 'already free',
+  detachReleased: (index, id, ownerLabel) => `released ${index} ${id} from ${ownerLabel}`,
   threadIdle: (id: string) => `(idle:${id})`,
   threadLastActiveJustNow: 'just now',
   threadLastActiveMinutesAgo: n => `${n}m ago`,
@@ -119,12 +127,14 @@ function fakeBridge(overrides?: {
   setCurrentSelection?: ReturnType<typeof vi.fn>
   startNewSession?: ReturnType<typeof vi.fn>
   switchToSession?: ReturnType<typeof vi.fn>
+  detachSession?: ReturnType<typeof vi.fn>
   listSessions?: ReturnType<typeof vi.fn>
   getSessionMeta?: ReturnType<typeof vi.fn>
 }) {
   const setCurrentSelection = overrides?.setCurrentSelection ?? vi.fn(() => undefined)
   const startNewSession = overrides?.startNewSession ?? vi.fn(() => 'new-session-id')
-  const switchToSession = overrides?.switchToSession ?? vi.fn(() => true)
+  const switchToSession = overrides?.switchToSession ?? vi.fn(() => 'ok' as const)
+  const detachSession = overrides?.detachSession ?? vi.fn(() => ({ kind: 'released' as const, ownerLabel: 'main' }))
   const listSessions = overrides?.listSessions ?? vi.fn(async () => [])
   const getSessionMeta = overrides?.getSessionMeta ?? vi.fn(async () => ({ sessionId: 'test-session', workspace: '/test/ws', agentPreset: 'default', model: 'openai/gpt-4o', title: 'Test Session', turns: 5, steps: 8, toolCalls: 3, inputTokens: 1200, outputTokens: 450, contextWindow: 128000, lastInputTokens: 800 }))
   return {
@@ -133,14 +143,17 @@ function fakeBridge(overrides?: {
       currentSelectionFor: vi.fn(() => undefined),
       startNewSession,
       switchToSession,
+      detachSession,
       listSessions,
       getSessionMeta,
       resolveAgent: vi.fn(async () => undefined),
       resolveSessionIdFor: vi.fn(() => 'test-session'),
+      describeChatKey: (key: string) => (key.startsWith('thread:') ? `topic:${key.slice(7, 15)}` : 'main'),
     },
     setCurrentSelection,
     startNewSession,
     switchToSession,
+    detachSession,
     listSessions,
     getSessionMeta,
     chatMessageFor: () => ({ chatId: 'oc_1', chatType: 'p2p' as const }),
@@ -188,7 +201,7 @@ describe('registerLarkCommands', () => {
   it('registers the /model, /new, /thread, and /help commands on the registry', () => {
     const fake = fakeContext()
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning)
-    expect(fake.registered.map(item => item.name)).toEqual(['model', 'new', 'thread', 'help', 'approve', 'deny', 'approvals', 'status', 'stream', 'reasoning'])
+    expect(fake.registered.map(item => item.name)).toEqual(['model', 'new', 'thread', 'detach', 'help', 'approve', 'deny', 'approvals', 'status', 'stream', 'reasoning'])
     fake.dispose()
   })
 })
@@ -298,15 +311,17 @@ describe('/model command', () => {
 })
 
 describe('/new command', () => {
-  it('starts a new session for the current chat', async () => {
+  it('requires workspace and preset arguments in the command-runtime fallback', async () => {
     const fake = fakeContext()
     const startNewSession = vi.fn(() => 'new-session-id')
     const { bridge, chatMessageFor } = fakeBridge({ startNewSession })
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning)
     const handler = fake.registered.find(item => item.name === 'new')!.handler
-    const result = await handler(fakeInvocation(''))
-    expect(startNewSession).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_1' }), expect.any(String))
-    expect(result).toEqual({ kind: 'success', text: 'ready new-session-id' })
+    const noArgs = await handler(fakeInvocation(''))
+    expect(noArgs).toEqual({ kind: 'error', text: 'Usage: /new <workspace> <preset> [model]' })
+    const oneArg = await handler(fakeInvocation('ws-1'))
+    expect(oneArg).toEqual({ kind: 'error', text: 'Usage: /new <workspace> <preset> [model]' })
+    expect(startNewSession).not.toHaveBeenCalled()
   })
 })
 
@@ -395,7 +410,7 @@ describe('/thread command', () => {
       { id: 'session-A', updatedAt: 2, title: 'first' },
       { id: 'session-B', updatedAt: 5, title: 'second' },
     ]
-    const switchToSession = vi.fn(() => true)
+    const switchToSession = vi.fn(() => 'ok' as const)
     const { bridge, chatMessageFor } = fakeBridge({ listSessions: vi.fn(async () => sessions), switchToSession })
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning)
     const handler = fake.registered.find(item => item.name === 'thread')!.handler
@@ -406,7 +421,7 @@ describe('/thread command', () => {
 
   it('reports the bridge rejection when the target session is archived', async () => {
     const fake = fakeContext()
-    const switchToSession = vi.fn(() => false)
+    const switchToSession = vi.fn(() => 'archived' as const)
     const { bridge, chatMessageFor } = fakeBridge({
       listSessions: vi.fn(async () => [{ id: 'session-A', updatedAt: 1, title: 'a' }]),
       switchToSession,
@@ -418,9 +433,46 @@ describe('/thread command', () => {
     expect(result).toEqual({ kind: 'error', text: 'archived' })
   })
 
+  it('reports when the target session is occupied by another dialog', async () => {
+    const fake = fakeContext()
+    const switchToSession = vi.fn(() => 'occupied' as const)
+    const { bridge, chatMessageFor } = fakeBridge({
+      listSessions: vi.fn(async () => [{ id: 'session-A', updatedAt: 1, title: 'a', ownedBy: 'thread:oc_9:t_123' }]),
+      switchToSession,
+    })
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning)
+    const handler = fake.registered.find(item => item.name === 'thread')!.handler
+    const result = await handler(fakeInvocation('1'))
+    expect(switchToSession).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_1' }), 'session-A')
+    expect(result).toEqual({ kind: 'error', text: 'occupied by topic:oc_9:t_1' })
+  })
+
+  it('marks owned sessions in the /thread listing', async () => {
+    const fake = fakeContext()
+    const now = Date.now()
+    const { bridge, chatMessageFor } = fakeBridge({
+      listSessions: vi.fn(async () => [
+        { id: 'session-A', updatedAt: now, title: 'mine' },
+        { id: 'session-B', updatedAt: now, title: 'theirs', ownedBy: 'thread:oc_9:t_123' },
+      ]),
+    })
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning)
+    const handler = fake.registered.find(item => item.name === 'thread')!.handler
+    const result = await handler(fakeInvocation(''))
+    expect(result).toEqual({
+      kind: 'success',
+      text: [
+        'sessions:',
+        '1. mine - just now (session-A)',
+        '2. theirs - just now - LOCK topic:oc_9:t_1 (session-B)',
+        'Usage: /thread [N]',
+      ].join('\n'),
+    })
+  })
+
   it('rejects an out-of-range index', async () => {
     const fake = fakeContext()
-    const switchToSession = vi.fn(() => true)
+    const switchToSession = vi.fn(() => 'ok' as const)
     const { bridge, chatMessageFor } = fakeBridge({
       listSessions: vi.fn(async () => [{ id: 'session-A', updatedAt: 1, title: 'a' }]),
       switchToSession,
@@ -434,7 +486,7 @@ describe('/thread command', () => {
 
   it('rejects a non-numeric argument', async () => {
     const fake = fakeContext()
-    const switchToSession = vi.fn(() => true)
+    const switchToSession = vi.fn(() => 'ok' as const)
     const { bridge, chatMessageFor } = fakeBridge({
       listSessions: vi.fn(async () => [{ id: 'session-A', updatedAt: 1, title: 'a' }]),
       switchToSession,
@@ -444,6 +496,50 @@ describe('/thread command', () => {
     const result = await handler(fakeInvocation('abc'))
     expect(result).toMatchObject({ kind: 'error' })
     expect(switchToSession).not.toHaveBeenCalled()
+  })
+})
+
+describe('/detach command', () => {
+  it('releases an owned session by index', async () => {
+    const fake = fakeContext()
+    const detachSession = vi.fn(() => ({ kind: 'released' as const, ownerLabel: 'topic:oc_9:t_1' }))
+    const { bridge, chatMessageFor } = fakeBridge({
+      listSessions: vi.fn(async () => [{ id: 'session-A', updatedAt: 1, title: 'a', ownedBy: 'thread:oc_9:t_123' }]),
+      detachSession,
+    })
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning)
+    const handler = fake.registered.find(item => item.name === 'detach')!.handler
+    const result = await handler(fakeInvocation('1'))
+    expect(detachSession).toHaveBeenCalledWith('session-A')
+    expect(result).toEqual({ kind: 'success', text: 'released 1 session-A from topic:oc_9:t_1' })
+  })
+
+  it('reports when the target session is already free', async () => {
+    const fake = fakeContext()
+    const detachSession = vi.fn(() => ({ kind: 'free' as const }))
+    const { bridge, chatMessageFor } = fakeBridge({
+      listSessions: vi.fn(async () => [{ id: 'session-A', updatedAt: 1, title: 'a' }]),
+      detachSession,
+    })
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning)
+    const handler = fake.registered.find(item => item.name === 'detach')!.handler
+    const result = await handler(fakeInvocation('1'))
+    expect(detachSession).toHaveBeenCalledWith('session-A')
+    expect(result).toEqual({ kind: 'success', text: 'already free' })
+  })
+
+  it('rejects an out-of-range index', async () => {
+    const fake = fakeContext()
+    const detachSession = vi.fn()
+    const { bridge, chatMessageFor } = fakeBridge({
+      listSessions: vi.fn(async () => [{ id: 'session-A', updatedAt: 1, title: 'a' }]),
+      detachSession,
+    })
+    registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning)
+    const handler = fake.registered.find(item => item.name === 'detach')!.handler
+    const result = await handler(fakeInvocation('9'))
+    expect(result).toMatchObject({ kind: 'error' })
+    expect(detachSession).not.toHaveBeenCalled()
   })
 })
 

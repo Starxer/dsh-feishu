@@ -63,7 +63,7 @@ interface PendingApproval {
  * not strand live approvals.
  */
 export interface FeishuApprovalsChannel {
-  send(to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<{ messageId?: string }>
+  send(to: string, input: { card: object }, opts?: { replyInThread?: boolean; replyTo?: string }): Promise<{ messageId?: string }>
   updateCard(messageId: string, card: object): Promise<void>
   onCardAction(handler: (evt: CardActionLike) => void | Promise<void>): () => void
 }
@@ -208,7 +208,9 @@ export function startFeishuApprovals(deps: FeishuApprovalsDeps): {
         pending.set(entry.rpcId, entry)
         const card = renderApprovalCard(entry)
         try {
-          const result = await channel.send(chat.chatId, { card }, chat.threadId !== undefined ? { replyInThread: true } : {})
+          const result = await channel.send(chat.chatId, { card }, chat.threadId !== undefined
+            ? { replyInThread: true, ...(chat.rootId !== undefined ? { replyTo: chat.rootId } : {}) }
+            : {})
           const mid = (result as { messageId?: string })?.messageId
           if (mid !== undefined) entry.cardMessageId = mid
         } catch (error: unknown) {

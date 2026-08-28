@@ -1,12 +1,11 @@
 /**
- * Feishu card-based model selector. Renders an interactive Card JSON 2.0
- * flow — current model → provider list → model list → confirmation — so users
- * can browse and switch models without memorising `provider/model` syntax.
+ * Feishu card-based model selector. Two-step flow:
+ *   1. Provider selection — pick a provider from a dropdown.
+ *   2. Model selection — pick a model from a dropdown, click "确认" to apply.
  *
- * The cardAction callback is registered globally on the channel; button
- * `value` payloads encode the next step so the handler is stateless. Each
- * navigation step sends a fresh card message (not updateCard) to avoid
- * Feishu's per-card patch limit.
+ * The model dropdown and confirm button are inside a form container so that
+ * selecting a model does NOT trigger any callback — only clicking "确认"
+ * submits the form and applies the switch.
  *
  * @module @starxer/dsh-feishu/feishu-model-select
  */
@@ -30,30 +29,34 @@ interface BridgeHolder {
 }
 
 /** Subset of the cardAction event the selector consumes. */
-interface CardActionLike {
+export interface CardActionLike {
   messageId?: string
   chatId?: string
   operator?: { openId?: string }
   action?: { value?: unknown; tag?: string; option?: string }
-  /** Raw event from Feishu (available when includeRawEvent is true). */
-  raw?: { action?: { value?: unknown; tag?: string; option?: string } }
+  raw?: { action?: { value?: unknown; tag?: string; option?: string; form_value?: Record<string, unknown> } }
 }
 
-/** Channel adapter — same surface as feishu-questions.ts. */
+/** Channel adapter — same surface as feishu-questions.ts plus the V2 card
+ *  instance methods used by the model selector. */
 export interface ModelSelectChannel {
   send(to: string, input: { card: object } | { text: string }, opts?: { replyInThread?: boolean }): Promise<{ messageId?: string }>
   updateCard(messageId: string, card: object): Promise<void>
   recallMessage(messageId: string): Promise<void>
   onCardAction(handler: (evt: CardActionLike) => void | Promise<void>): () => void
+  createCardInstance(card: object): Promise<string>
+  sendCardByReference(to: string, cardId: string, opts?: { replyInThread?: boolean; replyTo?: string }): Promise<{ messageId?: string }>
+  updateCardInstance(cardId: string, card: object, sequence: number): Promise<void>
 }
 
-/** Narrow llm directory view — matches the one in commands.ts. */
+/** Narrow llm directory view. */
 interface LlmDirectoryLike {
   listProviders(): readonly LlmProviderInfo[]
   listModels(provider: string): Promise<readonly LlmModelInfo[]>
+  resolveModelInfo(provider: string, model: string): Promise<{ reasoning?: { efforts: readonly { id: string }[]; defaultEffort?: string } | undefined }>
 }
 
-/** Narrow apiProxy view — matches the one in commands.ts. */
+/** Narrow apiProxy view. */
 interface ApiProxyLike {
   sessions: {
     selectModel(request: { rpcId?: string; payload: { sessionId: string; provider: string; model: string; reasoningEffort?: string } }): Promise<unknown>
@@ -67,10 +70,12 @@ interface ModelSelection {
   reasoningEffort?: string
 }
 
-/** A queued card action with the context needed to execute it. */
+/** A queued card action. */
 interface QueuedAction {
   action: ModelCardAction
+  flow?: ModelCardFlow
   chatMessage: ConversationMessage
+  messageId: string | undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -78,48 +83,79 @@ interface QueuedAction {
 // ---------------------------------------------------------------------------
 
 type ModelCardAction =
-  | { type: 'browse-providers'; page?: number }
-  | { type: 'browse-models'; provider: string; page?: number }
-  | { type: 'select'; provider: string; model: string }
+  | { type: 'enter-select' }
+  | { type: 'select-provider'; provider: string }
+  | { type: 'go-back' }
+  | { type: 'confirm-select'; provider: string; model: string; reasoningEffort?: string }
 
-const PROVIDERS_PER_PAGE = 6
-const MODELS_PER_PAGE = 8
+/** Flow marker embedded in card action values. `undefined` = the standalone
+ *  `/model` switch flow; `'new-session'` = the `/new` card flow reusing the
+ *  same provider/model cards but committing to session creation instead. */
+export type ModelCardFlow = 'new-session' | undefined
 
 // ---------------------------------------------------------------------------
-// Card rendering
+// Card rendering — two-step dropdown flow
 // ---------------------------------------------------------------------------
 
-/** Build the "current model" card with a single "browse" button. */
-export function renderCurrentModelCard(current: ModelSelection): object {
+const REASONING_EFFORT_OPTIONS = [
+  { label: 'default（不指定）', value: 'default' },
+  { label: 'off（关闭思考）', value: 'off' },
+  { label: 'low（轻度思考）', value: 'low' },
+  { label: 'high（深度思考）', value: 'high' },
+  { label: 'max（最大思考）', value: 'max' },
+]
+
+function buildProviderOptions(providers: readonly LlmProviderInfo[]): object[] {
+  return providers.map(p => ({
+    text: { tag: 'plain_text', content: p.name !== '' ? `${p.name} (${p.id})` : p.id },
+    value: p.id,
+  }))
+}
+
+function buildModelOptions(models: readonly LlmModelInfo[]): object[] {
+  return models.map(m => ({
+    text: { tag: 'plain_text', content: m.name !== '' && m.name !== m.id ? `${m.name} (${m.id})` : m.id },
+    value: m.id,
+  }))
+}
+
+/** Step 1 — Provider selection card. `flow` distinguishes the standalone
+ *  `/model` switch from the `/new` card flow reusing the same card. */
+export function renderProviderSelectCard(
+  providers: readonly LlmProviderInfo[],
+  current: ModelSelection,
+  flow?: ModelCardFlow,
+): object {
   const effort = current.reasoningEffort !== undefined && current.reasoningEffort !== ''
     ? current.reasoningEffort
     : 'default'
+
   return {
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: '🤖 模型选择' },
+      title: { tag: 'plain_text', content: flow === 'new-session' ? '🤖 模型选择（新建会话）' : '🤖 模型选择' },
       template: 'blue',
     },
     body: {
       elements: [
         {
           tag: 'markdown',
-          content: '**当前模型**\n\n' +
-            `🔹 \`${current.provider}/${current.model}\`\n` +
-            `🧭 思考强度：\`${effort}\`\n\n` +
-            '点击下方按钮浏览所有可用模型。',
+          content: `**当前模型**　\`${current.provider}/${current.model}\`\n🧭 思考强度：\`${effort}\``,
+        },
+        { tag: 'hr' },
+        {
+          tag: 'markdown',
+          content: '**选择 Provider**',
         },
         {
-          tag: 'hr',
-        },
-        {
-          tag: 'button',
-          text: { tag: 'plain_text', content: '📋 浏览所有模型' },
-          type: 'primary',
+          tag: 'select_static',
+          placeholder: { tag: 'plain_text', content: '选择 Provider...' },
+          options: buildProviderOptions(providers),
+          value: current.provider,
           behaviors: [{
             type: 'callback',
-            value: { type: 'browse-providers' },
+            value: { action: 'select-provider', ...(flow === undefined ? {} : { flow }) },
           }],
         },
       ],
@@ -127,142 +163,97 @@ export function renderCurrentModelCard(current: ModelSelection): object {
   }
 }
 
-/** Build the provider-list card. Paginated when providers exceed one page. */
-export function renderProvidersCard(
+/** Step 2 — Model selection card.
+ *  Model dropdown + (optional) reasoning effort dropdown + confirm button
+ *  inside a form. Selecting a model or effort does NOT trigger a callback —
+ *  only clicking "确认" submits the form and applies the switch.
+ *  Back button outside the form. */
+export function renderModelSelectCard(
   providers: readonly LlmProviderInfo[],
-  page: number,
-  current: ModelSelection,
-): object {
-  const total = providers.length
-  const start = page * PROVIDERS_PER_PAGE
-  const end = Math.min(start + PROVIDERS_PER_PAGE, total)
-  const slice = providers.slice(start, end)
-  const totalPages = Math.ceil(total / PROVIDERS_PER_PAGE)
-
-  const elements: object[] = [
-    {
-      tag: 'markdown',
-      content: '**选择 Provider**\n\n' +
-        `共 ${total} 个可用，第 ${page + 1}/${totalPages} 页`,
-    },
-    { tag: 'hr' },
-  ]
-
-  for (const provider of slice) {
-    const isActive = provider.id === current.provider
-    elements.push({
-      tag: 'button',
-      text: { tag: 'plain_text', content: provider.name !== '' ? `${provider.name} (${provider.id})` : provider.id },
-      type: isActive ? 'primary' : 'default',
-      behaviors: [{
-        type: 'callback',
-        value: { type: 'browse-models', provider: provider.id },
-      }],
-    })
-  }
-
-  // Pagination controls.
-  if (totalPages > 1) {
-    elements.push({ tag: 'hr' })
-    if (page > 0) {
-      elements.push({
-        tag: 'button',
-        text: { tag: 'plain_text', content: '← 上一页' },
-        type: 'default',
-        behaviors: [{
-          type: 'callback',
-          value: { type: 'browse-providers', page: page - 1 },
-        }],
-      })
-    }
-    if (page < totalPages - 1) {
-      elements.push({
-        tag: 'button',
-        text: { tag: 'plain_text', content: '下一页 →' },
-        type: 'default',
-        behaviors: [{
-          type: 'callback',
-          value: { type: 'browse-providers', page: page + 1 },
-        }],
-      })
-    }
-  }
-
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true },
-    header: {
-      title: { tag: 'plain_text', content: '🤖 模型选择' },
-      template: 'blue',
-    },
-    body: { elements },
-  }
-}
-
-/** Build the model-list card for one provider. Paginated when models exceed
- *  one page. The currently-selected model is highlighted. */
-export function renderModelsCard(
-  provider: string,
   models: readonly LlmModelInfo[],
-  page: number,
-  current: ModelSelection,
+  selectedProvider: string,
+  selectedModel: string,
+  currentEffort?: string,
+  supportsReasoning = true,
+  flow?: ModelCardFlow,
 ): object {
-  const total = models.length
-  const start = page * MODELS_PER_PAGE
-  const end = Math.min(start + MODELS_PER_PAGE, total)
-  const slice = models.slice(start, end)
-  const totalPages = Math.ceil(total / MODELS_PER_PAGE)
+  const modelOptions = buildModelOptions(models)
+
+  const providerInfo = providers.find(p => p.id === selectedProvider)
+  const providerLabel = providerInfo !== undefined && providerInfo.name !== ''
+    ? `${providerInfo.name} (${providerInfo.id})`
+    : selectedProvider
+
+  // Reasoning effort dropdown options
+  const effortValue = currentEffort !== undefined && currentEffort !== '' ? currentEffort : 'default'
+  const effortOptions = REASONING_EFFORT_OPTIONS.map(o => ({
+    text: { tag: 'plain_text', content: o.label },
+    value: o.value,
+  }))
+
+  // Build form elements — conditionally include reasoning effort dropdown.
+  const formElements: object[] = [
+    {
+      tag: 'markdown',
+      content: '**选择模型**',
+    },
+    {
+      tag: 'select_static',
+      name: 'model',
+      placeholder: { tag: 'plain_text', content: modelOptions.length > 0 ? '选择模型...' : '该 Provider 下暂无可用模型' },
+      options: modelOptions,
+      value: selectedModel,
+    },
+  ]
+
+  if (supportsReasoning) {
+    formElements.push({
+      tag: 'markdown',
+      content: '**思考强度**',
+    })
+    formElements.push({
+      tag: 'select_static',
+      name: 'reasoning_effort',
+      placeholder: { tag: 'plain_text', content: '选择思考强度...' },
+      options: effortOptions,
+      value: effortValue,
+    })
+  }
+
+  formElements.push({
+    tag: 'button',
+    text: { tag: 'plain_text', content: flow === 'new-session' ? '✅ 确认并创建会话' : '✅ 确认切换' },
+    type: 'primary',
+    name: 'confirm',
+    form_action_type: 'submit',
+    behaviors: [{
+      type: 'callback',
+      value: { action: 'confirm-select', provider: selectedProvider, ...(flow === undefined ? {} : { flow }) },
+    }],
+  })
 
   const elements: object[] = [
     {
       tag: 'markdown',
-      content: `**选择模型 — \`${provider}\`**\n\n` +
-        `共 ${total} 个模型，第 ${page + 1}/${totalPages} 页`,
+      content: `**Provider**　\`${providerLabel}\``,
     },
     { tag: 'hr' },
-  ]
-
-  for (const model of slice) {
-    const isActive = provider === current.provider && model.id === current.model
-    const label = model.name !== '' && model.name !== model.id
-      ? `${model.name} (\`${model.id}\`)`
-      : `\`${model.id}\``
-    elements.push({
+    {
+      tag: 'form',
+      name: `model_form_${selectedProvider}`,
+      elements: formElements,
+    },
+    // Back button — outside the form so it triggers a regular callback.
+    {
       tag: 'button',
-      text: { tag: 'plain_text', content: label },
-      type: isActive ? 'primary' : 'default',
+      text: { tag: 'plain_text', content: '← 返回选择 Provider' },
+      type: 'default',
       behaviors: [{
         type: 'callback',
-        value: { type: 'select', provider, model: model.id },
+        value: { action: 'go-back' },
       }],
-    })
-  }
-
-  if (totalPages > 1) {
-    elements.push({ tag: 'hr' })
-    if (page > 0) {
-      elements.push({
-        tag: 'button',
-        text: { tag: 'plain_text', content: '← 上一页' },
-        type: 'default',
-        behaviors: [{
-          type: 'callback',
-          value: { type: 'browse-models', provider, page: page - 1 },
-        }],
-      })
-    }
-    if (page < totalPages - 1) {
-      elements.push({
-        tag: 'button',
-        text: { tag: 'plain_text', content: '下一页 →' },
-        type: 'default',
-        behaviors: [{
-          type: 'callback',
-          value: { type: 'browse-models', provider, page: page + 1 },
-        }],
-      })
-    }
-  }
+    },
+  ]
 
   return {
     schema: '2.0',
@@ -275,11 +266,14 @@ export function renderModelsCard(
   }
 }
 
-/** Build the confirmation card shown after a successful switch. */
-function renderSwitchedCard(provider: string, model: string, name?: string): object {
+/** Confirmation card after a successful switch. */
+function renderSwitchedCard(provider: string, model: string, name?: string, reasoningEffort?: string): object {
   const label = name !== undefined && name !== '' && name !== model
     ? `${name} (\`${provider}/${model}\`)`
     : `\`${provider}/${model}\``
+  const effortLine = reasoningEffort !== undefined && reasoningEffort !== ''
+    ? `\n🧠 思考强度：\`${reasoningEffort}\``
+    : ''
   return {
     schema: '2.0',
     config: { wide_screen_mode: true },
@@ -292,7 +286,7 @@ function renderSwitchedCard(provider: string, model: string, name?: string): obj
         {
           tag: 'markdown',
           content: '✅ **已切换**\n\n' +
-            `🔹 ${label}\n\n` +
+            `🔹 ${label}${effortLine}\n\n` +
             '下一轮对话将使用新模型。',
         },
       ],
@@ -304,69 +298,111 @@ function renderSwitchedCard(provider: string, model: string, name?: string): obj
 // Card action handler
 // ---------------------------------------------------------------------------
 
-/** Parse the button `value` from a cardAction event, handling Feishu's
- *  potential double (or triple) JSON encoding. Returns undefined when the
- *  value is not a recognised model-select action. */
-function parseAction(raw: unknown): ModelCardAction | undefined {
-  let parsed: unknown
+/** Parse cardAction events. Handles both button callbacks (action.value)
+ *  and form submissions (raw.action.form_value). */
+function parseCardAction(evt: CardActionLike): { action: ModelCardAction; flow?: ModelCardFlow } | undefined {
+  // --- Form submission: confirm button inside the model form ---
+  const formValue = evt.raw?.action?.form_value
+  if (formValue !== undefined) {
+    const raw = evt.action?.value
+    let valueObj: Record<string, unknown> | undefined
+    if (typeof raw === 'object' && raw !== null) {
+      valueObj = raw as Record<string, unknown>
+    } else if (typeof raw === 'string') {
+      try {
+        let result: unknown = JSON.parse(raw)
+        let depth = 0
+        while (typeof result === 'string' && depth < 4) {
+          try { result = JSON.parse(result) } catch { break }
+          depth++
+        }
+        if (typeof result === 'object' && result !== null) valueObj = result as Record<string, unknown>
+      } catch { /* not JSON */ }
+    }
+    const actionType = valueObj !== undefined
+      ? (typeof valueObj.action === 'string' ? valueObj.action : undefined)
+      : undefined
+    const provider = valueObj !== undefined
+      ? (typeof valueObj.provider === 'string' ? valueObj.provider : undefined)
+      : undefined
+    const flow = valueObj !== undefined && valueObj.flow === 'new-session' ? 'new-session' as const : undefined
+
+    if (actionType === 'confirm-select' && typeof provider === 'string') {
+      const model = typeof formValue.model === 'string' ? formValue.model : undefined
+      const effort = typeof formValue.reasoning_effort === 'string' && formValue.reasoning_effort !== 'default'
+        ? formValue.reasoning_effort
+        : undefined
+      if (typeof model === 'string' && model !== '') {
+        return { action: { type: 'confirm-select', provider, model, ...(effort !== undefined ? { reasoningEffort: effort } : {}) }, flow }
+      }
+    }
+    return undefined
+  }
+
+  // --- Button callback ---
+  const raw = evt.action?.value
+  let valueObj: Record<string, unknown> | undefined
   if (typeof raw === 'string') {
     try {
       let result: unknown = JSON.parse(raw)
-      // Feishu may double-encode (JSON string containing JSON). After a
-      // card update the encoding can stack to triple — keep unwrapping
-      // until we get a non-string or run out of depth.
       let depth = 0
       while (typeof result === 'string' && depth < 4) {
-        try {
-          result = JSON.parse(result)
-        } catch {
-          break
-        }
+        try { result = JSON.parse(result) } catch { break }
         depth++
       }
-      parsed = result
-    } catch {
-      return undefined
-    }
+      if (typeof result === 'object' && result !== null) valueObj = result as Record<string, unknown>
+    } catch { /* not JSON */ }
   } else if (typeof raw === 'object' && raw !== null) {
-    parsed = raw
-  } else {
-    return undefined
+    valueObj = raw as Record<string, unknown>
   }
-  if (parsed === undefined || parsed === null || typeof parsed !== 'object') return undefined
-  const obj = parsed as Record<string, unknown>
-  if (typeof obj.type !== 'string') return undefined
-  switch (obj.type) {
-    case 'browse-providers':
-      return { type: 'browse-providers', page: typeof obj.page === 'number' ? obj.page : 0 }
-    case 'browse-models':
-      if (typeof obj.provider !== 'string') return undefined
-      return { type: 'browse-models', provider: obj.provider, page: typeof obj.page === 'number' ? obj.page : 0 }
-    case 'select':
-      if (typeof obj.provider !== 'string' || typeof obj.model !== 'string') return undefined
-      return { type: 'select', provider: obj.provider, model: obj.model }
-    default:
-      return undefined
-  }
+
+  if (valueObj === undefined) return undefined
+  const actionType = typeof valueObj.action === 'string' ? valueObj.action : (typeof valueObj.type === 'string' ? valueObj.type : undefined)
+  const provider = typeof valueObj.provider === 'string' ? valueObj.provider : undefined
+  const option = evt.action?.option
+  const flow = valueObj.flow === 'new-session' ? 'new-session' as const : undefined
+
+  if (actionType === 'enter-select') return { action: { type: 'enter-select' }, flow }
+  if (actionType === 'select-provider' && typeof option === 'string') return { action: { type: 'select-provider', provider: option }, flow }
+  if (actionType === 'go-back') return { action: { type: 'go-back' }, flow }
+  return undefined
 }
 
-/** Build a ConversationMessage from a cardAction event's chat coordinates. */
 function chatMessageFromEvent(evt: CardActionLike): ConversationMessage | undefined {
   if (evt.chatId === undefined) return undefined
   return { chatId: evt.chatId, chatType: 'p2p' }
 }
 
-/**
- * Subscribe to cardAction events and drive the model selector card flow.
- * Returns a disposer that detaches the listener; safe to call multiple times.
- *
- * Each navigation step sends a fresh card message (not updateCard) to avoid
- * Feishu's per-card patch limit — after 2-3 `im.v1.message.patch` calls the
- * card's buttons stop responding entirely. Old cards remain in the chat
- * (recall is not supported), but every click produces a working card.
- * Rapid clicks are enqueued and drained sequentially with a minimum interval
- * between sends, so no click is ever silently dropped.
- */
+// ---------------------------------------------------------------------------
+// V2 card instance helpers
+// ---------------------------------------------------------------------------
+
+export async function sendModelCardV2(
+  channel: ModelSelectChannel,
+  chatMessage: ConversationMessage,
+  card: object,
+  cardByMessage: Map<string, string>,
+  sequenceByCard: Map<string, number>,
+): Promise<{ messageId: string; cardId: string }> {
+  const cardId = await channel.createCardInstance(card)
+  // Topic messages must be sent as replies to the topic ROOT message so the
+  // card lands inside the topic instead of leaking to the main chat stream.
+  const opts = chatMessage.threadId !== undefined && chatMessage.rootId !== undefined
+    ? { replyInThread: true, replyTo: chatMessage.rootId }
+    : {}
+  const result = await channel.sendCardByReference(chatMessage.chatId, cardId, opts)
+  const messageId = result.messageId ?? ''
+  if (messageId !== '') {
+    cardByMessage.set(messageId, cardId)
+    sequenceByCard.set(cardId, 0)
+  }
+  return { messageId, cardId }
+}
+
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
 export function startFeishuModelSelect(deps: {
   llm: LlmDirectoryLike
   agentDefaultModel: AgentDefaultModelConfig
@@ -374,117 +410,208 @@ export function startFeishuModelSelect(deps: {
   apiProxy?: ApiProxyLike
   channel: ModelSelectChannel
   logger: PluginLogger
-}): () => void {
-  const { llm, agentDefaultModel, bridgeHolder, apiProxy, channel, logger } = deps
+  /** When set, confirm actions carrying the `new-session` flow marker are
+   *  forwarded here instead of applying the model switch. Used by the
+   *  `/new` card flow, which reuses the provider/model cards but commits the
+   *  selection to session creation. */
+  onNewSessionConfirm?: (chatMessage: ConversationMessage, selection: { provider: string; model: string; reasoningEffort?: string }, messageId: string | undefined) => Promise<void>
+  /** Topic reply context recorded for a chat (rootId/threadId). Card action
+   *  events carry only chatId + messageId, so the caller restores the thread
+   *  context here — otherwise selections / new-session commits inside a topic
+   *  would target the main chat key instead of the topic key. */
+  topicFor?: (chatId: string) => { rootId?: string; threadId?: string }
+}): { dispose: () => void; cardByMessage: Map<string, string>; sequenceByCard: Map<string, number> } {
+  const { llm, agentDefaultModel, bridgeHolder, apiProxy, channel, logger, onNewSessionConfirm, topicFor } = deps
 
-  // Per-chat queue: rapid clicks are enqueued and processed sequentially.
-  // The processing lock prevents concurrent drains; the interval between
-  // consecutive sends avoids overwhelming the chat. Each action sends a
-  // fresh card (not updateCard), so there is no per-card patch limit to hit.
-  // Unlike the previous drop-on-interval approach, queuing means no click is
-  // silently lost — the card always advances to the page the user asked for.
   const processing = new Map<string, true>()
   const actionQueue = new Map<string, QueuedAction[]>()
-  const MIN_SEND_INTERVAL_MS = 500
+  const MIN_UPDATE_INTERVAL_MS = 500
 
-  /** Send a fresh card message for each navigation step. Using `send` (not
-   *  `updateCard`) avoids Feishu's per-card patch limit — after 2-3 patches
-   *  `im.v1.message.patch` silently stops updating the card and its buttons
-   *  become unresponsive. Old cards remain in the chat (the user does not
-   *  want recall), but every navigation step produces a working, clickable
-   *  card. */
-  async function sendCard(card: object, chatMessage: ConversationMessage): Promise<void> {
+  const cardByMessage = new Map<string, string>()
+  const sequenceByCard = new Map<string, number>()
+
+  async function updateCardInstanceOnMessage(
+    messageId: string | undefined,
+    chatMessage: ConversationMessage,
+    card: object,
+  ): Promise<void> {
+    if (messageId === undefined) {
+      await sendModelCardV2(channel, chatMessage, card, cardByMessage, sequenceByCard)
+      return
+    }
+    const cardId = cardByMessage.get(messageId)
+    if (cardId === undefined) {
+      await sendModelCardV2(channel, chatMessage, card, cardByMessage, sequenceByCard)
+      return
+    }
+    const seq = (sequenceByCard.get(cardId) ?? 0) + 1
+    sequenceByCard.set(cardId, seq)
     try {
-      await channel.send(chatMessage.chatId, { card })
+      await channel.updateCardInstance(cardId, card, seq)
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error)
-      logger.warn(`dsh-feishu: model-select send failed: ${msg}`)
+      logger.warn(`dsh-feishu: model-select updateCardInstance failed: ${msg} — sending fresh card`)
+      const fresh = await sendModelCardV2(channel, chatMessage, card, cardByMessage, sequenceByCard)
+      cardByMessage.set(fresh.messageId, fresh.cardId)
     }
   }
 
-  async function handleBrowseProviders(
+  /** Step 1 → Step 2: provider selected, load its models. */
+  async function handleSelectProvider(
     chatMessage: ConversationMessage,
-    page: number,
-  ): Promise<void> {
-    const bridge = bridgeHolder.current
-    if (bridge === undefined) return
-    const current = bridge.currentSelectionFor(chatMessage) ?? agentDefaultModel.currentSelection()
-    const providers = llm.listProviders()
-    const card = renderProvidersCard(providers, page, current)
-    await sendCard(card, chatMessage)
-  }
-
-  async function handleBrowseModels(
-    chatMessage: ConversationMessage,
+    messageId: string | undefined,
     provider: string,
-    page: number,
+    flow?: ModelCardFlow,
   ): Promise<void> {
     const bridge = bridgeHolder.current
     if (bridge === undefined) return
     const current = bridge.currentSelectionFor(chatMessage) ?? agentDefaultModel.currentSelection()
+
     let models: readonly LlmModelInfo[]
     try {
       models = await llm.listModels(provider)
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error)
       logger.warn(`dsh-feishu: failed to list models for ${provider}: ${msg}`)
-      return
+      models = []
     }
-    if (models.length === 0) return
-    const card = renderModelsCard(provider, models, page, current)
-    await sendCard(card, chatMessage)
+
+    // Check if any model in this provider supports reasoning effort.
+    // If none do, hide the reasoning dropdown to avoid confusing the user.
+    let supportsReasoning = false
+    try {
+      const checks = await Promise.allSettled(
+        models.slice(0, 8).map(m => llm.resolveModelInfo(provider, m.id)),
+      )
+      supportsReasoning = checks.some(r =>
+        r.status === 'fulfilled' &&
+        r.value.reasoning !== undefined &&
+        r.value.reasoning.efforts.length > 0,
+      )
+    } catch {
+      // If we can't resolve, default to not showing (safer).
+    }
+
+    const providers = llm.listProviders()
+    const card = renderModelSelectCard(providers, models, provider, current.model, current.reasoningEffort, supportsReasoning, flow)
+    await updateCardInstanceOnMessage(messageId, chatMessage, card)
   }
 
-  async function handleSelect(
+  /** Step 2 → Step 1: back button (form reset). */
+  async function handleGoBack(
     chatMessage: ConversationMessage,
+    messageId: string | undefined,
+    flow?: ModelCardFlow,
+  ): Promise<void> {
+    const bridge = bridgeHolder.current
+    if (bridge === undefined) return
+    const current = bridge.currentSelectionFor(chatMessage) ?? agentDefaultModel.currentSelection()
+    const providers = llm.listProviders()
+    const card = renderProviderSelectCard(providers, current, flow)
+    await updateCardInstanceOnMessage(messageId, chatMessage, card)
+  }
+
+  /** Step 3: confirm button clicked, apply the selection. */
+  async function handleConfirmSelect(
+    chatMessage: ConversationMessage,
+    messageId: string | undefined,
     provider: string,
     model: string,
+    reasoningEffort?: string,
+    flow?: ModelCardFlow,
   ): Promise<void> {
     const bridge = bridgeHolder.current
     if (bridge === undefined) return
 
-    // Validate that the provider is registered.
+    // New-session flow: the card is part of `/new` session creation — commit
+    // the selection to the caller (which creates the session) instead of
+    // switching the current chat's model.
+    if (flow === 'new-session') {
+      if (onNewSessionConfirm === undefined) {
+        logger.warn('dsh-feishu: new-session confirm received but no onNewSessionConfirm callback registered')
+        return
+      }
+      await onNewSessionConfirm(chatMessage, { provider, model, ...(reasoningEffort !== undefined ? { reasoningEffort } : {}) }, messageId)
+      return
+    }
+
     const providers = new Set(llm.listProviders().map(p => p.id))
     if (!providers.has(provider)) {
       logger.warn(`dsh-feishu: model-select attempted to switch to unknown provider ${provider}`)
       return
     }
 
-    // Resolve the model's human-readable name for the confirmation card.
+    // Get model name and check reasoning support (non-fatal).
     let modelName: string | undefined
+    let modelSupportsReasoning = true
     try {
       const models = await llm.listModels(provider)
       const found = models.find(m => m.id === model)
       modelName = found?.name
     } catch {
-      // Non-fatal: the name is cosmetic.
+      // Non-fatal
+    }
+    try {
+      const info = await llm.resolveModelInfo(provider, model)
+      modelSupportsReasoning = info.reasoning !== undefined && info.reasoning.efforts.length > 0
+    } catch {
+      // If we can't resolve, assume supported.
     }
 
-    // Persist + apply the selection (same chain as /model slash command).
-    const selection = { provider, model }
-    await agentDefaultModel.saveSelection(selection as never)
-    bridge.setCurrentSelection(chatMessage, selection)
+    // Strip reasoning effort if the model doesn't support it.
+    const effectiveReasoningEffort = modelSupportsReasoning ? reasoningEffort : undefined
 
+    // Step 1: Sync to WebUI first — this is the authoritative switch.
+    // Only persist locally AFTER the remote switch succeeds.
     if (apiProxy !== undefined) {
       try {
         const sessionId = bridge.resolveSessionIdFor(chatMessage)
-        await apiProxy.sessions.selectModel({
-          payload: { sessionId, provider, model },
-        })
+        const response = await apiProxy.sessions.selectModel({
+          payload: { sessionId, provider, model, ...(effectiveReasoningEffort !== undefined ? { reasoningEffort: effectiveReasoningEffort } : {}) },
+        }) as { result?: { ok?: boolean; error?: { code?: string; message?: string } } } | undefined
+        // Check for API-level errors (selectModel may return error responses without throwing).
+        if (response?.result?.ok === false) {
+          const errMsg = response.result.error?.message ?? 'unknown error'
+          const errCode = response.result.error?.code ?? 'no code'
+          logger.warn(`dsh-feishu: model-select apiProxy returned error: ${errCode} ${errMsg}`)
+          const card = {
+            schema: '2.0',
+            config: { wide_screen_mode: true },
+            header: { title: { tag: 'plain_text', content: '🤖 模型选择' }, template: 'red' },
+            body: { elements: [{ tag: 'markdown', content: `⚠️ **切换失败**\n\n${errMsg} (${errCode})` }] },
+          }
+          await updateCardInstanceOnMessage(messageId, chatMessage, card)
+          return
+        }
       } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : String(error)
         logger.warn(`dsh-feishu: model-select failed to sync apiProxy: ${msg}`)
+        // Show error card instead of success card.
+        const card = {
+          schema: '2.0',
+          config: { wide_screen_mode: true },
+          header: { title: { tag: 'plain_text', content: '🤖 模型选择' }, template: 'red' },
+          body: { elements: [{ tag: 'markdown', content: `⚠️ **切换失败**\n\n${msg}` }] },
+        }
+        await updateCardInstanceOnMessage(messageId, chatMessage, card)
+        return
       }
     }
 
-    // Send a fresh confirmation card.
-    const card = renderSwitchedCard(provider, model, modelName)
-    await sendCard(card, chatMessage)
+    // Step 2: Remote switch succeeded (or no apiProxy) — persist locally.
+    const selection: ModelSelection = { provider, model }
+    if (effectiveReasoningEffort !== undefined) selection.reasoningEffort = effectiveReasoningEffort
+    await agentDefaultModel.saveSelection(selection as never)
+    bridge.setCurrentSelection(chatMessage, selection as never)
+
+    // Step 3: Show success card.
+    const card = renderSwitchedCard(provider, model, modelName, effectiveReasoningEffort)
+    await updateCardInstanceOnMessage(messageId, chatMessage, card)
   }
 
   const onCardAction = async (evt: CardActionLike): Promise<void> => {
-    const action = parseAction(evt.action?.value)
-    if (action === undefined) return
+    const parsed = parseCardAction(evt)
+    if (parsed === undefined) return
 
     const bridge = bridgeHolder.current
     if (bridge === undefined) {
@@ -498,25 +625,25 @@ export function startFeishuModelSelect(deps: {
       return
     }
 
-    const key = chatMessage.chatId
+    // Card actions carry only chatId + messageId; restore the topic context
+    // recorded when the card was sent so selections and `new-session` commits
+    // target the topic's key instead of the main chat's.
+    const topic = topicFor?.(chatMessage.chatId)
+    if (topic?.threadId !== undefined && chatMessage.threadId === undefined) {
+      chatMessage.threadId = topic.threadId
+      if (topic.rootId !== undefined) chatMessage.rootId = topic.rootId
+    }
 
-    // Enqueue — never drop. The drain loop processes actions sequentially
-    // with a minimum interval between sends to avoid overwhelming the chat.
-    // Each action sends a fresh card (not updateCard), so there is no per-card
-    // patch limit to hit — every click produces a working, clickable card.
+    const key = chatMessage.chatId
     let queue = actionQueue.get(key)
     if (queue === undefined) {
       queue = []
       actionQueue.set(key, queue)
     }
-    queue.push({ action, chatMessage })
-
+    queue.push({ action: parsed.action, flow: parsed.flow, chatMessage, messageId: evt.messageId })
     await drainQueue(key)
   }
 
-  /** Drain the per-chat action queue sequentially. Only one drain runs at
-   *  a time per chat; concurrent calls return immediately and let the
-   *  active drain pick up the newly queued items. */
   async function drainQueue(key: string): Promise<void> {
     if (processing.has(key)) return
     processing.set(key, true)
@@ -527,25 +654,31 @@ export function startFeishuModelSelect(deps: {
         const item = queue.shift()!
         try {
           switch (item.action.type) {
-            case 'browse-providers':
-              await handleBrowseProviders(item.chatMessage, item.action.page ?? 0)
+            case 'enter-select': {
+              const bridge = bridgeHolder.current
+              if (bridge === undefined) break
+              const current = bridge.currentSelectionFor(item.chatMessage) ?? agentDefaultModel.currentSelection()
+              const providers = llm.listProviders()
+              const card = renderProviderSelectCard(providers, current, item.flow)
+              await updateCardInstanceOnMessage(item.messageId, item.chatMessage, card)
               break
-            case 'browse-models':
-              await handleBrowseModels(item.chatMessage, item.action.provider, item.action.page ?? 0)
+            }
+            case 'select-provider':
+              await handleSelectProvider(item.chatMessage, item.messageId, item.action.provider, item.flow)
               break
-            case 'select':
-              await handleSelect(item.chatMessage, item.action.provider, item.action.model)
+            case 'go-back':
+              await handleGoBack(item.chatMessage, item.messageId, item.flow)
+              break
+            case 'confirm-select':
+              await handleConfirmSelect(item.chatMessage, item.messageId, item.action.provider, item.action.model, item.action.reasoningEffort, item.flow)
               break
           }
         } catch (error: unknown) {
           const msg = error instanceof Error ? error.message : String(error)
           logger.error(`dsh-feishu: model-select action failed: ${msg}`)
         }
-        // Rate guard: wait between consecutive sends to avoid overwhelming
-        // the chat or tripping Feishu's send rate limit. Only wait when
-        // there is another action queued — the last action needs no delay.
         if (queue.length > 0) {
-          await new Promise<void>(r => setTimeout(r, MIN_SEND_INTERVAL_MS))
+          await new Promise<void>(r => setTimeout(r, MIN_UPDATE_INTERVAL_MS))
         }
       }
     } finally {
@@ -555,9 +688,13 @@ export function startFeishuModelSelect(deps: {
   }
 
   const unsubscribe = channel.onCardAction(onCardAction)
-  return () => {
-    unsubscribe()
-    processing.clear()
-    actionQueue.clear()
+  return {
+    dispose: () => {
+      unsubscribe()
+      processing.clear()
+      actionQueue.clear()
+    },
+    cardByMessage,
+    sequenceByCard,
   }
 }

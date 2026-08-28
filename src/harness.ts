@@ -75,6 +75,17 @@ export interface HarnessBridgeConfig {
 
 export interface InboundMessage extends ConversationMessage { content: string; imageBlocks?: readonly ImageAttachmentRef[] }
 
+/** Per-chat creation options captured from the `/new` card flow or text
+ *  command. Applied when the bridge creates the session agent, overriding
+ *  the deployment-wide config defaults for workspace / preset / model. */
+export interface ChatCreationOptions {
+  workspace?: string
+  agentPreset?: string
+  provider?: string
+  model?: string
+  reasoningEffort?: ReasoningEffortId
+}
+
 export class HarnessConversationService {
   private readonly handles = new Map<string, Promise<AgentHandleLike>>()
   /**
@@ -92,6 +103,32 @@ export class HarnessConversationService {
    */
   private readonly chatToSession = new Map<string, string>()
   /**
+   * Per-chat topic root message id (`rootId`), captured from inbound topic
+   * messages. Feishu topic replies must target the topic ROOT message
+   * (`replyTo: rootId` + `reply_in_thread: true`); replying to a non-root
+   * topic message does not reliably land in the topic. Keyed by the same
+   * chat key as `chatToSession`.
+   */
+  private readonly chatToRootId = new Map<string, string>()
+  /**
+   * Every chat key this bridge has ever seen (persisted). Together with
+   * `chatToSession` it derives session ownership: a session is owned by the
+   * chat key that maps to it explicitly, or — when that key has no explicit
+   * override — by the chat key whose deterministic hash equals the session id.
+   * `/thread` refuses to redirect a chat onto a session owned by another chat
+   * so two dialog surfaces (main chat + topics) never share one session.
+   */
+  private readonly seenChatKeys = new Set<string>()
+  /**
+   * Per-chat creation options (workspace / preset / model) captured by the
+   * `/new` card flow or the `/new <workspace> <preset> [model]` text command.
+   * `createAgent` reads them when it spins up the session agent so a session
+   * created through the card lands in the chosen workspace with the chosen
+   * preset and model instead of the deployment-wide defaults. Keyed by the
+   * same chat key as `chatToSession`.
+   */
+  private readonly chatToCreation = new Map<string, ChatCreationOptions>()
+  /**
    * Sessions for which intermediate assistant message cards were sent during
    * the current turn. The channel skips the final reply card for these
    * sessions to avoid duplication.
@@ -108,8 +145,22 @@ export class HarnessConversationService {
     if (path === undefined || path === '') return
     try {
       const raw = readFileSync(path, 'utf-8')
-      const data = JSON.parse(raw) as Record<string, string>
-      for (const [k, v] of Object.entries(data)) this.chatToSession.set(k, v)
+      const data = JSON.parse(raw) as
+        | Record<string, string>                 // legacy: { chatKey: sessionId }
+        | { chatToSession?: Record<string, string>; seenChatKeys?: string[] }
+      // Legacy format (pre-ownership): a flat record keyed by chat key.
+      const legacy = Array.isArray(data) ? undefined
+        : (data as Record<string, string>).chatToSession === undefined && !Array.isArray((data as any).seenChatKeys)
+          ? data as Record<string, string>
+          : undefined
+      if (legacy !== undefined) {
+        for (const [k, v] of Object.entries(legacy)) this.chatToSession.set(k, v)
+        for (const k of Object.keys(legacy)) this.seenChatKeys.add(k)
+        return
+      }
+      const parsed = data as { chatToSession?: Record<string, string>; seenChatKeys?: string[] }
+      for (const [k, v] of Object.entries(parsed.chatToSession ?? {})) this.chatToSession.set(k, v)
+      for (const k of parsed.seenChatKeys ?? []) this.seenChatKeys.add(k)
     } catch (error: unknown) {
       // ENOENT is expected on first run; log other errors
       if ((error as { code?: string }).code !== 'ENOENT') {
@@ -124,7 +175,10 @@ export class HarnessConversationService {
     if (path === undefined || path === '') return
     try {
       mkdirSync(dirname(path), { recursive: true })
-      writeFileSync(path, JSON.stringify(Object.fromEntries(this.chatToSession)), 'utf-8')
+      writeFileSync(path, JSON.stringify({
+        chatToSession: Object.fromEntries(this.chatToSession),
+        seenChatKeys: [...this.seenChatKeys],
+      }), 'utf-8')
     } catch (error: unknown) {
       console.error('dsh-feishu: saveSessionMap failed:', error instanceof Error ? error.message : String(error))
     }
@@ -132,6 +186,11 @@ export class HarnessConversationService {
 
   async reply(message: InboundMessage): Promise<string> {
     const key = conversationKey(message)
+    // Capture the topic root id so streaming/question/approval/todo cards
+    // can reply into the same Feishu topic instead of the main chat stream.
+    if (message.threadId !== undefined && message.rootId !== undefined) {
+      this.chatToRootId.set(key, message.rootId)
+    }
     const handle = await this.getOrCreate(key)
     const agent = handle.agent
     await agent.whenIdle()
@@ -209,6 +268,9 @@ export class HarnessConversationService {
     this.handles.clear()
     this.selections.clear()
     this.chatToSession.clear()
+    this.chatToRootId.clear()
+    this.seenChatKeys.clear()
+    this.chatToCreation.clear()
   }
 
   /**
@@ -216,9 +278,125 @@ export class HarnessConversationService {
    * override before falling back to the deterministic hash. Centralizing the
    * lookup keeps `createAgent` / `setCurrentSelection` consistent.
    */
+  /** Record a chat key and persist it on first sight, so default-derived
+   *  session ownership survives restarts even when the chat never ran
+   *  `/new` or `/thread`. */
+  private recordChatKey(key: string): void {
+    if (this.seenChatKeys.has(key)) return
+    this.seenChatKeys.add(key)
+    this.saveSessionMap()
+  }
+
   private resolveSessionId(message: ConversationMessage): string {
     const key = conversationKey(message)
+    this.recordChatKey(key)
     return this.chatToSession.get(key) ?? toSessionId(this.config.domain, key)
+  }
+
+  /**
+   * Derive the chat key that owns one session id, or `undefined` when the
+   * session is not owned by any chat this bridge knows about. Ownership has
+   * two sources:
+   *
+   * 1. An explicit `/new` or `/thread` override in `chatToSession`.
+   * 2. A chat key with no override whose deterministic hash equals the
+   *    session id — i.e. the session the chat lands on by default. This is
+   *    the subtle case: a topic that never ran `/new` still owns its
+   *    default-derived session, so the main chat cannot `/thread` onto it and
+   *    silently share it.
+   *
+   * Explicit overrides win over default derivation, so a chat that ran
+   * `/new` no longer owns its old default session.
+   */
+  sessionOwnerKey(sessionId: string): string | undefined {
+    for (const [key, mapped] of this.chatToSession) {
+      if (mapped === sessionId) return key
+    }
+    for (const key of this.seenChatKeys) {
+      if (!this.chatToSession.has(key) && toSessionId(this.config.domain, key) === sessionId) return key
+    }
+    return undefined
+  }
+
+  /**
+   * Human-readable label for a chat key (used in ownership warnings).
+   * `chat:<chatId>` is the main chat; `thread:<chatId>:<threadId>` is a topic.
+   */
+  describeChatKey(key: string): string {
+    if (key.startsWith('thread:')) {
+      const threadId = key.split(':')[2] ?? ''
+      return threadId === '' ? '一个话题' : `话题(${threadId.slice(0, 8)}…)`
+    }
+    return '主聊天'
+  }
+
+  /**
+   * Force-release one session so any dialog can `/thread` onto it. The
+   * previous owner (if any) is reset to a brand-new session — the same
+   * effect as running `/new` in that dialog — so it can never immediately
+   * re-own the released session (including the default-derived case, where
+   * merely deleting the override would let the chat re-own it on its next
+   * message).
+   *
+   * @returns `{ kind: 'released', ownerLabel }` when a chat owned the
+   *   session and was reset, or `{ kind: 'free' }` when no chat owned it.
+   */
+  detachSession(sessionId: string): { kind: 'released'; ownerLabel: string } | { kind: 'free' } {
+    const owner = this.sessionOwnerKey(sessionId)
+    if (owner === undefined) return { kind: 'free' }
+    const ownerLabel = this.describeChatKey(owner)
+    const newSessionId = toSessionId(this.config.domain, `${owner}\0detach-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`)
+    this.chatToSession.set(owner, newSessionId)
+    this.seenChatKeys.add(owner)
+    this.saveSessionMap()
+    this.handles.delete(owner)
+    this.selections.delete(newSessionId)
+    return { kind: 'released', ownerLabel }
+  }
+
+  /**
+   * Attach this chat to an existing session, force-taking it over when
+   * another dialog currently owns it. Used by the first-message onboarding
+   * card: the user picks a session from the full list (occupied ones carry a
+   * lock marker) and the previous owner is released via {@link detachSession}
+   * before the session is rebound to this chat.
+   *
+   * @returns `'ok'` when bound, `'archived'` when the session is archived.
+   */
+  attachSession(message: ConversationMessage, sessionId: string): 'ok' | 'archived' {
+    if (this.deps.workspaceRegistry.archivedSessionIds.includes(sessionId)) return 'archived'
+    const key = conversationKey(message)
+    const owner = this.sessionOwnerKey(sessionId)
+    if (owner !== undefined && owner !== key) {
+      // Force takeover: release the previous owner first.
+      this.detachSession(sessionId)
+    }
+    this.chatToSession.set(key, sessionId)
+    this.seenChatKeys.add(key)
+    this.saveSessionMap()
+    this.handles.delete(key)
+    this.selections.delete(sessionId)
+    return 'ok'
+  }
+
+  /**
+   * Whether this chat needs the first-message onboarding card (attach an
+   * existing session or create a new one) instead of auto-creating a session.
+   * A chat needs onboarding when it has no explicit `/new`/`/thread`/attach
+   * override AND its default-derived session has no persisted history yet —
+   * i.e. the dialog (or a fresh install) has never run a real conversation.
+   */
+  async needsOnboarding(message: ConversationMessage): Promise<boolean> {
+    const key = conversationKey(message)
+    if (this.chatToSession.has(key)) return false
+    const defaultId = toSessionId(this.config.domain, key)
+    const persisted = await this.deps.sessionPersistence.list()
+    return !persisted.some(item => item.id === defaultId)
+  }
+
+  /** Read the creation options captured for one chat (if any). */
+  creationOptionsFor(message: ConversationMessage): ChatCreationOptions | undefined {
+    return this.chatToCreation.get(conversationKey(message))
   }
 
   /**
@@ -232,7 +410,7 @@ export class HarnessConversationService {
    */
   resolveChat(sessionId: string): ConversationMessage | undefined {
     for (const [key, mapped] of this.chatToSession) {
-      if (mapped === sessionId) return this.messageFromKey(key)
+      if (mapped === sessionId) return this.attachRootId(key, this.messageFromKey(key))
     }
     // No override: the session id is the deterministic hash of some chat key.
     // Hash prefixes are `lark-v2-<domain>:<key-hash>` (see `toSessionId`); we
@@ -242,9 +420,15 @@ export class HarnessConversationService {
     // we read them directly.
     for (const key of this.handles.keys()) {
       const derived = toSessionId(this.config.domain, key)
-      if (derived === sessionId) return this.messageFromKey(key)
+      if (derived === sessionId) return this.attachRootId(key, this.messageFromKey(key))
     }
     return undefined
+  }
+
+  /** Attach the stored topic root id (if any) to a reconstructed chat message. */
+  private attachRootId(key: string, message: ConversationMessage): ConversationMessage {
+    const rootId = this.chatToRootId.get(key)
+    return rootId === undefined ? message : { ...message, rootId }
   }
 
   /**
@@ -308,10 +492,12 @@ export class HarnessConversationService {
    * caller-supplied salt so two consecutive `/new` calls in the same chat
    * produce different sessions.
    */
-  startNewSession(message: ConversationMessage, salt: string): string {
+  startNewSession(message: ConversationMessage, salt: string, options?: ChatCreationOptions): string {
     const key = conversationKey(message)
     const newSessionId = toSessionId(this.config.domain, `${key}\0${salt}`)
     this.chatToSession.set(key, newSessionId)
+    this.seenChatKeys.add(key)
+    if (options !== undefined) this.chatToCreation.set(key, options)
     this.saveSessionMap()
     this.handles.delete(key)
     this.selections.delete(newSessionId)
@@ -325,17 +511,25 @@ export class HarnessConversationService {
    * archived sessions are hidden from `/thread` so switching to one would
    * silently strand the next message on a session the user can no longer see.
    *
-   * @returns `true` when the override was applied, `false` when the session is
-   *   archived (the caller should surface a translated rejection).
+   * Refuses to redirect onto a session owned by a DIFFERENT chat key so two
+   * dialog surfaces (main chat + topics) never share one session. Switching
+   * back to a session the same chat already owns is a no-op success.
+   *
+   * @returns `'ok'` when the override was applied, `'archived'` when the
+   *   session is archived (caller surfaces a translated rejection), and
+   *   `'occupied'` when another chat key currently owns the session.
    */
-  switchToSession(message: ConversationMessage, sessionId: string): boolean {
-    if (this.deps.workspaceRegistry.archivedSessionIds.includes(sessionId)) return false
+  switchToSession(message: ConversationMessage, sessionId: string): 'ok' | 'archived' | 'occupied' {
+    if (this.deps.workspaceRegistry.archivedSessionIds.includes(sessionId)) return 'archived'
     const key = conversationKey(message)
+    const owner = this.sessionOwnerKey(sessionId)
+    if (owner !== undefined && owner !== key) return 'occupied'
     this.chatToSession.set(key, sessionId)
+    this.seenChatKeys.add(key)
     this.saveSessionMap()
     this.handles.delete(key)
     this.selections.delete(sessionId)
-    return true
+    return 'ok'
   }
 
   /**
@@ -351,10 +545,10 @@ export class HarnessConversationService {
    * blank sessions remain visible because the bridge has no projection service
    * to read their `blank` bit.
    */
-  async listSessions(): Promise<Array<{ id: string; updatedAt: number; title: string }>> {
+  async listSessions(): Promise<Array<{ id: string; updatedAt: number; title: string; ownedBy?: string }>> {
     const persisted = await this.deps.sessionPersistence.list()
     const archived = new Set(this.deps.workspaceRegistry.archivedSessionIds)
-    const entries: Array<{ id: string; updatedAt: number; title: string }> = []
+    const entries: Array<{ id: string; updatedAt: number; title: string; ownedBy?: string }> = []
     for (const item of persisted) {
       if (archived.has(item.id)) continue
       const live = this.deps.agents.get(item.id as never)
@@ -394,7 +588,13 @@ export class HarnessConversationService {
         blank = !events.some(event => event.type === 'turn/start')
       }
       if (blank) continue
-      entries.push({ id: item.id, updatedAt, title })
+      const ownerKey = this.sessionOwnerKey(item.id)
+      entries.push({
+        id: item.id,
+        updatedAt,
+        title,
+        ...(ownerKey === undefined ? {} : { ownedBy: ownerKey }),
+      })
     }
     entries.sort((left, right) => right.updatedAt - left.updatedAt)
     return entries
@@ -622,6 +822,7 @@ export class HarnessConversationService {
     // The chat key is `chat:<chatId>` or `thread:<chatId>:<threadId>`; build a
     // minimal ConversationMessage so `resolveSessionId` can honor the chat→session
     // override populated by `/new` or `/thread`.
+    const creation = this.chatToCreation.get(key)
     const sessionId = this.resolveSessionId(this.messageFromKey(key))
     const liveAgent = this.deps.agents.get(sessionId as never)
     if (liveAgent !== undefined) {
@@ -634,9 +835,13 @@ export class HarnessConversationService {
       if (existing === undefined) {
         const fallback = this.deps.selection()
         const initial = {
-          provider: this.config.provider ?? fallback.provider,
-          model: this.config.model ?? fallback.model,
-          ...(fallback.reasoningEffort !== undefined ? { reasoningEffort: fallback.reasoningEffort } : {}),
+          provider: creation?.provider ?? this.config.provider ?? fallback.provider,
+          model: creation?.model ?? this.config.model ?? fallback.model,
+          ...(creation?.reasoningEffort !== undefined
+            ? { reasoningEffort: creation.reasoningEffort }
+            : fallback.reasoningEffort !== undefined
+              ? { reasoningEffort: fallback.reasoningEffort }
+              : {}),
         } satisfies ModelSelection
         const ref: LiveSelection = { current: initial, assembled: undefined }
         installModelSelection(liveAgent.ctx, ref)
@@ -646,22 +851,27 @@ export class HarnessConversationService {
     }
     const fallback = this.deps.selection()
     const initial = {
-      provider: this.config.provider ?? fallback.provider,
-      model: this.config.model ?? fallback.model,
-      ...(fallback.reasoningEffort !== undefined ? { reasoningEffort: fallback.reasoningEffort } : {}),
+      provider: creation?.provider ?? this.config.provider ?? fallback.provider,
+      model: creation?.model ?? this.config.model ?? fallback.model,
+      ...(creation?.reasoningEffort !== undefined
+        ? { reasoningEffort: creation.reasoningEffort }
+        : fallback.reasoningEffort !== undefined
+          ? { reasoningEffort: fallback.reasoningEffort }
+          : {}),
     } satisfies ModelSelection
     // Build a mutable ref once per session; the agent loop's `installModelSelection`
     // listener reads `current` on every `system-prompt/assemble`, so a later
     // `/model` command mutating `ref.current` takes effect on the next message.
     const selection: LiveSelection = { current: initial, assembled: undefined }
     this.selections.set(sessionId, selection)
-    const workspace = this.config.workspace === undefined
+    const configuredWorkspace = creation?.workspace ?? this.config.workspace
+    const workspace = configuredWorkspace === undefined
       ? this.deps.workspaceRegistry.list()[0]
-      : await this.deps.workspaceRegistry.resolveByPath(this.config.workspace)
+      : await this.deps.workspaceRegistry.resolveByPath(configuredWorkspace)
     // Use the workspace's actual path as cwd to ensure consistency
     // When no workspace is configured, use the first workspace's path
-    const cwd = workspace?.path ?? this.config.workspace ?? process.cwd()
-    const agentPreset = (await this.deps.agentPresets.resolve(this.config.agentPreset)).id
+    const cwd = workspace?.path ?? configuredWorkspace ?? process.cwd()
+    const agentPreset = (await this.deps.agentPresets.resolve(creation?.agentPreset ?? this.config.agentPreset)).id
     const setup = async (agentCtx: Parameters<typeof installModelSelection>[0]) => {
       installModelSelection(agentCtx, selection)
       await this.deps.agentPresets.mount(agentCtx, agentPreset)

@@ -6,6 +6,8 @@ export interface ConversationMessage {
   chatId: string
   chatType: 'p2p' | 'group'
   threadId?: string
+  /** Topic root message id — the correct `replyTo` target when replying into a Feishu topic. */
+  rootId?: string
   replyToMessageId?: string
 }
 

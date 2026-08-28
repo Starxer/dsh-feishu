@@ -29,6 +29,13 @@ export interface ProvisionOptions {
 export const FEISHU_BOT_SCOPES = [
   'im:message.p2p_msg:readonly',
   'im:message.group_at_msg:readonly',
+  /** Receive ALL group user messages without requiring @mention. The official
+   *  scope for the im.message.receive_v1 push is `im:message.group_msg`
+   *  (获取群组中所有消息) — NOT `im:message.group_msg:readonly` (that one only
+   *  covers reading chat history via the message APIs). It is marked 敏感权限,
+   *  so the one-click scan registration may still refuse to pre-grant it; it
+   *  must then be opened in 权限管理 + 创建版本发布. */
+  'im:message.group_msg',
   'im:message:send_as_bot',
   /** Needed for addReaction (emoji reaction on inbound messages). */
   'im:message.reaction',

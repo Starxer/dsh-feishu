@@ -18,10 +18,17 @@ export interface PluginLogger {
  * Returning `undefined` means the message is not a command; the bridge
  * falls back to its ordinary agent reply.  When `card` is present the
  * channel sends it as an interactive card instead of plain text.
+ * Returning `{ kind: 'consumed' }` means the command was handled directly
+ * (e.g. a V2 card instance already sent via cardkit) — the channel sends
+ * no follow-up message and does NOT fall through to the agent loop.
  */
 export type SlashCommandHandler = (
   message: NormalizedMessage,
-) => Promise<{ kind: 'success' | 'error'; text: string; card?: object } | undefined>
+) => Promise<
+  | { kind: 'success' | 'error'; text: string; card?: object }
+  | { kind: 'consumed' }
+  | undefined
+>
 
 /** Narrow attachment-store view needed for image admission. */
 type AttachmentLike = Pick<AttachmentStore, 'saveImage' | 'imageLimits'>
@@ -127,7 +134,7 @@ export interface ChatCoordinates {
 
 export async function startChannel(
   config: Omit<RuntimeConfig, 'appSecretRef'>,
-  bridge: Pick<HarnessConversationService, 'reply' | 'dispose' | 'consumeIntermediateSent' | 'resolveSessionIdFor'>,
+  bridge: Pick<HarnessConversationService, 'reply' | 'dispose' | 'consumeIntermediateSent' | 'resolveSessionIdFor' | 'needsOnboarding'>,
   factory: ChannelFactory = createLarkChannel,
   logger: PluginLogger = console,
   terminalLogger?: Pick<PluginLogger, 'error'>,
@@ -138,6 +145,10 @@ export async function startChannel(
   consumeLastStepHadContent?: (sessionId: string) => boolean,
   flushed?: (sessionId: string) => Promise<TurnStats | undefined>,
   messageInterceptor?: (msg: NormalizedMessage) => boolean | Promise<boolean>,
+  onboarding?: {
+    needsOnboarding(msg: NormalizedMessage): Promise<boolean>
+    sendOnboardingCard(msg: NormalizedMessage): Promise<void>
+  },
 ): Promise<{ stop: () => Promise<void>; channel: LarkChannel }> {
   const logError = (message: string) => {
     logger.error(message)
@@ -179,6 +190,11 @@ export async function startChannel(
         }
       }
       const replyInThread = message.threadId !== undefined
+      // Feishu topic replies must target the topic ROOT message: replying to a
+      // non-root topic message with `reply_in_thread` does not reliably land in
+      // the topic. Root messages (no root_id) reply to themselves.
+      const replyToId = message.rootId ?? message.messageId
+      console.log(`dsh-feishu: [msg] chatId=${message.chatId} threadId=${message.threadId ?? '-'} rootId=${message.rootId ?? '-'} replyInThread=${replyInThread} replyTo=${replyToId}`)
       if (config.reactEmoji !== '') {
         try {
           await channel.addReaction(message.messageId, config.reactEmoji)
@@ -193,9 +209,15 @@ export async function startChannel(
         try {
           const commandResult = await slashCommand(message)
           if (commandResult !== undefined) {
+            if (commandResult.kind === 'consumed') {
+              // The handler already sent its response directly (e.g. a V2
+              // card instance via cardkit). Do not send a follow-up and do
+              // not fall through into the agent loop.
+              return
+            }
             const payload = commandResult.card !== undefined ? { card: commandResult.card } : { text: commandResult.text }
             await channel.send(message.chatId, payload, {
-              replyTo: message.messageId,
+              replyTo: replyToId,
               replyInThread,
             })
             return
@@ -203,7 +225,7 @@ export async function startChannel(
         } catch (error: unknown) {
           logError(`dsh-feishu: slash command failed: ${error instanceof Error ? error.message : String(error)}`)
           await channel.send(message.chatId, { text: config.errorMessage }, {
-            replyTo: message.messageId,
+            replyTo: replyToId,
             replyInThread,
           }).catch((sendError: unknown) => {
             logError(`dsh-feishu: fallback reply failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`)
@@ -220,13 +242,14 @@ export async function startChannel(
         chatId: message.chatId,
         chatType: message.chatType,
         ...message.threadId === undefined ? {} : { threadId: message.threadId },
+        ...message.threadId === undefined ? {} : { rootId: replyToId },
         content: message.content,
       }
       if ((message.resources ?? []).some(resource => resource.type === 'image')) {
         if (attachments === undefined) {
           await channel.send(message.chatId, {
             text: 'Image messages are not supported because the deployment has no attachment service composed.',
-          }, { replyTo: message.messageId, replyInThread }).catch(() => undefined)
+          }, { replyTo: replyToId, replyInThread }).catch(() => undefined)
           return
         }
         try {
@@ -235,20 +258,30 @@ export async function startChannel(
         } catch (error: unknown) {
           logError(`dsh-feishu: image admission failed: ${error instanceof Error ? error.message : String(error)}`)
           await channel.send(message.chatId, { text: config.errorMessage }, {
-            replyTo: message.messageId,
+            replyTo: replyToId,
             replyInThread,
           }).catch(() => undefined)
           return
         }
       }
       try {
+        // First-message onboarding: a chat with no session history gets a
+        // card (attach an existing session or create a new one) instead of
+        // silently auto-creating a session. Only non-command messages reach
+        // this point — slash commands (including `/new`) are handled above.
+        if (onboarding !== undefined) {
+          const needsOnboarding = await onboarding.needsOnboarding(message)
+          if (needsOnboarding) {
+            await onboarding.sendOnboardingCard(message)
+            return
+          }
+        }
         // Fire-and-forget: submit the message to the agent and return
         // immediately so the chatQueue can deliver the next message (e.g.
         // a slash command) without waiting for the agent turn to finish.
         // The reply card is sent asynchronously when the agent completes.
         const chatId = message.chatId
         const chatType = message.chatType
-        const messageId = message.messageId
         const threadId = message.threadId
         void bridge.reply(inboundMessage).then(async (text) => {
           const sessionId = bridge.resolveSessionIdFor(inboundMessage)
@@ -262,7 +295,7 @@ export async function startChannel(
             const footerCard = renderFooterCard(meta, turnStats)
             if (footerCard !== undefined) {
               await channel.send(chatId, { card: footerCard }, {
-                replyTo: messageId,
+                replyTo: replyToId,
                 replyInThread,
               })
             }
@@ -270,14 +303,14 @@ export async function startChannel(
             // No intermediate card was sent — send the full reply card.
             const card = renderReplyCard(text, meta)
             await channel.send(chatId, { card }, {
-              replyTo: messageId,
+              replyTo: replyToId,
               replyInThread,
             })
           }
         }).catch((error: unknown) => {
           logError(`dsh-feishu: message handling failed: ${error instanceof Error ? error.message : String(error)}`)
           void channel.send(chatId, { text: config.errorMessage }, {
-            replyTo: messageId,
+            replyTo: replyToId,
             replyInThread,
           }).catch((sendError: unknown) => {
             logError(`dsh-feishu: fallback reply failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`)
@@ -287,7 +320,7 @@ export async function startChannel(
         // Synchronous errors from bridge.reply() setup (rare)
         logError(`dsh-feishu: message dispatch failed: ${error instanceof Error ? error.message : String(error)}`)
         await channel.send(message.chatId, { text: config.errorMessage }, {
-          replyTo: message.messageId,
+          replyTo: replyToId,
           replyInThread,
         }).catch(() => undefined)
       }
@@ -486,6 +519,9 @@ function renderFooterCard(
     // Show only the model name, not the provider prefix.
     const short = meta.model.includes('/') ? meta.model.split('/').pop()! : meta.model
     metaParts.push(`🧠 ${short}`)
+  }
+  if (meta?.reasoningEffort !== undefined && meta.reasoningEffort !== '') {
+    metaParts.push(`💡 ${meta.reasoningEffort}`)
   }
   if (meta?.contextWindow !== undefined && meta.contextWindow > 0 && meta?.lastInputTokens !== undefined) {
     const pct = Math.min(100, Math.round(meta.lastInputTokens / meta.contextWindow * 100))

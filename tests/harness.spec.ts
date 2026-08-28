@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { HarnessConversationService } from '../src/harness.ts'
 
 function fixture() {
@@ -193,8 +195,74 @@ describe('HarnessConversationService', () => {
     deps.workspaceRegistry = { ...deps.workspaceRegistry, archivedSessionIds: ['gone-1'] }
     const service = new HarnessConversationService(deps, { domain: 'feishu' })
     const chatMessage = { chatId: 'a', chatType: 'p2p' as const }
-    expect(service.switchToSession(chatMessage, 'gone-1')).toBe(false)
-    expect(service.switchToSession(chatMessage, 'kept-1')).toBe(true)
+    expect(service.switchToSession(chatMessage, 'gone-1')).toBe('archived')
+    expect(service.switchToSession(chatMessage, 'kept-1')).toBe('ok')
+  })
+
+  it('refuses to switch onto a session owned by another chat key', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu' })
+    // Topic A runs /new, binding session-new to topic key thread:a:t1
+    const topicA = { chatId: 'a', chatType: 'p2p' as const, threadId: 't1' }
+    const newId = service.startNewSession(topicA, 's1')
+    // The main chat of the same group cannot /thread onto it
+    const main = { chatId: 'a', chatType: 'p2p' as const }
+    expect(service.sessionOwnerKey(newId)).toBe('thread:a:t1')
+    expect(service.switchToSession(main, newId)).toBe('occupied')
+    // But switching the owning topic back to its own session is fine
+    expect(service.switchToSession(topicA, newId)).toBe('ok')
+  })
+
+  it('derives default-derived session ownership (no explicit /new)', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu' })
+    const topicA = { chatId: 'a', chatType: 'p2p' as const, threadId: 't1' }
+    // Resolving the session id records the key in seenChatKeys
+    const defaultId = service.resolveSessionIdFor(topicA)
+    const main = { chatId: 'a', chatType: 'p2p' as const }
+    expect(service.sessionOwnerKey(defaultId)).toBe('thread:a:t1')
+    expect(service.switchToSession(main, defaultId)).toBe('occupied')
+  })
+
+  it('persists and restores seenChatKeys across restarts', async () => {
+    const statePath = join(tmpdir(), `lark-map-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu', statePath })
+    const topicA = { chatId: 'a', chatType: 'p2p' as const, threadId: 't1' }
+    const newId = service.startNewSession(topicA, 's1')
+    expect(service.sessionOwnerKey(newId)).toBe('thread:a:t1')
+    // New service instance reads the same file back
+    const service2 = new HarnessConversationService(dependencies(f), { domain: 'feishu', statePath })
+    expect(service2.sessionOwnerKey(newId)).toBe('thread:a:t1')
+  })
+
+  it('records chat keys on first resolve so default ownership survives restarts', async () => {
+    const statePath = join(tmpdir(), `lark-map-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu', statePath })
+    const topicA = { chatId: 'a', chatType: 'p2p' as const, threadId: 't1' }
+    // Resolving without /new persists the key
+    const defaultId = service.resolveSessionIdFor(topicA)
+    const service2 = new HarnessConversationService(dependencies(f), { domain: 'feishu', statePath })
+    expect(service2.sessionOwnerKey(defaultId)).toBe('thread:a:t1')
+  })
+
+  it('detachSession resets the owner to a fresh session and frees the target', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu' })
+    const topicA = { chatId: 'a', chatType: 'p2p' as const, threadId: 't1' }
+    const newId = service.startNewSession(topicA, 's1')
+    const outcome = service.detachSession(newId)
+    expect(outcome).toEqual({ kind: 'released', ownerLabel: '话题(t1…)' })
+    expect(service.sessionOwnerKey(newId)).toBeUndefined()
+    // The owner's next message goes to a different (fresh) session
+    expect(service.resolveSessionIdFor(topicA)).not.toBe(newId)
+  })
+
+  it('detachSession on a free session reports free', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu' })
+    expect(service.detachSession('unowned-1')).toEqual({ kind: 'free' })
   })
 
   it('forwards image blocks into the user-turn content array', async () => {
@@ -318,5 +386,72 @@ describe('HarnessConversationService', () => {
       { type: 'text', text: '[Feishu] ' },
       { type: 'image', attachment: ref },
     ])
+  })
+
+  it('needsOnboarding is true for a chat with no session history and false after /new', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu' })
+    const topicA = { chatId: 'a', chatType: 'p2p' as const, threadId: 't1' }
+    expect(await service.needsOnboarding(topicA)).toBe(true)
+    service.startNewSession(topicA, 's1')
+    expect(await service.needsOnboarding(topicA)).toBe(false)
+  })
+
+  it('needsOnboarding is false when the default-derived session already exists', async () => {
+    const f = fixture()
+    const deps = dependencies(f)
+    deps.sessionPersistence.list = vi.fn(async () => [{ id: 'lark-v2-something' }])
+    const service = new HarnessConversationService(deps, { domain: 'feishu' })
+    const main = { chatId: 'b', chatType: 'p2p' as const }
+    // The default-derived session for chat:b is a deterministic hash; fabricate
+    // it as existing so needsOnboarding resolves false.
+    const defaultId = service.resolveSessionIdFor(main)
+    deps.sessionPersistence.list = vi.fn(async () => [{ id: defaultId }])
+    expect(await service.needsOnboarding(main)).toBe(false)
+  })
+
+  it('attachSession force-takes over a session owned by another chat', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu' })
+    const topicA = { chatId: 'a', chatType: 'p2p' as const, threadId: 't1' }
+    const topicAId = service.startNewSession(topicA, 's1')
+    expect(service.sessionOwnerKey(topicAId)).toBe('thread:a:t1')
+    const main = { chatId: 'a', chatType: 'p2p' as const }
+    // Force takeover from the main chat
+    expect(service.attachSession(main, topicAId)).toBe('ok')
+    expect(service.sessionOwnerKey(topicAId)).toBe('chat:a')
+    // The previous owner (topic A) was reset to a fresh session
+    expect(service.resolveSessionIdFor(topicA)).not.toBe(topicAId)
+  })
+
+  it('startNewSession stores creation options and createAgent honors them', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu', workspace: '/work' })
+    const topicA = { chatId: 'a', chatType: 'p2p' as const, threadId: 't1' }
+    const sessionId = service.startNewSession(topicA, 's1', {
+      workspace: '/other-ws',
+      agentPreset: 'researcher',
+      provider: 'openai',
+      model: 'gpt-4o',
+    })
+    expect(sessionId).not.toBe('')
+    // createAgent is exercised via reply(); the first create call carries the
+    // sessionId and the meta should reflect the per-chat creation options.
+    const f2 = fixture()
+    const service2 = new HarnessConversationService(dependencies(f2), { domain: 'feishu', workspace: '/work' })
+    service2.startNewSession(topicA, 's1', {
+      workspace: '/other-ws',
+      agentPreset: 'researcher',
+      provider: 'openai',
+      model: 'gpt-4o',
+    })
+    f2.create.mockImplementationOnce(async (input: any) => {
+      const handle = await f2.create.getMockImplementation()!(input)
+      return handle
+    })
+    await service2.reply({ chatId: 'a', chatType: 'p2p', threadId: 't1', content: 'hello' })
+    const createCall = f2.create.mock.calls[0]![0] as any
+    expect(createCall.sessionId).toBe(service2.resolveSessionIdFor(topicA))
+    expect(createCall.agentOptions).toMatchObject({ provider: 'openai', model: 'gpt-4o' })
   })
 })

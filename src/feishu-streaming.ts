@@ -34,7 +34,7 @@ interface BridgeHolder {
 
 /** Channel adapter for sending and updating cards. */
 export interface FeishuStreamingChannel {
-  send(to: string, input: { card: object }, opts?: { replyInThread?: boolean }): Promise<{ messageId?: string }>
+  send(to: string, input: { card: object }, opts?: { replyInThread?: boolean; replyTo?: string }): Promise<{ messageId?: string }>
   updateCard(messageId: string, card: object): Promise<void>
 }
 
@@ -114,6 +114,8 @@ interface SessionStepState {
   /** Time of last tool/result or assistant/message (step fully complete). */
   completedTime: number
   usage: StepUsage | undefined
+  /** Context window info for the current session (fetched once per turn). */
+  contextMeta: { contextWindow: number; lastInputTokens: number } | undefined
   // --- Turn-level aggregation ---
   turnStats: TurnStats | undefined
 }
@@ -151,6 +153,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
         messageTime: 0,
         completedTime: 0,
         usage: undefined,
+        contextMeta: undefined,
         turnStats: undefined,
       }
       sessionStates.set(sessionId, state)
@@ -188,7 +191,17 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
       ? Date.now() - state.stepStartTime
       : undefined
 
-    return renderStepCard(reasoning, text, tools, state.usage, stepDurationMs)
+    // Token output speed: output tokens ÷ decode time (first token → message).
+    // Falls back to now when the assembled message hasn't arrived yet.
+    let tps: number | undefined
+    if (state.usage !== undefined && state.usage.outputTokens > 0 && state.firstTokenTime > 0) {
+      const decodeMs = state.messageTime > state.firstTokenTime
+        ? state.messageTime - state.firstTokenTime
+        : Date.now() - state.firstTokenTime
+      if (decodeMs > 0) tps = state.usage.outputTokens / (decodeMs / 1000)
+    }
+
+    return renderStepCard(reasoning, text, tools, state.usage, stepDurationMs, tps, state.contextMeta)
   }
 
   /** Send the initial step card and track its messageId. */
@@ -205,7 +218,9 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
     state.stepCardMessageId = channel.send(
       chat.chatId,
       { card },
-      chat.threadId !== undefined ? { replyInThread: true } : {},
+      chat.threadId !== undefined
+        ? { replyInThread: true, ...(chat.rootId !== undefined ? { replyTo: chat.rootId } : {}) }
+        : {},
     ).then((result) => {
       console.log(`dsh-feishu: [send] step card sent, messageId=${result?.messageId}`)
       return result?.messageId
@@ -214,6 +229,9 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
       logger.warn(`dsh-feishu: step card send failed: ${error instanceof Error ? error.message : String(error)}`)
       return undefined
     })
+    // Track the send promise so flushed() can wait for the final step card's
+    // message to be created before the Turn Complete footer is sent.
+    lastStepSendPromises.set(sessionId, state.stepCardMessageId)
   }
 
   /**
@@ -231,6 +249,14 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
 
   /** Flush promises: resolved by turn/end after the final card update. */
   const flushPromises = new Map<string, { promise: Promise<void>; resolve: () => void }>()
+
+  /**
+   * The most recent step-card `send` promise per session. `flushed()` awaits
+   * it so the Turn Complete footer is only sent AFTER the final step card's
+   * message was created — otherwise the footer can race ahead of the last
+   * step card and appear before it in the chat.
+   */
+  const lastStepSendPromises = new Map<string, Promise<string | undefined>>()
 
   /** Turn stats per session, stored independently of flush promise timing. */
   const turnStatsMap = new Map<string, TurnStats>()
@@ -440,6 +466,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
           // Don't reset lastStepHadContent here;
           // it's consumed by channel.ts after bridge.reply() returns.
           resetStep(state)
+          lastStepSendPromises.delete(sessionId)
           state.turnStats = {
             turnStartTime: event.time ?? Date.now(),
             stepCount: 0,
@@ -459,6 +486,14 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
           let resolve!: () => void
           const promise = new Promise<void>((r) => { resolve = r })
           flushPromises.set(sessionId, { promise, resolve })
+          // Fetch context-window info once per turn so step-card footers can
+          // show the context percentage. Refreshes the live card on arrival.
+          if (chat !== undefined) {
+            bridge.getSessionMeta(chat).then((meta) => {
+              state.contextMeta = { contextWindow: meta.contextWindow, lastInputTokens: meta.lastInputTokens }
+              if (state.stepCardSent) updateStepCard(state)
+            }).catch(() => undefined)
+          }
         } else if (event.type === 'turn/end') {
           // Flush any pending debounced updateCard before resetting, so the
           // final card content is committed before channel.ts sends the footer.
@@ -520,13 +555,13 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
   /** Wait for the final step card update to complete before sending footer. Returns turn stats. */
   const flushed = (sessionId: string): Promise<TurnStats | undefined> => {
     const entry = flushPromises.get(sessionId)
-    if (entry !== undefined) {
-      // Wait for turn/end to flush, then read turn stats.
-      return entry.promise.then(() => turnStatsMap.get(sessionId))
-    }
-    // No flush entry — turn/end already fired or never started.
-    // Return turn stats directly if available.
-    return Promise.resolve(turnStatsMap.get(sessionId))
+    const lastSend = lastStepSendPromises.get(sessionId)
+    const flushReady = entry !== undefined ? entry.promise : Promise.resolve()
+    return flushReady
+      // Wait for the last step card's message to be created so the Turn
+      // Complete footer never overtakes the final step card in the chat.
+      .then(() => lastSend)
+      .then(() => turnStatsMap.get(sessionId))
   }
 
   return {
@@ -536,6 +571,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
       pendingUpdates.clear()
       sessionStates.clear()
       turnStatsMap.clear()
+      lastStepSendPromises.clear()
       for (const entry of flushPromises.values()) entry.resolve()
       flushPromises.clear()
     },
@@ -571,6 +607,8 @@ function renderStepCard(
   tools: StepToolCall[],
   usage?: StepUsage,
   stepDurationMs?: number,
+  tps?: number,
+  contextMeta?: { contextWindow: number; lastInputTokens: number },
 ): object {
   const elements: object[] = []
 
@@ -579,15 +617,15 @@ function renderStepCard(
     const displayReasoning = reasoning.length > 3000 ? reasoning.slice(0, 3000) + '\n…(truncated)' : reasoning
     elements.push({
       tag: 'markdown',
-      content: `🧠 **Reasoning**\n\`\`\`\`\`\n${displayReasoning}\n\`\`\`\`\``,
+      content: `💬 **Reasoning**\n\`\`\`\`\`\n${displayReasoning}\n\`\`\`\`\``,
     })
   }
 
-  // Text section
+  // Text section — with a title, mirroring the Reasoning / Tool Call sections.
   if (text !== undefined && text !== '') {
     const displayText = text.length > 3000 ? text.slice(0, 3000) + '\n…(truncated)' : text
     if (elements.length > 0) elements.push({ tag: 'hr' })
-    elements.push({ tag: 'markdown', content: displayText })
+    elements.push({ tag: 'markdown', content: `📝 **Message**\n\n${displayText}` })
   }
 
   // Tool calls section
@@ -632,7 +670,7 @@ function renderStepCard(
     elements.push({ tag: 'markdown', content: '*(empty)*' })
   }
 
-  // Step footer: duration + token counts
+  // Step footer: duration + token counts + output speed + context %
   const footerParts: string[] = []
   if (stepDurationMs !== undefined && stepDurationMs > 0) {
     footerParts.push(stepDurationMs >= 1000
@@ -640,8 +678,14 @@ function renderStepCard(
       : `⏱ ${stepDurationMs}ms`)
   }
   if (usage !== undefined) {
-    footerParts.push(`📥 ${formatTokenCount(usage.inputTokens)} in`)
-    footerParts.push(`📤 ${formatTokenCount(usage.outputTokens)} out`)
+    footerParts.push(`📥 ${formatTokenCount(usage.inputTokens)} → 📤 ${formatTokenCount(usage.outputTokens)}`)
+  }
+  if (tps !== undefined && tps > 0) {
+    footerParts.push(`🚀 ${tps.toFixed(0)} tok/s`)
+  }
+  if (contextMeta !== undefined && contextMeta.contextWindow > 0 && contextMeta.lastInputTokens > 0) {
+    const pct = Math.min(100, Math.round(contextMeta.lastInputTokens / contextMeta.contextWindow * 100))
+    footerParts.push(`📊 ${formatTokenCount(contextMeta.lastInputTokens)}/${formatTokenCount(contextMeta.contextWindow)} (${pct}%)`)
   }
   if (footerParts.length > 0) {
     elements.push({ tag: 'hr' })

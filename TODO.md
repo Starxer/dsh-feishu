@@ -51,7 +51,28 @@
 | 9 | 流式输出 → CardKit | **低** | 解决 5 QPS 瓶颈，需调研 CardKit API |
 | 7 | 多 thread 话题导航 | **低** | 飞书话题映射 DSH session，底层已通 |
 | 8 | 文档与版本一致性 | **低** | README 过期、版本号不一致 |
+| — | `/thread` 改名为 `/session` | **中** | 命令实际操作 DSH session（`listSessions`/`switchToSession`），叫 `thread` 与飞书原生"话题"混淆、与 WebUI「会话」心智不一致。**不保留 `/thread` 别名**。待改文件清单见下方 [## `/thread` → `/session` 改名清单](#thread--session-改名清单) |
 | — | 飞书 SDK 卡片回调补丁追踪 | **低** | 检查 `@larksuiteoapi/node-sdk` 是否有新版本修复 `MessageType.CARD` 被过滤的问题；确认补丁是修复 SDK 本身还是 DSH 的消息处理链路（见「已知问题」Node.js SDK MessageType.CARD 被过滤） |
+
+---
+
+## `/thread` → `/session` 改名清单
+
+> 命令实际操作的是 DSH session（`bridge.listSessions()` / `bridge.switchToSession()`），`thread` 命名与飞书原生"话题"混淆，且与 WebUI「会话」心智不一致。**不保留 `/thread` 别名**，`/help` 列表中只出现 `/session`。
+>
+> ⚠️ 只改**命令相关**的 thread 引用；`threadId` / `replyInThread` / `thread_id`（飞书话题消息坐标）与命令无关，**不要动**。
+
+| 文件 | 改动内容 |
+|---|---|
+| `src/commands.ts` | 翻译键 `threadDescription`/`threadUsage`/`threadListHeader`/`threadListEmpty`/`threadListEntry`/`threadSwitched`/`threadInvalidIndex`/`threadArchived`/`threadIdle`/`threadLastActive*` → `session*`；`name: 'thread'` → `'session'`；`handleThreadCommand` 函数名；`formatRelativeTime` 内 `t.threadLastActive*` 引用 |
+| `src/index.ts` | `executeSlashCommand` 中 `parsed.name === 'thread'` → `'session'`；translations 定义（约 489-502 行）的 `threadXxx` 键 → `sessionXxx`；`handleThreadDirect` 函数名及内部 `t.thread*` 引用 |
+| `tests/commands.spec.ts` | stub translations 的 `threadXxx` 键 → `sessionXxx`；`registered.map(item => item.name)` 期望数组 `'thread'` → `'session'`；`describe('/thread command')`；`item.name === 'thread'` 查找；`Usage: /thread [N]` 断言文本 |
+| `README.md` | 斜杠命令表 `/thread` → `/session`；`\| /thread [N] \| 列出/切换会话 \|` 行 |
+| `AGENTS.md` | 3 处 `/thread` 提及（功能对齐表"多 thread 并行工作"行、session 映射持久化行）→ `/session` |
+| `CHANGELOG.md` | 在 Unreleased 段**新增**一条改名记录（历史条目保留原文不动） |
+| `TODO.md` | 本文档自身："多 thread 话题导航"行中 `/new` `/thread` 已通 → `/new` `/session` |
+
+不需要改：`tests/harness.spec.ts`（无 thread 字样，经确认）；`src/harness.ts` / `src/conversation.ts` / `src/channel.ts` / `src/feishu-*.ts` / `docs/architecture.md`（仅含飞书话题 `threadId`/`replyInThread`，与命令无关）。
 
 ---
 

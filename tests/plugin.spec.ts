@@ -65,7 +65,7 @@ describe('startChannel', () => {
   it('uses WebSocket policy defaults and replies to the inbound message', async () => {
     const channel = fakeChannel()
     const factory = vi.fn(() => channel as any)
-    const bridge = { reply: vi.fn(async () => 'Hello **Lark**'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session') }
+    const bridge = { reply: vi.fn(async () => 'Hello **Lark**'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const { stop } = await startChannel({
       appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
@@ -86,7 +86,7 @@ describe('startChannel', () => {
 
   it('skips the reaction when reactEmoji is empty', async () => {
     const channel = fakeChannel()
-    const bridge = { reply: vi.fn(async () => 'ok'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session') }
+    const bridge = { reply: vi.fn(async () => 'ok'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const { stop } = await startChannel({
       appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
@@ -102,7 +102,7 @@ describe('startChannel', () => {
   it('logs a warning but still replies when the reaction fails', async () => {
     const channel = fakeChannel()
     channel.addReaction.mockRejectedValueOnce(new Error('reaction denied'))
-    const bridge = { reply: vi.fn(async () => 'ok'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session') }
+    const bridge = { reply: vi.fn(async () => 'ok'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const { stop } = await startChannel({
       appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
@@ -117,7 +117,7 @@ describe('startChannel', () => {
 
   it('sends a safe fallback when the Harness turn fails', async () => {
     const channel = fakeChannel()
-    const bridge = { reply: vi.fn(async () => { throw new Error('secret stack') }), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session') }
+    const bridge = { reply: vi.fn(async () => { throw new Error('secret stack') }), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
     const terminal = { error: vi.fn() }
     await startChannel({ appId: 'id', appSecret: 'secret', domain: 'lark', requireMention: true, dmMode: 'open', groupAllowlist: [], dmAllowlist: [], workspace: '/work', errorMessage: 'safe error', reactEmoji: 'THUMBSUP', showIntermediateMessages: false, showReasoning: true }, bridge, () => channel as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, terminal)
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'group', threadId: 'omt_1', content: 'hi' })
@@ -129,7 +129,7 @@ describe('startChannel', () => {
   it('disposes conversation resources when channel disconnect fails', async () => {
     const channel = fakeChannel()
     channel.disconnect.mockRejectedValueOnce(new Error('disconnect failed'))
-    const bridge = { reply: vi.fn(async () => ''), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session') }
+    const bridge = { reply: vi.fn(async () => ''), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
     const { stop } = await startChannel({
       appId: 'id', appSecret: 'secret', domain: 'lark', requireMention: true, dmMode: 'open',
       groupAllowlist: [], dmAllowlist: [], workspace: '/work', errorMessage: 'safe error', reactEmoji: 'THUMBSUP', showIntermediateMessages: false, showReasoning: true,
@@ -141,7 +141,7 @@ describe('startChannel', () => {
   it('logs an initial connection failure to the Harness logger and terminal without exposing the secret', async () => {
     const channel = fakeChannel()
     channel.connect.mockRejectedValueOnce(new Error('authentication failed for secret'))
-    const bridge = { reply: vi.fn(async () => ''), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session') }
+    const bridge = { reply: vi.fn(async () => ''), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const terminal = { error: vi.fn() }
 
@@ -157,7 +157,7 @@ describe('startChannel', () => {
 
   it('routes a slash command through the handler instead of the bridge', async () => {
     const channel = fakeChannel()
-    const bridge = { reply: vi.fn(async () => 'agent answer'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session') }
+    const bridge = { reply: vi.fn(async () => 'agent answer'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const slashCommand = vi.fn(async () => ({ kind: 'success' as const, text: 'command answer' }))
     const { stop } = await startChannel({
@@ -173,7 +173,7 @@ describe('startChannel', () => {
 
   it('falls back to the bridge reply when the slash handler returns undefined', async () => {
     const channel = fakeChannel()
-    const bridge = { reply: vi.fn(async () => 'agent answer'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session') }
+    const bridge = { reply: vi.fn(async () => 'agent answer'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     const slashCommand = vi.fn(async () => undefined)
     await startChannel({
@@ -189,7 +189,7 @@ describe('startChannel', () => {
 
   it('reports a slash-command failure with the safe fallback and skips the bridge', async () => {
     const channel = fakeChannel()
-    const bridge = { reply: vi.fn(async () => 'agent answer'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session') }
+    const bridge = { reply: vi.fn(async () => 'agent answer'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
     const terminal = { error: vi.fn() }
     const slashCommand = vi.fn(async () => { throw new Error('boom') })
     await startChannel({
@@ -204,7 +204,7 @@ describe('startChannel', () => {
 
   it('downloads image resources and attaches ImageBlocks to the bridge call', async () => {
     const channel = fakeChannel()
-    const bridge = { reply: vi.fn(async () => 'described image'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session') }
+    const bridge = { reply: vi.fn(async () => 'described image'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
     const attachments = fakeAttachments()
     const { stop } = await startChannel({
       appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
@@ -230,7 +230,7 @@ describe('startChannel', () => {
 
   it('rejects image-bearing messages when no attachment service is composed', async () => {
     const channel = fakeChannel()
-    const bridge = { reply: vi.fn(async () => 'should not happen'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session') }
+    const bridge = { reply: vi.fn(async () => 'should not happen'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
     await startChannel({
       appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
       groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: 'THUMBSUP', showIntermediateMessages: false, showReasoning: true,
@@ -249,7 +249,7 @@ describe('startChannel', () => {
 
   it('reports image-admission failures with the safe fallback and skips the bridge', async () => {
     const channel = fakeChannel()
-    const bridge = { reply: vi.fn(async () => 'should not happen'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session') }
+    const bridge = { reply: vi.fn(async () => 'should not happen'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
     const terminal = { error: vi.fn() }
     const attachments = fakeAttachments({
       saveImage: async () => { throw new Error('storage full') },

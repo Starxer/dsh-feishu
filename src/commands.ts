@@ -63,15 +63,23 @@ export interface CommandTranslations {
   readonly modelPersisted: string
   readonly modelLiveApplied: string
   readonly newDescription: string
+  readonly newUsage: string
   readonly newSessionReady: (sessionId: string) => string
   readonly threadDescription: string
   readonly threadUsage: string
   readonly threadListHeader: string
   readonly threadListEmpty: string
   readonly threadListEntry: (index: number, id: string, title: string, lastActive: string) => string
+  readonly threadListEntryOwned: (index: number, id: string, title: string, lastActive: string, ownerLabel: string) => string
   readonly threadSwitched: (index: number, id: string) => string
   readonly threadInvalidIndex: string
   readonly threadArchived: string
+  readonly threadOccupied: (ownerLabel: string) => string
+  readonly detachDescription: string
+  readonly detachUsage: string
+  readonly detachInvalidIndex: string
+  readonly detachFree: string
+  readonly detachReleased: (index: number, id: string, ownerLabel: string) => string
   /** Title fallback when the bridge has no in-memory events for a cold
    *  session; receives the session id so the surface can show a short prefix
    *  that distinguishes multiple cold sessions from one another. */
@@ -202,7 +210,7 @@ export function registerLarkCommands(
   agentDefaultModel: AgentDefaultModelConfig,
   bridge: Pick<
     HarnessConversationService,
-    'setCurrentSelection' | 'currentSelectionFor' | 'startNewSession' | 'switchToSession' | 'listSessions' | 'getSessionMeta' | 'resolveAgent' | 'resolveSessionIdFor'
+    'setCurrentSelection' | 'currentSelectionFor' | 'startNewSession' | 'switchToSession' | 'detachSession' | 'listSessions' | 'getSessionMeta' | 'resolveAgent' | 'resolveSessionIdFor' | 'describeChatKey'
   >,
   chatMessageFor: (invocation: CommandInvocation) => ConversationMessage,
   t: CommandTranslations,
@@ -242,6 +250,15 @@ export function registerLarkCommands(
         invocation,
         bridge,
         chatMessageFor,
+        t,
+      ),
+    })
+    yield ctx.commands.register({
+      name: 'detach',
+      description: t.detachDescription,
+      handler: invocation => handleDetachCommand(
+        invocation,
+        bridge,
         t,
       ),
     })
@@ -288,7 +305,7 @@ export function registerLarkCommands(
         apiProxy,
       ),
     })
-  }, 'dsh-feishu: /model /new /thread /help /approve /deny /approvals /status /stream /reasoning commands')
+  }, 'dsh-feishu: /model /new /thread /detach /help /approve /deny /approvals /status /stream /reasoning commands')
 }
 
 async function handleModelCommand(
@@ -450,20 +467,26 @@ async function handleReasoningCommand(
 }
 
 /**
- * Handle `/new`. Redirects the chat to a fresh, never-used session id so the
- * next regular message starts a clean conversation. The salt uses a
- * monotonically increasing counter so two consecutive `/new` calls in the
- * same chat land on different sessions.
+ * Handle `/new`. Since the card flow (workspace → preset → model) is the
+ * primary path and is started by the channel-level handler, the command
+ * runtime entry only surfaces the required text form. The channel handler
+ * intercepts `/new` before reaching the agent's command runtime, so this
+ * fallback is defensive: it requires explicit workspace + preset arguments.
  */
 async function handleNewCommand(
-  _invocation: CommandInvocation,
-  bridge: Pick<HarnessConversationService, 'startNewSession'>,
-  chatMessageFor: (invocation: CommandInvocation) => ConversationMessage,
+  invocation: CommandInvocation,
+  _bridge: Pick<HarnessConversationService, 'startNewSession'>,
+  _chatMessageFor: (invocation: CommandInvocation) => ConversationMessage,
   t: CommandTranslations,
 ): Promise<CommandResult> {
-  const salt = `new-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-  const sessionId = bridge.startNewSession(chatMessageFor(_invocation), salt)
-  return { kind: 'success', text: t.newSessionReady(sessionId) }
+  const args = invocation.rawInput.trim().split(/\s+/).filter(s => s !== '')
+  if (args.length < 2) {
+    return { kind: 'error', text: t.newUsage }
+  }
+  // The channel handler performs the actual creation with card feedback;
+  // reaching this fallback means the message bypassed the channel, so we
+  // refuse rather than silently create a session without workspace/preset.
+  return { kind: 'error', text: t.newUsage }
 }
 
 /**
@@ -473,7 +496,7 @@ async function handleNewCommand(
  */
 async function handleThreadCommand(
   invocation: CommandInvocation,
-  bridge: Pick<HarnessConversationService, 'switchToSession' | 'listSessions'>,
+  bridge: Pick<HarnessConversationService, 'switchToSession' | 'listSessions' | 'describeChatKey'>,
   chatMessageFor: (invocation: CommandInvocation) => ConversationMessage,
   t: CommandTranslations,
 ): Promise<CommandResult> {
@@ -490,7 +513,10 @@ async function handleThreadCommand(
       // them from live ones they have just started.
       const title = entry.title === '' ? t.threadIdle(entry.id) : entry.title.replace(/\s+/g, ' ').slice(0, 60)
       const lastActive = formatRelativeTime(entry.updatedAt, t)
-      lines.push(t.threadListEntry(index + 1, entry.id, title, lastActive))
+      const ownerLabel = entry.ownedBy === undefined ? undefined : bridge.describeChatKey(entry.ownedBy)
+      lines.push(ownerLabel === undefined
+        ? t.threadListEntry(index + 1, entry.id, title, lastActive)
+        : t.threadListEntryOwned(index + 1, entry.id, title, lastActive, ownerLabel))
     })
     lines.push(t.threadUsage)
     return { kind: 'success', text: lines.join('\n') }
@@ -504,10 +530,41 @@ async function handleThreadCommand(
   if (entry === undefined) {
     return { kind: 'error', text: `${t.threadInvalidIndex}\n${t.threadUsage}` }
   }
-  if (!bridge.switchToSession(chatMessageFor(invocation), entry.id)) {
+  const result = bridge.switchToSession(chatMessageFor(invocation), entry.id)
+  if (result === 'archived') {
     return { kind: 'error', text: t.threadArchived }
   }
+  if (result === 'occupied') {
+    const ownerLabel = entry.ownedBy === undefined ? '另一个对话框' : bridge.describeChatKey(entry.ownedBy)
+    return { kind: 'error', text: t.threadOccupied(ownerLabel) }
+  }
   return { kind: 'success', text: t.threadSwitched(index, entry.id) }
+}
+
+/**
+ * Handle `/detach`. Force-releases one session (by `/thread` list index) so
+ * any dialog can switch onto it; the previous owner is reset to a brand-new
+ * session (same effect as `/new` in that dialog).
+ */
+async function handleDetachCommand(
+  invocation: CommandInvocation,
+  bridge: Pick<HarnessConversationService, 'detachSession' | 'listSessions'>,
+  t: CommandTranslations,
+): Promise<CommandResult> {
+  const index = Number.parseInt(invocation.rawInput.trim(), 10)
+  if (!Number.isInteger(index) || index < 1) {
+    return { kind: 'error', text: `${t.detachInvalidIndex}\n${t.detachUsage}` }
+  }
+  const sessions = await bridge.listSessions()
+  const entry = sessions[index - 1]
+  if (entry === undefined) {
+    return { kind: 'error', text: `${t.detachInvalidIndex}\n${t.detachUsage}` }
+  }
+  const outcome = bridge.detachSession(entry.id)
+  if (outcome.kind === 'free') {
+    return { kind: 'success', text: t.detachFree }
+  }
+  return { kind: 'success', text: t.detachReleased(index, entry.id, outcome.ownerLabel) }
 }
 
 /**
