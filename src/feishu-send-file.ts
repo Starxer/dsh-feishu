@@ -23,6 +23,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { LarkChannel } from '@larksuiteoapi/node-sdk'
 import type { HarnessConversationService } from './harness.ts'
+import { errorText } from './error-text.ts'
 
 /** Feishu file-message ceiling (`im.v1.file.create` rejects > 30 MB). */
 const MAX_FILE_BYTES = 30 * 1024 * 1024
@@ -138,12 +139,21 @@ export function startFeishuSendFileTool(deps: FeishuSendFileDeps): () => void {
       // Optional caption first, so the explanation precedes the attachment.
       let captionSent = false
       if (args.caption !== undefined && args.caption.trim() !== '') {
-        await ch.send(chat.chatId, { text: args.caption }, opts)
-        captionSent = true
+        try {
+          await ch.send(chat.chatId, { text: args.caption }, opts)
+          captionSent = true
+        } catch (error: unknown) {
+          throw new Error(`Failed to send caption via Feishu: ${errorText(error, 'unknown Feishu error')}`)
+        }
       }
 
       exec.signal.throwIfAborted()
-      const result = await ch.send(chat.chatId, { file: { source: bytes, fileName } }, opts)
+      // Surfacing the specific reason (and Feishu API code, e.g. 230021 for an
+      // oversized file) on failure lets the agent report exactly why the send
+      // failed instead of a generic "send failed".
+      const result = await ch.send(chat.chatId, { file: { source: bytes, fileName } }, opts).catch((error: unknown) => {
+        throw new Error(`Failed to send "${fileName}" via Feishu: ${errorText(error, 'unknown Feishu error')}`)
+      })
       logger.warn(`dsh-feishu: feishu_send_file sent "${fileName}" to chat ${chat.chatId}`)
 
       return {

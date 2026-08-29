@@ -115,7 +115,7 @@ describe('startChannel', () => {
     await stop()
   })
 
-  it('sends a safe fallback when the Harness turn fails', async () => {
+  it('surfaces the turn failure reason instead of a bare apology', async () => {
     const channel = fakeChannel()
     const bridge = { reply: vi.fn(async () => { throw new Error('secret stack') }), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
     const terminal = { error: vi.fn() }
@@ -123,7 +123,7 @@ describe('startChannel', () => {
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'group', threadId: 'omt_1', content: 'hi' })
     await flushAsync()
     expect(terminal.error).toHaveBeenCalledWith('dsh-feishu: message handling failed: secret stack')
-    expect(channel.send).toHaveBeenCalledWith('oc_1', { text: 'safe error' }, { replyTo: 'om_1', replyInThread: true })
+    expect(channel.send).toHaveBeenCalledWith('oc_1', { text: '处理这条消息时出错：secret stack' }, { replyTo: 'om_1', replyInThread: true })
   })
 
   it('disposes conversation resources when channel disconnect fails', async () => {
@@ -199,7 +199,7 @@ describe('startChannel', () => {
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'p2p', content: '/model' })
     expect(bridge.reply).not.toHaveBeenCalled()
     expect(terminal.error).toHaveBeenCalledWith('dsh-feishu: slash command failed: boom')
-    expect(channel.send).toHaveBeenCalledWith('oc_1', { text: 'safe error' }, { replyTo: 'om_1', replyInThread: false })
+    expect(channel.send).toHaveBeenCalledWith('oc_1', { text: '命令执行出错：boom' }, { replyTo: 'om_1', replyInThread: false })
   })
 
   it('downloads image resources and attaches ImageBlocks to the bridge call', async () => {
@@ -264,6 +264,6 @@ describe('startChannel', () => {
     })
     expect(terminal.error).toHaveBeenCalledWith('dsh-feishu: image admission failed: storage full')
     expect(bridge.reply).not.toHaveBeenCalled()
-    expect(channel.send).toHaveBeenCalledWith('oc_4', { text: 'safe error' }, { replyTo: 'om_4', replyInThread: false })
+    expect(channel.send).toHaveBeenCalledWith('oc_4', { text: '图片处理出错：storage full' }, { replyTo: 'om_4', replyInThread: false })
   })
 })

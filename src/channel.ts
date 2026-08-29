@@ -8,6 +8,7 @@ import type { AttachmentStore, ImageAttachmentRef, SaveImageAttachment } from '@
 import type { RuntimeConfig } from './config.ts'
 import type { HarnessConversationService, InboundMessage } from './harness.ts'
 import type { TurnStats } from './feishu-streaming.ts'
+import { errorText } from './error-text.ts'
 
 export type ChannelFactory = (options: LarkChannelOptions) => LarkChannel
 export interface PluginLogger {
@@ -279,7 +280,7 @@ export async function startChannel(
           }
         } catch (error: unknown) {
           logError(`dsh-feishu: slash command failed: ${error instanceof Error ? error.message : String(error)}`)
-          await channel.send(message.chatId, { text: config.errorMessage }, {
+          await channel.send(message.chatId, { text: `命令执行出错：${errorText(error, config.errorMessage)}` }, {
             replyTo: replyToId,
             replyInThread,
           }).catch((sendError: unknown) => {
@@ -312,7 +313,7 @@ export async function startChannel(
           inboundMessage = { ...inboundMessage, imageBlocks }
         } catch (error: unknown) {
           logError(`dsh-feishu: image admission failed: ${error instanceof Error ? error.message : String(error)}`)
-          await channel.send(message.chatId, { text: config.errorMessage }, {
+          await channel.send(message.chatId, { text: `图片处理出错：${errorText(error, config.errorMessage)}` }, {
             replyTo: replyToId,
             replyInThread,
           }).catch(() => undefined)
@@ -382,7 +383,7 @@ export async function startChannel(
           }
         }).catch((error: unknown) => {
           logError(`dsh-feishu: message handling failed: ${error instanceof Error ? error.message : String(error)}`)
-          void channel.send(chatId, { text: config.errorMessage }, {
+          void channel.send(chatId, { text: `处理这条消息时出错：${errorText(error, config.errorMessage)}` }, {
             replyTo: replyToId,
             replyInThread,
           }).catch((sendError: unknown) => {
@@ -392,7 +393,7 @@ export async function startChannel(
       } catch (error: unknown) {
         // Synchronous errors from bridge.reply() setup (rare)
         logError(`dsh-feishu: message dispatch failed: ${error instanceof Error ? error.message : String(error)}`)
-        await channel.send(message.chatId, { text: config.errorMessage }, {
+        await channel.send(message.chatId, { text: `处理这条消息时出错：${errorText(error, config.errorMessage)}` }, {
           replyTo: replyToId,
           replyInThread,
         }).catch(() => undefined)
