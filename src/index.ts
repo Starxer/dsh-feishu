@@ -44,19 +44,9 @@ export { ConfigSchema } from './config.ts'
 import { startFeishuQuestions } from './feishu-questions.ts'
 import { startFeishuSendFileTool } from './feishu-send-file.ts'
 import { startFeishuModelSelect, renderProviderSelectCard, sendModelCardV2, type ModelSelectChannel } from './feishu-model-select.ts'
+import { startFeishuPermission, SANDBOX_MODES, PERMISSION_LABELS, type FeishuPermissionHandle } from './feishu-permission.ts'
 import { startFeishuOnboarding, type FeishuOnboardingHandle } from './feishu-onboarding.ts'
 import type { ChatCreationOptions } from './harness.ts'
-
-/** DSH file-sandbox mode vocabulary (mirrors `dsh-sandbox-policy`). */
-const SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const
-
-/** User-facing labels matching the DSH WebUI `ui-permission-presets` plugin
- *  (kebab-case → title case; `danger-full-access` → the product label 'Full access'). */
-const PERMISSION_LABELS: Record<string, string> = {
-  'read-only': 'Read Only',
-  'workspace-write': 'Workspace Write',
-  'danger-full-access': 'Full access',
-}
 
 export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void> {
   console.log('dsh-feishu: apply() called, sessionController=', ctx.get('sessionController') !== undefined ? 'available' : 'UNDEFINED', 'userQuestions=', ctx.get('userQuestions') !== undefined ? 'available' : 'UNDEFINED', 'approval=', ctx.get('approval') !== undefined ? 'available' : 'UNDEFINED')
@@ -135,6 +125,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   let stopSendFileTool: () => void = () => undefined
   let modelSelectHandle: { dispose: () => void; cardByMessage: Map<string, string>; sequenceByCard: Map<string, number> } | undefined = undefined
   let onboardingHandle: FeishuOnboardingHandle | undefined = undefined
+  let permissionHandle: FeishuPermissionHandle | undefined = undefined
   const channelHolder: { current: LarkChannel | undefined } = { current: undefined }
   // The approvals handle IS the ApprovalControl surface; the new
   // approval/request waterfall listener inside startFeishuApprovals owns the
@@ -326,7 +317,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
           ctx.logger('dsh-feishu').info(`dsh-feishu: /stream toggle: ${current} → ${next}`)
           void settings.mutate(namespace, [{ op: 'set', path: ['showIntermediateMessages'], value: next }], currentRevision())
           return { enabled: next as boolean }
-        }, sessionController, agents, sandboxPolicy, llm, defaultModel, cardChannel,
+        }, sessionController, agents, sandboxPolicy, permissionHandle, llm, defaultModel, cardChannel,
         modelSelectHandle !== undefined ? { cardByMessage: modelSelectHandle.cardByMessage, sequenceByCard: modelSelectHandle.sequenceByCard } : undefined,
         onboardingHandle, workspaceRegistry, agentPresets),
         attachments,
@@ -387,6 +378,14 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     ctx,
     bridgeHolder,
     channelHolder,
+    logger: ctx.logger('dsh-feishu'),
+  })
+  // Interactive `/permission` picker card. Independent of the questions/
+  // approvals seams; only needs the live card channel + the sandbox policy.
+  permissionHandle = startFeishuPermission({
+    channel: cardChannel,
+    sandbox: sandboxPolicy,
+    sessionGetter: (id: string) => (agents as any)?.get?.(id)?.session,
     logger: ctx.logger('dsh-feishu'),
   })
   if (sessionController !== undefined && userQuestions !== undefined && approval !== undefined) {
@@ -511,7 +510,8 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     stopStreaming()
     stopSendFileTool()
     modelSelectHandle?.dispose()
-  }, 'dsh-feishu: feishu questions + approvals + todos + streaming + send-file + model-select listeners')
+    permissionHandle?.stop()
+  }, 'dsh-feishu: feishu questions + approvals + todos + streaming + send-file + model-select + permission listeners')
 
   let lastPrintedQrUrl: string | undefined
   const provisionManager = new ProvisionManager({
@@ -896,6 +896,7 @@ async function executeSlashCommand(
   sessionController?: { selectModel?: (r: any) => Promise<any>; cancel?: (r: any) => Promise<any> },
   agents?: { get: (id: any) => { cancel: (cause: { kind: 'user' }, opts: { keepInbox?: boolean }) => void; session?: any } | undefined },
   sandboxPolicy?: { resolve?: (r: { session?: any }) => { mode: string; workspaceRoot?: string } },
+  permissionCard?: { open: (chat: ConversationMessage, sessionId: string) => Promise<string | undefined> },
   llm?: LlmRuntime,
   agentDefaultModel?: AgentDefaultModelConfig,
   cardChannel?: ModelSelectChannel,
@@ -1084,6 +1085,18 @@ async function executeSlashCommand(
     const current = sandboxPolicy.resolve({ session }).mode
     const currentLabel = PERMISSION_LABELS[current] ?? current
     if (raw === '') {
+      // Interactive picker card: clicking a button switches the mode and the
+      // card re-marks the active preset. Fall back to a text listing when the
+      // picker handle is unavailable.
+      if (permissionCard !== undefined) {
+        try {
+          await permissionCard.open(chatMessage, sessionId)
+          return { kind: 'consumed' }
+        } catch (error: unknown) {
+          const msg = error instanceof Error ? error.message : String(error)
+          return { kind: 'error', text: `⚠️ /permission 卡片失败：${msg}` }
+        }
+      }
       const lines = [
         '**当前权限模式：**',
         `- \`${current}\` ${currentLabel}${current === 'danger-full-access' ? ' 🔓' : current === 'workspace-write' ? ' ✍️' : ' 📖'}`,
