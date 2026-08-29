@@ -50,6 +50,14 @@ import type { ChatCreationOptions } from './harness.ts'
 /** DSH file-sandbox mode vocabulary (mirrors `dsh-sandbox-policy`). */
 const SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const
 
+/** User-facing labels matching the DSH WebUI `ui-permission-presets` plugin
+ *  (kebab-case → title case; `danger-full-access` → the product label 'Full access'). */
+const PERMISSION_LABELS: Record<string, string> = {
+  'read-only': 'Read Only',
+  'workspace-write': 'Workspace Write',
+  'danger-full-access': 'Full access',
+}
+
 export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void> {
   console.log('dsh-feishu: apply() called, sessionController=', ctx.get('sessionController') !== undefined ? 'available' : 'UNDEFINED', 'userQuestions=', ctx.get('userQuestions') !== undefined ? 'available' : 'UNDEFINED', 'approval=', ctx.get('approval') !== undefined ? 'available' : 'UNDEFINED')
   const agents = ctx.get('agents')
@@ -717,10 +725,9 @@ function renderStatusCard(meta: {
   fields.push(`**Model:** \`${meta.model}\``)
   if (meta.reasoningEffort !== '') fields.push(`**Reasoning:** \`${meta.reasoningEffort}\``)
   if (sandboxMode !== undefined) {
-    const label = sandboxMode === 'workspace-write' ? 'workspace-write ✍️'
-      : sandboxMode === 'danger-full-access' ? 'danger-full-access 🔓'
-        : sandboxMode === 'read-only' ? 'read-only 📖' : sandboxMode
-    fields.push(`**Sandbox:** \`${sandboxMode}\` (${label})`)
+    const label = PERMISSION_LABELS[sandboxMode] ?? sandboxMode
+    const icon = sandboxMode === 'workspace-write' ? ' ✍️' : sandboxMode === 'danger-full-access' ? ' 🔓' : sandboxMode === 'read-only' ? ' 📖' : ''
+    fields.push(`**Permission:** \`${sandboxMode}\` ${label}${icon}`)
   }
   fields.push(`**Agent:** ${agentRunning ? '🔄 Running' : '⏸️ Idle'}`)
   if (meta.turns > 0 || meta.steps > 0) {
@@ -1055,42 +1062,47 @@ async function executeSlashCommand(
       return { kind: 'error', text: `⚠️ /steer 失败：${error instanceof Error ? error.message : String(error)}` }
     }
   }
-  // /sandbox [mode] shows the current file-sandbox mode or switches it. The
-  // switch mirrors DSH's `dsh-sandbox-policy` per-session override: one
+  // /permission [preset] shows / switches the session file-permission mode.
+  // Naming and labels match the DSH WebUI's `ui-permission-presets` plugin
+  // (the `/permission` command; presets read-only / workspace-write /
+  // danger-full-access shown as Read Only / Workspace Write / Full access).
+  // The switch mirrors `dsh-sandbox-policy`'s per-session override: one
   // log-only `sandbox/mode` event (the `setSandboxMode` write path) that takes
   // effect on the session's next confined call. Reading uses the policy
   // service's resolve (explicit grant > session override > deployment default).
-  if (parsed.name === 'sandbox') {
+  // `/sandbox` is kept as a hidden alias for anyone already using the old name.
+  if (parsed.name === 'permission' || parsed.name === 'sandbox') {
     if (sandboxPolicy?.resolve === undefined) {
-      return { kind: 'error', text: '⚠️ dsh-sandbox-policy 服务不可用，无法管理沙箱模式。' }
+      return { kind: 'error', text: '⚠️ dsh-sandbox-policy 服务不可用，无法管理权限模式。' }
     }
     const sessionId = bridge.resolveSessionIdFor(chatMessage)
     const session = agents?.get(sessionId)?.session as any
     if (session === undefined) {
-      return { kind: 'error', text: '⚠️ 当前 chat 还没有会话，请先发一条消息再执行 /sandbox。' }
+      return { kind: 'error', text: '⚠️ 当前 chat 还没有会话，请先发一条消息再执行 /permission。' }
     }
     const raw = parsed.rawInput.trim()
     const current = sandboxPolicy.resolve({ session }).mode
+    const currentLabel = PERMISSION_LABELS[current] ?? current
     if (raw === '') {
       const lines = [
-        '**当前沙箱模式：**',
-        `- \`${current}\`${current === 'workspace-write' ? ' ✍️' : current === 'danger-full-access' ? ' 🔓' : current === 'read-only' ? ' 📖' : ''}`,
+        '**当前权限模式：**',
+        `- \`${current}\` ${currentLabel}${current === 'danger-full-access' ? ' 🔓' : current === 'workspace-write' ? ' ✍️' : ' 📖'}`,
         '',
-        '**切换方法：** `/sandbox <模式>`',
+        '**切换方法：** `/permission <模式>`',
         '',
         '**可选模式：**',
-        ...SANDBOX_MODES.map(m => `- \`${m}\`${m === current ? ' （当前）' : ''}`),
+        ...SANDBOX_MODES.map(m => `- \`${m}\` ${PERMISSION_LABELS[m] ?? m}${m === current ? ' （当前）' : ''}`),
         '',
         '_切换写入会话日志，下一次受限调用（bash / 文件系统）即生效。_',
       ]
       return { kind: 'success', text: lines.join('\n') }
     }
     if (!(SANDBOX_MODES as readonly string[]).includes(raw)) {
-      return { kind: 'error', text: `⚠️ 未知沙箱模式 \`${raw}\`。可选：${SANDBOX_MODES.join(' | ')}` }
+      return { kind: 'error', text: `⚠️ 未知权限模式 \`${raw}\`。可选：${SANDBOX_MODES.join(' | ')}（对应 Read Only / Workspace Write / Full access）` }
     }
     // setSandboxMode(session, raw) — appends the log-only switch event.
     session.append('sandbox/mode', { mode: raw })
-    return { kind: 'success', text: `✅ 沙箱模式已切换为 \`${raw}\`。将从下一次受限调用起生效。` }
+    return { kind: 'success', text: `✅ 权限模式已切换为 \`${raw}\`（${PERMISSION_LABELS[raw] ?? raw}）。将从下一次受限调用起生效。` }
   }
   // /model with no arguments renders the model selector card (V2 card
   // instance) instead of falling through to commands.execute. The card's
