@@ -34,27 +34,29 @@ import type { TurnStats } from './feishu-streaming.ts'
 export const name = 'lark-channel'
 export const inject = [
   'agents', 'sessions', 'sessionPersistence', 'agentDefaultModel', 'agentPresets', 'workspaceRegistry',
-  'settings', 'credentials', 'webServer', 'commands', 'llm', 'attachments', 'apiProxy',
+  'settings', 'credentials', 'webServer', 'commands', 'llm', 'attachments', 'tools',
+  'sessionController', 'userQuestions', 'approval',
 ]
 export const Config = ConfigSchema
 export type { PluginConfig }
 export { ConfigSchema } from './config.ts'
 
-import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy'
 import { startFeishuQuestions } from './feishu-questions.ts'
+import { startFeishuSendFileTool } from './feishu-send-file.ts'
 import { startFeishuModelSelect, renderProviderSelectCard, sendModelCardV2, type ModelSelectChannel } from './feishu-model-select.ts'
 import { startFeishuOnboarding, type FeishuOnboardingHandle } from './feishu-onboarding.ts'
 import type { ChatCreationOptions } from './harness.ts'
 
 export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void> {
-  console.log('dsh-feishu: apply() called, apiProxy=', ctx.get('apiProxy') !== undefined ? 'available' : 'UNDEFINED')
+  console.log('dsh-feishu: apply() called, sessionController=', ctx.get('sessionController') !== undefined ? 'available' : 'UNDEFINED', 'userQuestions=', ctx.get('userQuestions') !== undefined ? 'available' : 'UNDEFINED', 'approval=', ctx.get('approval') !== undefined ? 'available' : 'UNDEFINED')
   const agents = ctx.get('agents')
   const sessions = ctx.get('sessions')
   const sessionPersistence = ctx.get('sessionPersistence')
   const defaultModel = ctx.get('agentDefaultModel')
   const agentPresets = ctx.get('agentPresets')
-  const apiProxy = ctx.get('apiProxy') as ApiProxy | undefined
+  const sessionController = ctx.get('sessionController')
+  const userQuestions = ctx.get('userQuestions')
+  const approval = ctx.get('approval')
   const workspaceRegistry = ctx.get('workspaceRegistry')
   const settings = ctx.get('settings')
   const credentials = ctx.get('credentials')
@@ -71,15 +73,20 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   if (attachments === undefined) {
     throw new Error('dsh-feishu requires the attachments service for inbound image messages')
   }
-  // apiProxy is optional: when absent (Feishu-only deployments without the
-  // web-app bundle), we simply skip the questions listener. The harness's own
-  // user-questions provider still runs, so an answer via the WebUI is the
-  // only path in that case — the Feishu chat gets no card. We log the gap so
-  // operators see why a deployment loses the option UI.
-  if (apiProxy === undefined) {
-    ctx.logger('dsh-feishu').warn('dsh-feishu: apiProxy unavailable — streaming/questions/approvals/toolcalls/todos will not work')
+  // All three capability seams (session controller, user questions, approval)
+  // must be present for the streaming, question, and approval listeners to
+  // register. Without them the plugin still binds to Lark but the per-step
+  // cards, question cards, and approval cards are disabled.
+  const seamNames: Array<[string, unknown]> = [
+    ['sessionController', sessionController],
+    ['userQuestions', userQuestions],
+    ['approval', approval],
+  ]
+  const missing = seamNames.filter(([, v]) => v === undefined).map(([n]) => n)
+  if (missing.length > 0) {
+    ctx.logger('dsh-feishu').warn(`dsh-feishu: missing services ${missing.join(', ')} — streaming/questions/approvals/toolcalls/todos will not work`)
   } else {
-    ctx.logger('dsh-feishu').info('dsh-feishu: apiProxy available — will start streaming/questions/approvals listeners')
+    ctx.logger('dsh-feishu').info('dsh-feishu: all capability seams present — will start streaming/questions/approvals listeners')
   }
 
   const settingsScope = settings.register(
@@ -113,12 +120,18 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   let consumeLastStepHadContent: (sessionId: string) => boolean = () => false
   let flushed: (sessionId: string) => Promise<TurnStats | undefined> = () => Promise.resolve(undefined)
   let stopTodos: () => void = () => undefined
+  let stopSendFileTool: () => void = () => undefined
   let modelSelectHandle: { dispose: () => void; cardByMessage: Map<string, string>; sequenceByCard: Map<string, number> } | undefined = undefined
   let onboardingHandle: FeishuOnboardingHandle | undefined = undefined
   const channelHolder: { current: LarkChannel | undefined } = { current: undefined }
-  const buildApprovalControl = (apiProxy: ApiProxy): ApprovalControl => {
+  // The approvals handle IS the ApprovalControl surface; the new
+  // approval/request waterfall listener inside startFeishuApprovals owns the
+  // request fan-out and the settle() closes the listener's deferred promise.
+  // The actual startFeishuApprovals call is deferred until cardChannel is
+  // declared below.
+  const buildApprovalControl = (): ApprovalControl => {
     const approvalsHandle = startFeishuApprovals({
-      apiProxy,
+      ctx,
       channel: cardChannel,
       bridgeHolder,
       logger: ctx.logger('dsh-feishu'),
@@ -128,9 +141,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       pendingForSession: approvalsHandle.pendingForSession,
       findPending: approvalsHandle.findPending,
       async settle(view: PendingApprovalView, outcome: 'allowed-once' | 'rejected') {
-        // Use the approvals handle's settle which tracks the card messageId
-        // and updates the approval card after settlement.
-        await approvalsHandle.settle(view.rpcId, outcome)
+        await approvalsHandle.settle(view.pendingId, outcome)
       },
     }
   }
@@ -303,7 +314,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
           ctx.logger('dsh-feishu').info(`dsh-feishu: /stream toggle: ${current} → ${next}`)
           void settings.mutate(namespace, [{ op: 'set', path: ['showIntermediateMessages'], value: next }], currentRevision())
           return { enabled: next as boolean }
-        }, apiProxy, llm, defaultModel, cardChannel,
+        }, sessionController, llm, defaultModel, cardChannel,
         modelSelectHandle !== undefined ? { cardByMessage: modelSelectHandle.cardByMessage, sequenceByCard: modelSelectHandle.sequenceByCard } : undefined,
         onboardingHandle, workspaceRegistry, agentPresets),
         attachments,
@@ -357,21 +368,30 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   runtime.onChannelChange = channel => {
     channelHolder.current = channel
   }
-  if (apiProxy !== undefined) {
+  // `feishu_send_file` is independent of the questions/approvals seams: it only
+  // needs the live channel + the session→chat reverse lookup, so it registers
+  // unconditionally. Unbound sessions fail at execution time with a clear error.
+  stopSendFileTool = startFeishuSendFileTool({
+    ctx,
+    bridgeHolder,
+    channelHolder,
+    logger: ctx.logger('dsh-feishu'),
+  })
+  if (sessionController !== undefined && userQuestions !== undefined && approval !== undefined) {
     stopQuestions = startFeishuQuestions({
-      apiProxy,
+      ctx,
       channel: cardChannel,
       bridgeHolder,
       logger: ctx.logger('dsh-feishu'),
     })
     stopTodos = startFeishuTodos({
-      apiProxy,
+      ctx,
       channel: cardChannel,
       bridgeHolder,
       logger: ctx.logger('dsh-feishu'),
     })
     const streamingResult = startFeishuStreaming({
-      apiProxy,
+      ctx,
       channel: cardChannel,
       bridgeHolder,
       logger: ctx.logger('dsh-feishu'),
@@ -385,7 +405,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       llm,
       agentDefaultModel: defaultModel,
       bridgeHolder,
-      apiProxy,
+      sessionController,
       channel: cardChannel,
       logger: ctx.logger('dsh-feishu'),
       topicFor: chatId => onboardingHandle?.topicFor(chatId) ?? {},
@@ -423,7 +443,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         // model-select provider card with the `new-session` flow marker.
         const bridge = bridgeHolder.current
         if (bridge === undefined || modelSelectHandle === undefined) return
-        const current = bridge.currentSelectionFor(chatMessage) ?? defaultModel.currentSelection()
+        const current = defaultModel.currentSelection()
         const card = renderProviderSelectCard(llm.listProviders(), current, 'new-session')
         const cardId = await cardChannel.createCardInstance(card)
         const topic = onboardingHandle?.topicFor(chatMessage.chatId) ?? {}
@@ -444,8 +464,6 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     llm,
     defaultModel,
     {
-      setCurrentSelection: (chatMessage, next) => bridgeHolder.current?.setCurrentSelection(chatMessage, next),
-      currentSelectionFor: chatMessage => bridgeHolder.current?.currentSelectionFor(chatMessage),
       startNewSession: (chatMessage, salt) => bridgeHolder.current?.startNewSession(chatMessage, salt) ?? '',
       switchToSession: (chatMessage, sessionId) => bridgeHolder.current?.switchToSession(chatMessage, sessionId) ?? 'archived',
       detachSession: sessionId => bridgeHolder.current?.detachSession(sessionId) ?? { kind: 'free' as const },
@@ -464,13 +482,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     },
     larkCommandTranslations,
     commands,
-    apiProxy === undefined
-      ? {
-          pendingForSession: () => [],
-          findPending: () => undefined,
-          async settle() { /* noop when apiProxy is absent */ },
-        }
-      : buildApprovalControl(apiProxy),
+    buildApprovalControl(),
     {
       get: () => currentSettings().showReasoning,
       toggle: () => {
@@ -478,15 +490,16 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         void settings.mutate(namespace, [{ op: 'set', path: ['showReasoning'], value: !current }], currentRevision())
       },
     },
-    apiProxy,
+    sessionController,
   )
   ctx.effect(() => () => {
     stopQuestions()
     stopApprovals()
     stopTodos()
     stopStreaming()
+    stopSendFileTool()
     modelSelectHandle?.dispose()
-  }, 'dsh-feishu: feishu questions + approvals + todos + streaming + model-select listeners')
+  }, 'dsh-feishu: feishu questions + approvals + todos + streaming + send-file + model-select listeners')
 
   let lastPrintedQrUrl: string | undefined
   const provisionManager = new ProvisionManager({
@@ -863,7 +876,7 @@ async function executeSlashCommand(
   commands: CommandRuntime,
   bridgeHolder: { lastChatMessage: { chatId: string; chatType: 'p2p' | 'group'; threadId?: string } | undefined },
   toggleStream?: () => { enabled: boolean },
-  apiProxy?: ApiProxy,
+  sessionController?: { selectModel?: (r: any) => Promise<any>; cancel?: (r: any) => Promise<any> },
   llm?: LlmRuntime,
   agentDefaultModel?: AgentDefaultModelConfig,
   cardChannel?: ModelSelectChannel,
@@ -990,28 +1003,27 @@ async function executeSlashCommand(
     return { kind: 'success', text: lines.join('\n') }
   }
   // /stop cancels the running agent — mirrors the WebUI stop button's
-  // `sessions.cancel` RPC. Unlike `/approve`/`/deny`, this does not need
-  // a live agent handle; the apiProxy call reaches the host directly.
+  // session-controller cancel RPC. Unlike `/approve`/`/deny`, this does not
+  // need a live agent handle; the session controller reaches the host directly.
   if (parsed.name === 'stop') {
-    if (apiProxy === undefined) {
-      return { kind: 'error', text: '⚠️ Cannot stop: apiProxy is not available.' }
+    if (sessionController === undefined) {
+      return { kind: 'error', text: '⚠️ Cannot stop: sessionController is not available.' }
     }
     // Resolve the session id for this chat without creating an agent.
     const sessionId = bridge.resolveSessionIdFor(chatMessage)
     try {
-      const response = await apiProxy.sessions.cancel({
-        rpcId: RpcId(`feishu-stop-${Date.now()}`),
-        payload: { sessionId: sessionId as never },
-      })
-      if (response.result.ok) {
+      // The new session-controller API: `cancel({ sessionId })` is the host-side
+      // equivalent of the apiproxy `sessions.cancel` RPC. It returns either
+      // `{ ok: true }` or `{ ok: false, error: { code, message } }`.
+      const response = await (sessionController as unknown as { cancel: (r: { sessionId: string }) => Promise<{ ok: boolean; error?: { code?: string; message?: string } }> }).cancel({ sessionId })
+      if (response.ok) {
         return { kind: 'success', text: '⏹️ Agent 已停止。当前 turn 的工具执行将尽快终止。' }
       }
-      // Known error codes
-      const code = response.result.error?.code
+      const code = response.error?.code
       if (code === 'session-not-found') {
         return { kind: 'error', text: '⚠️ 该 session 当前没有运行中的 agent，无需停止。' }
       }
-      return { kind: 'error', text: `⚠️ 停止失败: ${response.result.error?.message ?? 'unknown error'} (${code ?? 'no code'})` }
+      return { kind: 'error', text: `⚠️ 停止失败: ${response.error?.message ?? 'unknown error'} (${code ?? 'no code'})` }
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error)
       return { kind: 'error', text: `⚠️ 停止失败: ${msg}` }

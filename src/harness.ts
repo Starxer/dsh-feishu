@@ -1,5 +1,4 @@
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
-import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, type ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
@@ -17,17 +16,6 @@ interface AgentLike {
 }
 
 interface AgentHandleLike { agent: AgentLike; dispose(): Promise<void> }
-
-/**
- * Mutable reference consumed by `installModelSelection`. The agent loop reads
- * `current` on every `system-prompt/assemble` waterfall, so a `/model` command
- * mutating this in place takes effect on the next inbound message without
- * rebuilding the agent or disposing its session.
- */
-interface LiveSelection {
-  current: ModelSelection | undefined
-  assembled: ModelSelection | undefined
-}
 
 interface WorkspaceLike {
   path: string
@@ -52,7 +40,7 @@ export interface HarnessDependencies {
   selection(): { provider: string; model: string; reasoningEffort?: ReasoningEffortId }
   agentPresets: {
     resolve(id?: string): Promise<{ id: string }>
-    mount(agentCtx: Parameters<typeof installModelSelection>[0], id?: string): Promise<unknown>
+    mount(agentCtx: import('@deepseek-ai/cordis').Context, id?: string): Promise<unknown>
   }
   workspaceRegistry: {
     list(): WorkspaceLike[]
@@ -88,13 +76,6 @@ export interface ChatCreationOptions {
 
 export class HarnessConversationService {
   private readonly handles = new Map<string, Promise<AgentHandleLike>>()
-  /**
-   * Per-session live selection refs handed to `installModelSelection`.
-   * A `/model` switch mutates `ref.current` directly so the agent loop's
-   * next `system-prompt/assemble` waterfall picks up the new provider/model
-   * without forcing a session rebuild.
-   */
-  private readonly selections = new Map<string, LiveSelection>()
   /**
    * Per-chat session override. `/new` and `/thread` redirect the chat's next
    * messages to a session that is not the deterministic hash of the chat
@@ -266,7 +247,6 @@ export class HarnessConversationService {
     const handles = await Promise.allSettled(this.handles.values())
     await Promise.all(handles.flatMap(result => result.status === 'fulfilled' ? [result.value.dispose()] : []))
     this.handles.clear()
-    this.selections.clear()
     this.chatToSession.clear()
     this.chatToRootId.clear()
     this.seenChatKeys.clear()
@@ -350,7 +330,6 @@ export class HarnessConversationService {
     this.seenChatKeys.add(owner)
     this.saveSessionMap()
     this.handles.delete(owner)
-    this.selections.delete(newSessionId)
     return { kind: 'released', ownerLabel }
   }
 
@@ -375,7 +354,6 @@ export class HarnessConversationService {
     this.seenChatKeys.add(key)
     this.saveSessionMap()
     this.handles.delete(key)
-    this.selections.delete(sessionId)
     return 'ok'
   }
 
@@ -447,42 +425,6 @@ export class HarnessConversationService {
   }
 
   /**
-   * Mutate the cached selection ref for one chat so the next `agent/request`
-   * routed through the agent loop picks up the new provider/model. Returns
-   * the previously cached value when this chat already owns a ref, so the
-   * caller can surface a diff if needed.
-   *
-   * `/model` callers persist the change through `agentDefaultModel.saveSelection`
-   * first; this method is only the in-memory flip that closes the
-   * "settings wrote, agent still routes to the old model" gap.
-   *
-   * @param message - inbound chat coordinates whose selection should change.
-   * @param next - replacement provider/model pair (and optional reasoning effort).
-   * @returns the previous cached selection, or `undefined` when no ref exists.
-   */
-  setCurrentSelection(message: ConversationMessage, next: ModelSelection): ModelSelection | undefined {
-    const sessionId = this.resolveSessionId(message)
-    const ref = this.selections.get(sessionId)
-    if (ref === undefined) return undefined
-    const previous = ref.current
-    ref.current = next
-    return previous
-  }
-
-  /**
-   * Read the currently selected provider/model pair for one chat, useful for
-   * the `/model` command's status output without re-reading the global
-   * `agentDefaultModel` (which would not reflect per-chat mutations made by
-   * `setCurrentSelection`).
-   * @param message - inbound chat coordinates to inspect.
-   * @returns the current selection, or `undefined` when the chat has no ref yet.
-   */
-  currentSelectionFor(message: ConversationMessage): ModelSelection | undefined {
-    const sessionId = this.resolveSessionId(message)
-    return this.selections.get(sessionId)?.current
-  }
-
-  /**
    * Direct the chat to a fresh, never-used session id so the next regular
    * message starts a brand-new conversation. The previously bound session,
    * if any, is left untouched in the agents registry; the bridge just
@@ -500,7 +442,6 @@ export class HarnessConversationService {
     if (options !== undefined) this.chatToCreation.set(key, options)
     this.saveSessionMap()
     this.handles.delete(key)
-    this.selections.delete(newSessionId)
     return newSessionId
   }
 
@@ -528,7 +469,6 @@ export class HarnessConversationService {
     this.seenChatKeys.add(key)
     this.saveSessionMap()
     this.handles.delete(key)
-    this.selections.delete(sessionId)
     return 'ok'
   }
 
@@ -616,7 +556,7 @@ export class HarnessConversationService {
     cacheHitRate: number; ttftAvgMs: number; tokensPerSecond: number; llmDurationMs: number; toolDurationMs: number
   }> {
     const sessionId = this.resolveSessionId(message)
-    let model = this.selections.get(sessionId)?.current ?? this.deps.selection()
+    let model = this.deps.selection()
     let reasoningEffort = model.reasoningEffort ? String(model.reasoningEffort) : ''
     const empty = { title: '', turns: 0, steps: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, contextWindow: 0, lastInputTokens: 0, cacheHitRate: 0, ttftAvgMs: 0, tokensPerSecond: 0, llmDurationMs: 0, toolDurationMs: 0 }
     // Try reading the session header + events from persistence
@@ -826,27 +766,9 @@ export class HarnessConversationService {
     const sessionId = this.resolveSessionId(this.messageFromKey(key))
     const liveAgent = this.deps.agents.get(sessionId as never)
     if (liveAgent !== undefined) {
-      // Reuse the live agent. The original setup path only ran `installModelSelection`
-      // when we created this session; a restart that loses the bridge's `selections`
-      // cache leaves the live agent with no dsh-feishu-side ref to mutate. Re-attach a
-      // fresh ref to the live agent's ctx so subsequent `/model` commands can flip
-      // `ref.current` and have the next `system-prompt/assemble` pick it up.
-      const existing = this.selections.get(sessionId)
-      if (existing === undefined) {
-        const fallback = this.deps.selection()
-        const initial = {
-          provider: creation?.provider ?? this.config.provider ?? fallback.provider,
-          model: creation?.model ?? this.config.model ?? fallback.model,
-          ...(creation?.reasoningEffort !== undefined
-            ? { reasoningEffort: creation.reasoningEffort }
-            : fallback.reasoningEffort !== undefined
-              ? { reasoningEffort: fallback.reasoningEffort }
-              : {}),
-        } satisfies ModelSelection
-        const ref: LiveSelection = { current: initial, assembled: undefined }
-        installModelSelection(liveAgent.ctx, ref)
-        this.selections.set(sessionId, ref)
-      }
+      // The session controller maintains its own WeakMap<Agent, InstalledSelection>
+      // via the apiproxy replacement; live agent selection is owned upstream.
+      // The plugin just hands the live agent back.
       return { agent: liveAgent as unknown as AgentLike, dispose: async () => undefined }
     }
     const fallback = this.deps.selection()
@@ -859,11 +781,6 @@ export class HarnessConversationService {
           ? { reasoningEffort: fallback.reasoningEffort }
           : {}),
     } satisfies ModelSelection
-    // Build a mutable ref once per session; the agent loop's `installModelSelection`
-    // listener reads `current` on every `system-prompt/assemble`, so a later
-    // `/model` command mutating `ref.current` takes effect on the next message.
-    const selection: LiveSelection = { current: initial, assembled: undefined }
-    this.selections.set(sessionId, selection)
     const configuredWorkspace = creation?.workspace ?? this.config.workspace
     const workspace = configuredWorkspace === undefined
       ? this.deps.workspaceRegistry.list()[0]
@@ -872,8 +789,7 @@ export class HarnessConversationService {
     // When no workspace is configured, use the first workspace's path
     const cwd = workspace?.path ?? configuredWorkspace ?? process.cwd()
     const agentPreset = (await this.deps.agentPresets.resolve(creation?.agentPreset ?? this.config.agentPreset)).id
-    const setup = async (agentCtx: Parameters<typeof installModelSelection>[0]) => {
-      installModelSelection(agentCtx, selection)
+    const setup = async (agentCtx: import('@deepseek-ai/cordis').Context) => {
       await this.deps.agentPresets.mount(agentCtx, agentPreset)
     }
     const persisted = (await this.deps.sessionPersistence.list()).some(item => item.id === sessionId)

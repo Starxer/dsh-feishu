@@ -5,15 +5,28 @@
 
 ---
 
+## 0.1.2-alpha.1 适配（已完成，2026-08-28）
+
+- 删除 `apiproxy` 依赖（DSH 0.1.2-alpha.1 整包移除 `packages/host/apiproxy`）
+- events 订阅改 `ctx.on('session/event', (session, event) => ...)` —— 5 文件统一改
+- user-questions / approval 答案改 `ctx.on('user-questions/request' / 'approval/request', listener return answer/outcome)` —— 走 Cordis waterfall，listener return 即 claim
+- selectModel 改 `ctx.sessionController.selectModel(...)` 一站式同步 agent ref + WebUI + 持久化（之前 plugin 自己的 `selections: Map` + `installModelSelection` 删除）
+- inject 数组 `'apiProxy'` → `'sessionController', 'userQuestions', 'approval'`
+- `/stop` 改 `sessionController.cancel({ sessionId })`
+- 132 tests pass / typecheck 0 errors / build OK
+- 已知降级：`tool/call` 事件无 view 字段（callView 永远 undefined）；`tool/result` 用 `event.data.meta` 作 resultView
+
+---
+
 ## 已完成
 
 | # | 功能 | 说明 |
 |---|---|---|
 | 1 | 卡片化 + footer | 最终回复卡片底部标注 workspace + preset + **模型名** + **思考强度** + **上下文使用量** |
 | 4 | `/status` 命令 | 展示 session id / title / workspace / preset / model / **reasoning** / tokens / context / **缓存命中率** / **TTFT** / **吞吐量** / **LLM 时间** / **工具时间** |
-| 5 | 工具调用展示 | 订阅 `apiProxy.events.mux` → `tool/call` + `tool/result`，wathet/green/red 卡片。**原地更新**：`tool/call` 发卡片后保存 `messageId`，`tool/result` 用 `updateCard` 更新同一张卡片 |
-| 6 | todo 展示 | 订阅 `apiProxy.events.mux` → `todo/write`，turquoise 卡片含进度条 |
-| 11 | 中间消息不可见 | ✅ 改为 `apiProxy.events.mux` + `tool/call` 时 flush 累积文字，紫色卡片 |
+| 5 | 工具调用展示 | 订阅 `ctx.on('session/event')` → `tool/call` + `tool/result`，wathet/green/red 卡片。**原地更新**：`tool/call` 发卡片后保存 `messageId`，`tool/result` 用 `updateCard` 更新同一张卡片 |
+| 6 | todo 展示 | 订阅 `ctx.on('session/event')` → `todo/write`，turquoise 卡片含进度条 |
+| 11 | 中间消息不可见 | ✅ 改为 `ctx.on('session/event')` + `tool/call` 时 flush 累积文字，紫色卡片 |
 | 12 | tool call 卡片 markdown 渲染 | ✅ `lark_md` → `markdown`，4 文件 11 处 |
 | 13 | 卡片 Markdown 渲染不稳定 | ✅ 全面迁移到 Card JSON 2.0，表格/标题/内联代码原生渲染，移除降级逻辑 |
 | 14 | 纯查询命令即时返回 | ✅ fire-and-forget + agent 运行状态检测 |
@@ -23,7 +36,7 @@
 | 20 | 工具调用摘要 | ✅ 通过 mux `frame.view` 获取 `presentCall`/`presentResult` 的 `description`、`title`，显示在工具名称上方 |
 | 21 | 卡片颜色区分 | ✅ 工具调用中 wathet → 成功 green → 失败 red；Reply 蓝色；Turn Complete 绿色 |
 | 22 | Reply 标题命名 | ✅ 已统一为 "Reply" |
-| — | `/stop` 命令 | 通过 `apiProxy.sessions.cancel` 中断运行中的 agent，等同 WebUI 停止按钮 |
+| — | `/stop` 命令 | 通过 `ctx.sessionController.cancel({ sessionId })` 中断运行中的 agent，等同 WebUI 停止按钮 |
 | — | `/stream` 命令 | 切换 `showIntermediateMessages` 设置（已与中间消息模块解耦，保留备用） |
 | — | 统一 per-step 卡片 | ✅ 每个 step 一张卡片，包含 reasoning + text + 工具调用 + 结果预览 + step 时长/token footer |
 | — | 工具结果预览 | ✅ 按 `resultView.card` 类型分发渲染（terminal/web/search/read/diff/generic） |
@@ -121,7 +134,7 @@
 
 **根因分析**：`/status` 命令读取的是 `bridge.selections`（飞书侧的 per-chat selection ref），而 WebUI 切换模型只更新了 `apiProxy.selections`（WeakMap，WebUI 侧）。两者是独立的缓存，没有同步。
 
-**修复方向**：`/status` 命令需要优先从 `apiProxy.sessions.selectModel` 的结果或 `selectionFor(agent).current` 读取当前实际模型，而不是只读 bridge 的 selection ref。
+**修复方向**：`/status` 命令需要优先从 `sessionController.selectModel` 的结果或 `selectionFor(agent).current` 读取当前实际模型，而不是只读 bridge 的 selection ref。
 
 ---
 
@@ -136,7 +149,7 @@
 4. `/reasoning high`（重新打开思考）
 5. 模型不输出 reasoning 内容（不思考）
 
-**根因分析**：关闭思考时 `selection` 被设为无 `reasoningEffort`，且这个状态被 apiProxy 的 `selectionFor(agent).current`（读 requestHeader）持久化了。重新打开思考时，新的 `reasoningEffort` 虽然被设置，但 apiProxy 的外层 `agent/request` listener 用 requestHeader 的旧 config（无 effort）覆盖，导致请求仍不带 thinking 参数。
+**根因分析**：关闭思考时 `selection` 被设为无 `reasoningEffort`，且这个状态被 sessionController 的 `selectionFor(agent).current`（读 requestHeader）持久化了。重新打开思考时，新的 `reasoningEffort` 虽然被设置，但 sessionController 的外层 `agent/request` listener 用 requestHeader 的旧 config（无 effort）覆盖，导致请求仍不带 thinking 参数。
 
 **修复方向**：检查 `installModelSelection` 的 `agent/request` listener 在 `selection.assembled.reasoningEffort === undefined` 时删除继承的 effort 是否合理；考虑保留继承的 effort 而不是删除。
 
@@ -161,7 +174,7 @@
 - **根因 1**：旧代码用 `ctx.on('session/event')` 订阅 Cordis 事件，在插件 scope 中不生效
 - **根因 2**：旧代码依赖 `showIntermediateMessages` 设置，默认为 `false`
 - **修复**（2025-08-25）：
-  - 改用 `apiProxy.events.mux()` SSE（与 toolcalls/todos 一致）
+  - 改用 `ctx.on('session/event')` 监听（与 toolcalls/todos 一致）
   - 逻辑：`assistant/chunk` → 累积 text-delta → `tool/call` 到达时 flush 为紫色卡片
   - 不再依赖 `/stream` 开关或 `showIntermediateMessages` 设置
   - 不再调用 `markIntermediateSent`（中间消息 ≠ 最终回复，不应跳过最终卡片）

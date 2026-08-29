@@ -87,26 +87,10 @@ describe('HarnessConversationService', () => {
     expect(liveHandle.dispose).not.toHaveBeenCalled()
   })
 
-  it('attaches a fresh selection ref when reusing a live agent so /model takes effect', async () => {
-    const f = fixture()
-    const sessionId = 'lark-v2-427e3361f60f3bd896c74f6acd7d065d2e0198db'
-    const liveHandle = await f.create({ sessionId })
-    liveHandle.agent.ctx.on.mockClear()
-    f.create.mockClear()
-    const deps = dependencies(f)
-    deps.sessionPersistence.list = vi.fn(async () => [{ id: sessionId }])
-    const service = new HarnessConversationService(deps, { domain: 'lark' })
-
-    const chatMessage = { chatId: 'a', chatType: 'p2p' as const }
-    // Reuse path should install selection listeners against the live agent ctx.
-    await service.reply({ ...chatMessage, content: 'first' })
-    expect(liveHandle.agent.ctx.on).toHaveBeenCalled()
-    // /model then flips the cached ref so the next request routes to the new model.
-    const previous = service.setCurrentSelection(chatMessage, { provider: 'p2', model: 'm2' })
-    expect(previous).toEqual({ provider: 'p', model: 'm' })
-    expect(service.currentSelectionFor(chatMessage)).toEqual({ provider: 'p2', model: 'm2' })
-    await service.dispose()
-  })
+  // NOTE: /model selection mutation now goes through the session controller's
+  // `selectModel` host API; the plugin no longer maintains a per-chat `selections`
+  // map or installs `installModelSelection` against the agent ctx. That logic
+  // moved upstream to `packages/api/session-controller`.
 
   it('isolates different chats and honors an explicit model route', async () => {
     const f = fixture()

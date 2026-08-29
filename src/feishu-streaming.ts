@@ -1,10 +1,10 @@
 /**
- * Feishu UI bridge for per-step assistant cards: subscribes to the apiproxy
- * mux stream and renders ONE card per agent step, containing reasoning, text,
- * tool calls, and tool results.
+ * Feishu UI bridge for per-step assistant cards: subscribes to the host's
+ * `session/event` fan-out and renders ONE card per agent step, containing
+ * reasoning, text, tool calls, and tool results.
  *
- * Architecture: one mux subscriber handles all event types for a unified
- * per-step card. No race conditions between separate subscribers.
+ * Architecture: one listener handles all event types for a unified per-step
+ * card. No race conditions between separate listeners.
  *
  * Event flow per step:
  *   assistant/chunk (reasoning-delta, text-delta)  → accumulate
@@ -15,8 +15,7 @@
  * @module @starxer/dsh-feishu/feishu-streaming
  */
 
-import type { ApiProxy, MuxFrame } from '@deepseek-ai/dsh-host-apiproxy'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy'
+import type { Context } from '@deepseek-ai/cordis'
 import type { HarnessConversationService } from './harness.ts'
 import type { ConversationMessage } from './conversation.ts'
 
@@ -40,7 +39,7 @@ export interface FeishuStreamingChannel {
 
 /** Public deps for the unified per-step module. */
 export interface FeishuStreamingDeps {
-  apiProxy: ApiProxy
+  ctx: Context
   channel: FeishuStreamingChannel
   bridgeHolder: BridgeHolder
   logger: PluginLogger
@@ -132,9 +131,8 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
   consumeLastStepHadContent: (sessionId: string) => boolean
   flushed: (sessionId: string) => Promise<TurnStats | undefined>
 } {
-  const { apiProxy, channel, bridgeHolder, logger, showReasoning } = deps
+  const { ctx, channel, bridgeHolder, logger, showReasoning } = deps
   console.log('dsh-feishu: startFeishuStreaming (unified per-step cards)')
-  const controller = new AbortController()
   const sessionStates = new Map<string, SessionStepState>()
 
   const getState = (sessionId: string): SessionStepState => {
@@ -313,271 +311,217 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
     })
   }
 
-  const iterate = async (): Promise<void> => {
+  // session/event is the host's host-to-host fan-out. Filter on event.type
+  // for step / turn / assistant / tool / request / context events; the
+  // (session, event) callback receives the full session object (no sessionId
+  // hop) and the event object directly (no envelope wrapper). Per-event
+  // errors are caught so one bad event cannot take down the listener.
+  //
+  // Note: `tool/call` does NOT carry a presentation `view` field on the
+  // event in 0.1.2-alpha.1 (apiproxy's `frame.view` is gone with the
+  // package's deletion). `tool/result` does carry a tool-private `meta`
+  // payload which we use as the result view when present. `toolCall.callView`
+  // is therefore always undefined; `toolCall.resultView` is `event.data.meta`
+  // when the tool attaches one.
+  const handleEvent = (session: { id: string }, event: { type: string; time?: number; data?: any }): void => {
     try {
-      for await (const envelope of apiProxy.events.mux(
-        { rpcId: RpcId(`feishu-streaming-${Date.now()}`), payload: {} },
-        controller.signal,
-      )) {
-        try {
-          const frame = envelope.payload as MuxFrame
-          if (frame.type !== 'session/event') continue
+      const sessionId = session.id
+      const bridge = bridgeHolder.current
+      if (bridge === undefined) return
+      const chat = bridge.resolveChat(sessionId)
+      if (chat === undefined) return
 
-          const event = frame.event
-          if (event === undefined) continue
-          const sessionId = frame.sessionId
-          const bridge = bridgeHolder.current
-          if (bridge === undefined) continue
-          const chat = bridge.resolveChat(sessionId)
-          if (chat === undefined) continue
+      const state = getState(sessionId)
 
-          const state = getState(sessionId)
-
-        if (event.type === 'assistant/chunk') {
-          // Accumulate reasoning-delta and text-delta chunks.
-          const chunk = event.data?.chunk
-          if (chunk !== undefined && chunk !== null) {
-            if (chunk.type === 'reasoning-delta' && typeof chunk.text === 'string') {
-              state.reasoning += chunk.text
-              // Record first token time for reasoning (TTFT anchor).
-              if (state.firstTokenTime === 0) {
-                state.firstTokenTime = event.time ?? Date.now()
-              }
-            } else if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
-              state.text += chunk.text
-              // Record first token time for text (if no reasoning came first).
-              if (state.firstTokenTime === 0) {
-                state.firstTokenTime = event.time ?? Date.now()
-              }
+      if (event.type === 'assistant/chunk') {
+        // Accumulate reasoning-delta and text-delta chunks.
+        const chunk = event.data?.chunk
+        if (chunk !== undefined && chunk !== null) {
+          if (chunk.type === 'reasoning-delta' && typeof chunk.text === 'string') {
+            state.reasoning += chunk.text
+            // Record first token time for reasoning (TTFT anchor).
+            if (state.firstTokenTime === 0) {
+              state.firstTokenTime = event.time ?? Date.now()
+            }
+          } else if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
+            state.text += chunk.text
+            // Record first token time for text (if no reasoning came first).
+            if (state.firstTokenTime === 0) {
+              state.firstTokenTime = event.time ?? Date.now()
             }
           }
-        } else if (event.type === 'assistant/message') {
-          // The assembled message arrived. Record usage and message time.
-          state.messageTime = event.time ?? Date.now()
-          state.completedTime = state.messageTime  // Will be overwritten by tool/result if tools run
-          const usage = event.data?.usage
-          if (usage !== undefined && usage !== null) {
-            state.usage = {
-              inputTokens: (usage.inputTokens as number) ?? 0,
-              outputTokens: (usage.outputTokens as number) ?? 0,
-              cacheReadTokens: (usage.cacheReadTokens as number | undefined),
-              cacheWriteTokens: (usage.cacheWriteTokens as number | undefined),
+        }
+      } else if (event.type === 'assistant/message') {
+        // The assembled message arrived. Record usage and message time.
+        state.messageTime = event.time ?? Date.now()
+        state.completedTime = state.messageTime
+        const usage = event.data?.usage
+        if (usage !== undefined && usage !== null) {
+          state.usage = {
+            inputTokens: (usage.inputTokens as number) ?? 0,
+            outputTokens: (usage.outputTokens as number) ?? 0,
+            cacheReadTokens: (usage.cacheReadTokens as number | undefined),
+            cacheWriteTokens: (usage.cacheWriteTokens as number | undefined),
+          }
+        }
+        if (state.usage !== undefined) {
+          const billed = state.usage.inputTokens + (state.usage.cacheReadTokens ?? 0) + (state.usage.cacheWriteTokens ?? 0)
+          if (billed > 0) {
+            state.contextMeta = {
+              contextWindow: state.contextMeta?.contextWindow ?? 0,
+              lastInputTokens: billed,
             }
           }
-          // Live context usage: each LLM call's billed input is the context the
-          // model saw at that step (same semantics as /status's
-          // deriveSessionStats, which takes the LAST usage sample). Last-wins,
-          // no monotonic guard: after a compaction the context legitimately
-          // shrinks (e.g. 267K → 22K), and a stale high numerator would pin
-          // the footer at the pre-compaction value forever — the "numerator
-          // doesn't update" bug.
+        }
+
+        if (state.turnStats !== undefined) {
+          const ts = state.turnStats
+          ts.stepCount++
+          ts.toolCallCount += state.toolCalls.length
           if (state.usage !== undefined) {
-            const billed = state.usage.inputTokens + (state.usage.cacheReadTokens ?? 0) + (state.usage.cacheWriteTokens ?? 0)
-            if (billed > 0) {
-              state.contextMeta = {
-                contextWindow: state.contextMeta?.contextWindow ?? 0,
-                lastInputTokens: billed,
-              }
-            }
+            ts.totalInputTokens += state.usage.inputTokens
+            ts.totalOutputTokens += state.usage.outputTokens
+            ts.totalCacheReadTokens += state.usage.cacheReadTokens ?? 0
+            ts.totalCacheWriteTokens += state.usage.cacheWriteTokens ?? 0
           }
+          if (ts.firstStepTtftMs === null && state.firstTokenTime > 0 && state.stepStartTime > 0) {
+            ts.firstStepTtftMs = state.firstTokenTime - state.stepStartTime
+          }
+          if (state.firstTokenTime > 0 && state.messageTime > state.firstTokenTime) {
+            ts.totalDecodeMs += state.messageTime - state.firstTokenTime
+          }
+          if (state.stepStartTime > 0 && state.messageTime > state.stepStartTime) {
+            ts.totalStepMs += state.messageTime - state.stepStartTime
+          }
+        }
 
-          // Accumulate turn stats.
-          // NOTE: tool time is NOT accumulated here — at assistant/message time,
-          // tool calls haven't executed yet (state.toolCalls is empty).
-          // Tool time is accumulated at tool/result instead.
-          if (state.turnStats !== undefined) {
-            const ts = state.turnStats
-            ts.stepCount++
-            ts.toolCallCount += state.toolCalls.length
-            if (state.usage !== undefined) {
-              ts.totalInputTokens += state.usage.inputTokens
-              ts.totalOutputTokens += state.usage.outputTokens
-              ts.totalCacheReadTokens += state.usage.cacheReadTokens ?? 0
-              ts.totalCacheWriteTokens += state.usage.cacheWriteTokens ?? 0
-            }
-            // TTFT: only record from the first step that has one.
-            if (ts.firstStepTtftMs === null && state.firstTokenTime > 0 && state.stepStartTime > 0) {
-              ts.firstStepTtftMs = state.firstTokenTime - state.stepStartTime
-            }
-            // Decode time: first token → assistant/message (pure LLM output time, for throughput).
-            if (state.firstTokenTime > 0 && state.messageTime > state.firstTokenTime) {
-              ts.totalDecodeMs += state.messageTime - state.firstTokenTime
-            }
-            // Step time: step start → assistant/message (LLM-only, tools not yet executed).
-            if (state.stepStartTime > 0 && state.messageTime > state.stepStartTime) {
-              ts.totalStepMs += state.messageTime - state.stepStartTime
-            }
-          }
+        const hasContent = state.reasoning.trim() !== '' || state.text.trim() !== ''
+        if (hasContent) {
+          sendStepCard(chat, sessionId, state)
+        }
+        state.lastStepHadContent = hasContent
+      } else if (event.type === 'tool/call') {
+        const toolCallId = String(event.data?.callId ?? '')
+        const toolName = (event.data?.name as string) ?? 'unknown'
+        const args = event.data?.arguments
+        console.log(`dsh-feishu: [call] tool=${toolName} callId=${toolCallId} stepCardSent=${state.stepCardSent}`)
 
-          // If there's reasoning or text, send the step card now (before tool calls).
-          const hasContent = state.reasoning.trim() !== '' || state.text.trim() !== ''
-          if (hasContent) {
-            sendStepCard(chat, sessionId, state)
-          }
-          state.lastStepHadContent = hasContent
-        } else if (event.type === 'tool/call') {
-          const toolCallId = String(event.data?.callId ?? '')
-          const toolName = (event.data?.name as string) ?? 'unknown'
-          const args = event.data?.arguments
-          console.log(`dsh-feishu: [call] tool=${toolName} callId=${toolCallId} stepCardSent=${state.stepCardSent}`)
+        const toolCall: StepToolCall = {
+          toolName,
+          callId: toolCallId,
+          arguments: args,
+          startedAt: Date.now(),
+        }
+        // tool/call no longer carries a presentation view on the session
+        // event; callView stays undefined and renderStepCard falls back to
+        // the tool name and arguments.
+        state.toolCalls.push(toolCall)
 
-          const toolCall: StepToolCall = {
-            toolName,
-            callId: toolCallId,
-            arguments: args,
-            startedAt: Date.now(),
+        if (state.stepCardSent) {
+          updateStepCard(state)
+        } else {
+          sendStepCard(chat, sessionId, state)
+        }
+      } else if (event.type === 'tool/result') {
+        const toolCallId = String(event.data?.message?.source?.callId ?? '')
+        const toolCall = state.toolCalls.find(t => t.callId === toolCallId)
+        console.log(`dsh-feishu: [result] callId=${toolCallId} found=${toolCall !== undefined} toolsInState=${state.toolCalls.length} stepCardSent=${state.stepCardSent}`)
+
+        if (toolCall !== undefined) {
+          const isError = event.data?.error !== undefined || event.data?.message?.content?.[0]?.isError === true
+          const resultContent = event.data?.message?.content
+          const result = Array.isArray(resultContent)
+            ? resultContent.map((b: { type: string; text?: string }) => b.type === 'text' ? b.text ?? '' : '').filter(Boolean).join('\n')
+            : resultContent
+          const elapsed = Date.now() - toolCall.startedAt
+
+          toolCall.result = {
+            isError,
+            content: summarizeValue(result, 300) || '',
+            elapsed,
           }
-          // Read tool presentation view from mux frame
-          if (frame.view?.for === 'call' && frame.view.view !== undefined) {
-            toolCall.callView = frame.view.view as NonNullable<StepToolCall['callView']>
+          // tool/result carries a tool-private `meta` payload — the
+          // presentResult view on 0.1.2-alpha.1. Use it as the result view
+          // when present so the rich card rendering kicks in.
+          if (event.data?.meta !== undefined) {
+            toolCall.resultView = event.data.meta
           }
-          state.toolCalls.push(toolCall)
 
           if (state.stepCardSent) {
-            // Update existing card to append tool info
             updateStepCard(state)
-          } else {
-            // No step card yet (no reasoning/text) — send one now with just tool info
-            sendStepCard(chat, sessionId, state)
           }
-        } else if (event.type === 'tool/result') {
-          const toolCallId = String(event.data?.message?.source?.callId ?? '')
-          const toolCall = state.toolCalls.find(t => t.callId === toolCallId)
-          console.log(`dsh-feishu: [result] callId=${toolCallId} found=${toolCall !== undefined} toolsInState=${state.toolCalls.length} stepCardSent=${state.stepCardSent}`)
-
-          if (toolCall !== undefined) {
-            const isError = event.data?.error !== undefined || event.data?.message?.content?.[0]?.isError === true
-            const resultContent = event.data?.message?.content
-            const result = Array.isArray(resultContent)
-              ? resultContent.map((b: { type: string; text?: string }) => b.type === 'text' ? b.text ?? '' : '').filter(Boolean).join('\n')
-              : resultContent
-            const elapsed = Date.now() - toolCall.startedAt
-
-            toolCall.result = {
-              isError,
-              content: summarizeValue(result, 300) || '',
-              elapsed,
-            }
-            // Read tool presentation view from mux frame
-            if (frame.view?.for === 'result' && frame.view.view !== undefined) {
-              toolCall.resultView = frame.view.view as NonNullable<StepToolCall['resultView']>
-            }
-
-            // Update the card with tool result
-            if (state.stepCardSent) {
-              updateStepCard(state)
-            }
-            // Update completedTime so step duration includes tool execution.
-            state.completedTime = event.time ?? Date.now()
-            // Accumulate tool time in turn stats (tools haven't run at
-            // assistant/message time, so we must track them here).
-            if (state.turnStats !== undefined) {
-              state.turnStats.totalToolMs += elapsed
-            }
+          state.completedTime = event.time ?? Date.now()
+          if (state.turnStats !== undefined) {
+            state.turnStats.totalToolMs += elapsed
           }
-        } else if (event.type === 'step/start') {
-          // New step starting — reset for the new step and record start time.
-          resetStep(state)
-          state.stepStartTime = event.time ?? Date.now()
-        } else if (event.type === 'turn/start') {
-          // New turn — reset step state and create flush entry for this turn.
-          // Don't reset lastStepHadContent here;
-          // it's consumed by channel.ts after bridge.reply() returns.
-          resetStep(state)
-          lastStepSendPromises.delete(sessionId)
-          state.turnStats = {
-            turnStartTime: event.time ?? Date.now(),
-            stepCount: 0,
-            toolCallCount: 0,
-            totalInputTokens: 0,
-            totalOutputTokens: 0,
-            totalCacheReadTokens: 0,
-            totalCacheWriteTokens: 0,
-            firstStepTtftMs: null,
-            totalDecodeMs: 0,
-            totalStepMs: 0,
-            totalToolMs: 0,
-            totalTurnMs: 0,
-          }
-          // Create the flush entry now so channel.ts's flushed() call can find it
-          // even if bridge.reply() resolves before turn/end fires.
-          let resolve!: () => void
-          const promise = new Promise<void>((r) => { resolve = r })
-          flushPromises.set(sessionId, { promise, resolve })
-          // Fetch context-window info once per turn so step-card footers can
-          // show the context percentage. Merge with the live value captured
-          // from per-step usage: the persisted log is only flushed at turn
-          // end, so re-fetching here would return a stale pre-turn context.
-          // The baseline is only a starting point: it fills fields that are
-          // still unknown (0 = not yet seen) and never overrides a fresher
-          // live value — a stale high pre-compaction baseline must not pin
-          // the numerator, and an early live 0 must not drop the baseline.
-          if (chat !== undefined) {
-            bridge.getSessionMeta(chat).then((meta) => {
-              // `||` (not `??`): a live 0 means "not seen yet", so fall back
-              // to the baseline; a live > 0 (request/context window, per-step
-              // billed input) always wins. lastInputTokens is last-wins,
-              // matching /status — never Math.max, never `billed > previous`.
-              state.contextMeta = {
-                contextWindow: state.contextMeta?.contextWindow || meta.contextWindow,
-                lastInputTokens: state.contextMeta?.lastInputTokens || meta.lastInputTokens,
-              }
-              if (state.stepCardSent) updateStepCard(state)
-            }).catch(() => undefined)
-          }
-        } else if (event.type === 'request/context') {
-          // Keep the footer's context-window denominator current. The window
-          // is per-model/route and can change mid-session (e.g. after /model),
-          // while the turn/start getSessionMeta snapshot only reflects the
-          // last flushed turn. This live event is the same value /status
-          // derives from the post-turn log.
-          const cw = event.data?.contextWindow as number | undefined
-          if (cw !== undefined && cw > 0) {
-            state.contextMeta = {
-              contextWindow: cw,
-              lastInputTokens: state.contextMeta?.lastInputTokens ?? 0,
-            }
-            if (state.stepCardSent) updateStepCard(state)
-          }
-        } else if (event.type === 'turn/end') {
-          // Flush any pending debounced updateCard before resetting, so the
-          // final card content is committed before channel.ts sends the footer.
-          const turnStats = state.turnStats
-          if (turnStats !== undefined) {
-            const now = event.time ?? Date.now()
-            // totalTurnMs: full wall-clock turn duration (LLM + tools + gaps).
-            // totalStepMs: accumulated LLM-only time (set at each assistant/message).
-            // totalToolMs: accumulated tool execution time (set at each tool/result).
-            turnStats.totalTurnMs = now - turnStats.turnStartTime
-            turnStatsMap.set(sessionId, turnStats)
-          }
-          flushPendingUpdate(state).then(() => {
-            const entry = flushPromises.get(sessionId)
-            if (entry !== undefined) {
-              entry.resolve()
-              flushPromises.delete(sessionId)
-            }
-          }).catch((error: unknown) => {
-            console.log(`dsh-feishu: turn/end flush error: ${error instanceof Error ? error.message : String(error)}`)
-            const entry = flushPromises.get(sessionId)
-            if (entry !== undefined) {
-              entry.resolve()
-              flushPromises.delete(sessionId)
-            }
-          })
-          resetStep(state)
         }
-        } catch (eventError: unknown) {
-          // Log per-event errors but keep the mux loop alive.
-          console.log(`dsh-feishu: streaming event handler error: ${eventError instanceof Error ? eventError.message : String(eventError)}`)
+      } else if (event.type === 'step/start') {
+        resetStep(state)
+        state.stepStartTime = event.time ?? Date.now()
+      } else if (event.type === 'turn/start') {
+        resetStep(state)
+        lastStepSendPromises.delete(sessionId)
+        state.turnStats = {
+          turnStartTime: event.time ?? Date.now(),
+          stepCount: 0,
+          toolCallCount: 0,
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          totalCacheReadTokens: 0,
+          totalCacheWriteTokens: 0,
+          firstStepTtftMs: null,
+          totalDecodeMs: 0,
+          totalStepMs: 0,
+          totalToolMs: 0,
+          totalTurnMs: 0,
         }
+        let resolve!: () => void
+        const promise = new Promise<void>((r) => { resolve = r })
+        flushPromises.set(sessionId, { promise, resolve })
+        bridge.getSessionMeta(chat).then((meta) => {
+          state.contextMeta = {
+            contextWindow: state.contextMeta?.contextWindow || meta.contextWindow,
+            lastInputTokens: state.contextMeta?.lastInputTokens || meta.lastInputTokens,
+          }
+          if (state.stepCardSent) updateStepCard(state)
+        }).catch(() => undefined)
+      } else if (event.type === 'request/context') {
+        const cw = event.data?.contextWindow as number | undefined
+        if (cw !== undefined && cw > 0) {
+          state.contextMeta = {
+            contextWindow: cw,
+            lastInputTokens: state.contextMeta?.lastInputTokens ?? 0,
+          }
+          if (state.stepCardSent) updateStepCard(state)
+        }
+      } else if (event.type === 'turn/end') {
+        const turnStats = state.turnStats
+        if (turnStats !== undefined) {
+          const now = event.time ?? Date.now()
+          turnStats.totalTurnMs = now - turnStats.turnStartTime
+          turnStatsMap.set(sessionId, turnStats)
+        }
+        flushPendingUpdate(state).then(() => {
+          const entry = flushPromises.get(sessionId)
+          if (entry !== undefined) {
+            entry.resolve()
+            flushPromises.delete(sessionId)
+          }
+        }).catch((error: unknown) => {
+          console.log(`dsh-feishu: turn/end flush error: ${error instanceof Error ? error.message : String(error)}`)
+          const entry = flushPromises.get(sessionId)
+          if (entry !== undefined) {
+            entry.resolve()
+            flushPromises.delete(sessionId)
+          }
+        })
+        resetStep(state)
       }
-    } catch (error: unknown) {
-      if (controller.signal.aborted) return
-      console.log(`dsh-feishu: streaming mux error: ${error instanceof Error ? error.message : String(error)}`)
+    } catch (eventError: unknown) {
+      console.log(`dsh-feishu: streaming event handler error: ${eventError instanceof Error ? eventError.message : String(eventError)}`)
     }
   }
-  void iterate()
+  const disposeListener = ctx.on('session/event', handleEvent)
 
   /** Consume accumulated reasoning for a session (used by channel.ts for the final reply card). */
   const consumeReasoning = (sessionId: string): string | undefined => {
@@ -611,7 +555,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
 
   return {
     stop: () => {
-      controller.abort()
+      disposeListener()
       for (const entry of pendingUpdates.values()) clearTimeout(entry.timer)
       pendingUpdates.clear()
       sessionStates.clear()

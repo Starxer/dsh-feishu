@@ -1,7 +1,7 @@
 /**
- * Feishu UI bridge for tool call visualization: subscribes to the apiproxy
- * mux stream so the Feishu chat can render cards showing tool invocations
- * and their results as they happen.
+ * Feishu UI bridge for tool call visualization: subscribes to the host's
+ * `session/event` fan-out so the Feishu chat can render cards showing tool
+ * invocations and their results as they happen.
  *
  * Reasoning content is NOT handled here — it's in feishu-streaming.ts as
  * part of the per-step assistant card (one card per step with reasoning + text).
@@ -9,8 +9,7 @@
  * @module @starxer/dsh-feishu/feishu-toolcalls
  */
 
-import type { ApiProxy, MuxFrame } from '@deepseek-ai/dsh-host-apiproxy'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy'
+import type { Context } from '@deepseek-ai/cordis'
 import type { HarnessConversationService } from './harness.ts'
 import type { ConversationMessage } from './conversation.ts'
 
@@ -34,7 +33,7 @@ export interface FeishuToolCallsChannel {
 
 /** Public deps for the tool-calls module. */
 export interface FeishuToolCallsDeps {
-  apiProxy: ApiProxy
+  ctx: Context
   channel: FeishuToolCallsChannel
   bridgeHolder: BridgeHolder
   logger: PluginLogger
@@ -66,8 +65,7 @@ interface PendingToolCall {
  * Returns a disposer.
  */
 export function startFeishuToolCalls(deps: FeishuToolCallsDeps): { stop: () => void } {
-  const { apiProxy, channel, bridgeHolder, logger } = deps
-  const controller = new AbortController()
+  const { ctx, channel, bridgeHolder, logger } = deps
   const sessionStates = new Map<string, SessionToolState>()
 
   const getState = (sessionId: string): SessionToolState => {
@@ -103,93 +101,83 @@ export function startFeishuToolCalls(deps: FeishuToolCallsDeps): { stop: () => v
     }
   }
 
-  const iterate = async (): Promise<void> => {
-    try {
-      console.log('dsh-feishu: [toolcall] mux stream starting')
-      for await (const envelope of apiProxy.events.mux(
-        { rpcId: RpcId(`feishu-toolcalls-${Date.now()}`), payload: {} },
-        controller.signal,
-      )) {
-        const frame = envelope.payload as MuxFrame
-        if (frame.type !== 'session/event') continue
-        const event = frame.event
-        if (event === undefined) continue
-        const bridge = bridgeHolder.current
-        if (bridge === undefined) continue
-        const chat = bridge.resolveChat(frame.sessionId)
-        if (chat === undefined) continue
-        const state = getState(frame.sessionId)
+  // session/event is the host's host-to-host fan-out. Filter on event.type
+  // for `tool/call` / `tool/result`; the (session, event) callback receives
+  // the full session object (no sessionId hop) and the event object directly
+  // (no envelope wrapper).
+  console.log('dsh-feishu: [toolcall] session/event listener attaching')
+  const disposeListener = ctx.on('session/event', (session, event) => {
+    const sessionId = session.id
+    const bridge = bridgeHolder.current
+    if (bridge === undefined) return
+    const chat = bridge.resolveChat(sessionId)
+    if (chat === undefined) return
+    const state = getState(sessionId)
 
-        if (event.type === 'tool/call') {
-          const toolCallId = String(event.data?.callId ?? '')
-          const toolName = (event.data?.name as string) ?? 'unknown'
-          const args = event.data?.arguments
-          logger.info(`dsh-feishu: [toolcall] session=${frame.sessionId} event=tool/call callId=${toolCallId} tool=${toolName}`)
+    if (event.type === 'tool/call') {
+      const toolCallId = String(event.data?.callId ?? '')
+      const toolName = (event.data?.name as string) ?? 'unknown'
+      const args = event.data?.arguments
+      logger.info(`dsh-feishu: [toolcall] session=${sessionId} event=tool/call callId=${toolCallId} tool=${toolName}`)
 
-          // Send the call card immediately (not batched) to get messageId
-          const card = renderToolCallCard(toolName, args)
-          const messageIdPromise = channel.send(
-            chat.chatId,
-            { card },
-            chat.threadId !== undefined ? { replyInThread: true } : {},
-          ).then((result) => result?.messageId).catch((error: unknown) => {
-            logger.warn(`dsh-feishu: tool-call card send failed: ${error instanceof Error ? error.message : String(error)}`)
-            return undefined
-          })
+      // Send the call card immediately (not batched) to get messageId
+      const card = renderToolCallCard(toolName, args)
+      const messageIdPromise = channel.send(
+        chat.chatId,
+        { card },
+        chat.threadId !== undefined ? { replyInThread: true } : {},
+      ).then((result) => result?.messageId).catch((error: unknown) => {
+        logger.warn(`dsh-feishu: tool-call card send failed: ${error instanceof Error ? error.message : String(error)}`)
+        return undefined
+      })
 
-          state.pending.set(toolCallId, {
-            toolName,
-            toolCallId,
-            arguments: args,
-            startedAt: Date.now(),
-            messageIdPromise,
-            chat,
-          })
-        } else if (event.type === 'tool/result') {
-          const toolCallId = String(event.data?.message?.source?.callId ?? '')
-          const pending = state.pending.get(toolCallId)
-          logger.info(`dsh-feishu: [toolcall] session=${frame.sessionId} event=tool/result callId=${toolCallId} hasPending=${pending !== undefined}`)
+      state.pending.set(toolCallId, {
+        toolName,
+        toolCallId,
+        arguments: args,
+        startedAt: Date.now(),
+        messageIdPromise,
+        chat,
+      })
+    } else if (event.type === 'tool/result') {
+      const toolCallId = String(event.data?.message?.source?.callId ?? '')
+      const pending = state.pending.get(toolCallId)
+      logger.info(`dsh-feishu: [toolcall] session=${sessionId} event=tool/result callId=${toolCallId} hasPending=${pending !== undefined}`)
 
-          const toolName = pending?.toolName ?? 'unknown'
-          const isError = event.data?.error !== undefined || event.data?.message?.content?.[0]?.isError === true
-          const resultContent = event.data?.message?.content
-          const result = Array.isArray(resultContent)
-            ? resultContent.map((b: { type: string; text?: string }) => b.type === 'text' ? b.text ?? '' : '').filter(Boolean).join('\n')
-            : resultContent
-          const elapsed = pending !== undefined ? Date.now() - pending.startedAt : undefined
+      const toolName = pending?.toolName ?? 'unknown'
+      const isError = event.data?.error !== undefined || event.data?.message?.content?.[0]?.isError === true
+      const resultContent = event.data?.message?.content
+      const result = Array.isArray(resultContent)
+        ? resultContent.map((b: { type: string; text?: string }) => b.type === 'text' ? b.text ?? '' : '').filter(Boolean).join('\n')
+        : resultContent
+      const elapsed = pending !== undefined ? Date.now() - pending.startedAt : undefined
 
-          if (pending !== undefined) {
-            // Wait for messageId then update the existing card
-            void pending.messageIdPromise.then((messageId) => {
-              if (messageId !== undefined) {
-                const updatedCard = renderToolResultCard(toolName, isError, result, elapsed, pending.arguments)
-                return channel.updateCard(messageId, updatedCard)
-              }
-              // Fallback if messageId not available
-              const card = renderToolResultCard(toolName, isError, result, elapsed)
-              scheduleBatch(state, pending.chat, card)
-            }).catch((error: unknown) => {
-              logger.warn(`dsh-feishu: tool-call card update failed: ${error instanceof Error ? error.message : String(error)}`)
-            })
-          } else {
-            // No pending call — send a standalone result card
-            const card = renderToolResultCard(toolName, isError, result, elapsed)
-            scheduleBatch(state, chat, card)
+      if (pending !== undefined) {
+        // Wait for messageId then update the existing card
+        void pending.messageIdPromise.then((messageId) => {
+          if (messageId !== undefined) {
+            const updatedCard = renderToolResultCard(toolName, isError, result, elapsed, pending.arguments)
+            return channel.updateCard(messageId, updatedCard)
           }
-
-          state.pending.delete(toolCallId)
-        }
+          // Fallback if messageId not available
+          const card = renderToolResultCard(toolName, isError, result, elapsed)
+          scheduleBatch(state, pending.chat, card)
+        }).catch((error: unknown) => {
+          logger.warn(`dsh-feishu: tool-call card update failed: ${error instanceof Error ? error.message : String(error)}`)
+        })
+      } else {
+        // No pending call — send a standalone result card
+        const card = renderToolResultCard(toolName, isError, result, elapsed)
+        scheduleBatch(state, chat, card)
       }
-    } catch (error: unknown) {
-      if (controller.signal.aborted) return
-      logger.warn(`dsh-feishu: tool-call stream interrupted: ${error instanceof Error ? error.message : String(error)}`)
+
+      state.pending.delete(toolCallId)
     }
-  }
-  void iterate()
+  })
 
   return {
     stop: () => {
-      controller.abort()
+      disposeListener()
       for (const state of sessionStates.values()) {
         if (state.batchTimer !== undefined) clearTimeout(state.batchTimer)
       }

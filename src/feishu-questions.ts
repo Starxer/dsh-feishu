@@ -16,9 +16,19 @@
  */
 
 import type { LarkChannel } from '@larksuiteoapi/node-sdk'
-import type { ApiProxy, ClientResponse, MuxFrame, QuestionResponsePayload } from '@deepseek-ai/dsh-host-apiproxy'
-import type { AskUserQuestionItem, AskUserQuestionOption } from '@deepseek-ai/dsh-user-questions/types'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy'
+import type { Context } from '@deepseek-ai/cordis'
+import type { AskUserQuestionItem, AskUserQuestionAnswer, AskUserQuestionAnswerItem, AskUserQuestionOption, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
+// Side-effect import: augments `@deepseek-ai/cordis` with `'user-questions/request'`.
+import '@deepseek-ai/dsh-user-questions'
+
+// Local module augmentation: dsh-user-questions itself does not extend
+// cordis.Events with the waterfall key, so we do it here for type-safe
+// `ctx.on('user-questions/request', ...)` access.
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'user-questions/request'(this: Context, request: AskUserQuestionRequest, next?: () => Promise<AskUserQuestionAnswer>): Promise<AskUserQuestionAnswer>
+  }
+}
 import type { HarnessConversationService } from './harness.ts'
 import type { ConversationMessage } from './conversation.ts'
 
@@ -36,10 +46,12 @@ interface BridgeHolder {
 
 /** Per-question state for the card click handler. */
 interface PendingCard {
-  rpcId: string
+  pendingId: string
   question: AskUserQuestionItem
   sessionId: string
   abortController: AbortController
+  /** Resolves when the user picks an option (or the request is aborted). */
+  resolve: (answer: AskUserQuestionAnswer | undefined) => void
   /** Message ID of the sent card, used to update it after selection. */
   cardMessageId?: string
 }
@@ -73,72 +85,48 @@ interface CardActionLike {
 
 /** Public surface the questions module reads. */
 export interface FeishuQuestionsDeps {
-  apiProxy: ApiProxy
+  ctx: Context
   channel: FeishuQuestionsChannel
   bridgeHolder: BridgeHolder
   logger: PluginLogger
 }
 
 /**
- * Subscribe to the apiproxy mux stream and forward every `question/requested`
- * frame to the chat that owns the session. Returns a disposer that cancels
- * the SSE subscription; safe to call multiple times.
+ * Register a `user-questions/request` waterfall listener on the host context.
+ * The listener is invoked for every `ask_user_question` call, claims the
+ * request by returning an answer (skipping the default tool-ask-user
+ * provider), and detaches its cardAction subscription on dispose.
  *
- * @param deps Live references to the apiproxy, the Lark channel, and the
- *   current bridge. The bridge is read lazily because `runtime.reconcile()`
+ * @param deps Live references to the host context, the Lark channel, and
+ *   the current bridge. The bridge is read lazily because `runtime.reconcile()`
  *   replaces it; re-resolving on every question handles that case naturally.
- * @returns a disposer that closes the SSE stream and detaches the cardAction listener.
+ * @returns a disposer that detaches the listener and the cardAction handler.
  */
 export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
-  const { apiProxy, channel, bridgeHolder, logger } = deps
-  const controller = new AbortController()
+  const { ctx, channel, bridgeHolder, logger } = deps
   const pendingCards = new Map<string, PendingCard>()
 
-  const respondForQuestion = async (
-    rpcId: string,
-    sessionId: string,
-    question: AskUserQuestionItem,
-    selected: readonly string[],
-    custom: string | undefined,
-  ): Promise<void> => {
-    const payload: QuestionResponsePayload = {
-      sessionId: sessionId as never,
-      answer: {
-        answers: [{
-          id: question.id,
-          selected: [...selected],
-          ...custom === undefined ? {} : { custom },
-        }],
-      },
-    }
-    const response: ClientResponse = {
-      type: 'client-response',
-      rpcId: RpcId(rpcId),
-      result: { ok: true, value: payload },
-    }
-    try {
-      const receipt = await apiProxy.respond(response)
-      if (!receipt.accepted) {
-        logger.warn(`dsh-feishu: question response rejected by apiproxy: ${receipt.reason}`)
-      }
-    } catch (error: unknown) {
-      logger.warn(`dsh-feishu: failed to deliver question answer to apiproxy: ${error instanceof Error ? error.message : String(error)}`)
+  // Build an answer from a card click and resolve the matching pending
+  // promise. The listener is what returns the answer to the waterfall; this
+  // helper is purely the cardAction → deferred bridge.
+  const settlePending = (pending: PendingCard, selected: readonly string[], custom: string | undefined): AskUserQuestionAnswer => {
+    pendingCards.delete(pending.pendingId)
+    return {
+      answers: [{
+        id: pending.question.id,
+        selected: [...selected],
+        ...custom === undefined ? {} : { custom },
+      }],
     }
   }
 
-  // The Feishu card action payload the Feishu interactive-card callback sends
-  // includes the button's `value` JSON verbatim. We pack the rpcId + question
-  // id + chosen label into that value so a single click fully resolves the
-  // question without a follow-up message roundtrip.
   const onCardAction = async (evt: CardActionLike): Promise<void> => {
     const action = evt.action
     let raw = action?.value
-    // Handle both string (JSON-encoded) and object (from behaviors callback) values.
-    let parsed: { rpcId?: unknown; questionId?: unknown; selected?: unknown; custom?: unknown; type?: unknown }
+    let parsed: { pendingId?: unknown; questionId?: unknown; selected?: unknown; custom?: unknown; type?: unknown }
     if (typeof raw === 'string') {
       try {
         let result = JSON.parse(raw)
-        // Feishu may double-encode the value (JSON string containing JSON)
         if (typeof result === 'string') result = JSON.parse(result)
         parsed = result as typeof parsed
       } catch {
@@ -149,41 +137,37 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
     } else {
       return
     }
-    const rpcId = typeof parsed.rpcId === 'string' ? parsed.rpcId : ''
+    const pendingId = typeof parsed.pendingId === 'string' ? parsed.pendingId : ''
     const questionId = typeof parsed.questionId === 'string' ? parsed.questionId : ''
-    if (rpcId === '' || questionId === '') return
-    const pending = pendingCards.get(rpcId)
+    if (pendingId === '' || questionId === '') return
+    const pending = pendingCards.get(pendingId)
     if (pending === undefined) return
 
-    // Extract form_value from the raw event (available when includeRawEvent is true).
     const formValue = (evt.raw?.action?.form_value ?? {}) as Record<string, unknown>
 
-    // Skip button clicked: submit empty answer and settle card.
     if (parsed.type === 'skip') {
-      pendingCards.delete(rpcId)
+      const answer = settlePending(pending, [], undefined)
       if (pending.cardMessageId !== undefined) {
         const settledCard = renderSettledQuestionCard(pending.question, ['⏭️ 已跳过'])
         await channel.updateCard(pending.cardMessageId, settledCard).catch((error: unknown) => {
           logger.warn(`dsh-feishu: failed to update question card: ${error instanceof Error ? error.message : String(error)}`)
         })
       }
-      await respondForQuestion(rpcId, pending.sessionId, pending.question, [], undefined)
+      pending.resolve(answer)
       return
     }
 
-    // Custom answer button clicked: read custom_text from form_value.
     if (parsed.type === 'custom') {
       const customText = typeof formValue.custom_text === 'string' ? formValue.custom_text.trim() : ''
-      if (customText === '') return  // Empty input, ignore.
-      pendingCards.delete(rpcId)
-      // Update the card to show the custom answer.
+      if (customText === '') return
+      const answer = settlePending(pending, [], customText)
       if (pending.cardMessageId !== undefined) {
         const settledCard = renderSettledQuestionCard(pending.question, [`✏️ ${customText}`])
         await channel.updateCard(pending.cardMessageId, settledCard).catch((error: unknown) => {
           logger.warn(`dsh-feishu: failed to update question card: ${error instanceof Error ? error.message : String(error)}`)
         })
       }
-      await respondForQuestion(rpcId, pending.sessionId, pending.question, [], customText)
+      pending.resolve(answer)
       return
     }
 
@@ -191,8 +175,6 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
       ? parsed.selected.filter((item: unknown): item is string => typeof item === 'string')
       : action?.option !== undefined ? [action.option] : []
     const custom = typeof parsed.custom === 'string' && parsed.custom !== '' ? parsed.custom : undefined
-    pendingCards.delete(rpcId)
-    // Update the card to show selected answer (remove buttons, show feedback).
     const selectedLabels = selected.length > 0 ? selected : (action?.option !== undefined ? [action.option] : [])
     if (pending.cardMessageId !== undefined && selectedLabels.length > 0) {
       const settledCard = renderSettledQuestionCard(pending.question, selectedLabels)
@@ -201,77 +183,144 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
       })
     }
     if (selected.length === 0 && custom === undefined) return
-    await respondForQuestion(rpcId, pending.sessionId, pending.question, selected, custom)
+    const answer = settlePending(pending, selected, custom)
+    pending.resolve(answer)
   }
   const unsubscribeCardAction = channel.onCardAction(onCardAction)
 
-  const iterate = async (): Promise<void> => {
-    try {
-      // The mux iterator never resolves on its own — it stays open until the
-      // signal aborts. We tear it down via `controller.abort()` when the
-      // caller disposes the listener or the bridge is replaced.
-      for await (const envelope of apiProxy.events.mux(
-        { rpcId: RpcId(`feishu-${Date.now()}`), payload: {} },
-        controller.signal,
-      )) {
-        const frame = envelope.payload as MuxFrame
-        if (frame.type !== 'question/requested') continue
-        const bridge = bridgeHolder.current
-        if (bridge === undefined) continue
-        const chat = bridge.resolveChat(frame.sessionId)
-        if (chat === undefined) continue
-        await presentQuestions(chat, channel, pendingCards, envelope.rpcId, frame.sessionId, frame.questions)
-      }
-    } catch (error: unknown) {
-      if (controller.signal.aborted) return
-      logger.warn(`dsh-feishu: question stream interrupted: ${error instanceof Error ? error.message : String(error)}`)
+  const handleRequest = async (
+    request: AskUserQuestionRequest,
+    next?: () => Promise<AskUserQuestionAnswer>,
+  ): Promise<AskUserQuestionAnswer> => {
+    console.log(`dsh-feishu: [q] handleRequest entered agentDefined=${request.agent !== undefined}`)
+    if (request.agent === undefined) {
+      console.log('dsh-feishu: [q] no agent, falling to next')
+      return next !== undefined ? await next() : Promise.reject(new Error('no user-questions answerer'))
     }
+    const sessionId = request.agent.session.id
+    const bridge = bridgeHolder.current
+    console.log(`dsh-feishu: [q] sessionId=${sessionId} bridge=${bridge !== undefined}`)
+    if (bridge === undefined) {
+      console.log('dsh-feishu: [q] no bridge, falling to next')
+      return next !== undefined ? await next() : Promise.reject(new Error('no bridge'))
+    }
+    const chat = bridge.resolveChat(sessionId)
+    console.log(`dsh-feishu: [q] resolveChat=${chat === undefined ? 'MISSING' : chat.chatId}`)
+    if (chat === undefined) {
+      console.log('dsh-feishu: [q] session not bound to chat, falling to next')
+      return next !== undefined ? await next() : Promise.reject(new Error('session not bound to chat'))
+    }
+
+    const abortController = new AbortController()
+    request.signal?.addEventListener('abort', () => {
+      for (const [pid, pending] of pendingCards.entries()) {
+        if (pending.abortController === abortController) {
+          pendingCards.delete(pid)
+          pending.resolve(undefined)
+        }
+      }
+    })
+
+    return await presentQuestions(chat, channel, pendingCards, request.questions, abortController, logger)
   }
-  void iterate()
+  // Prepended so this answerer runs BEFORE api-remotes' forwarding listener.
+  // remotes routes agent-scoped waterfalls (e.g. `user-questions/request`) to
+  // the WebUI client with a waterfall listener that BLOCKS waiting for a
+  // WebUI answer; a plain (pushed) registration leaves Feishu inner to that
+  // chain, so the card never renders here. Prepend makes Feishu claim first,
+  // but only for sessions bound to a Feishu chat — unbound sessions fall
+  // through to `next()` and back to the WebUI answerer.
+  const disposeListener = ctx.on('user-questions/request', handleRequest, { prepend: true })
 
   return () => {
-    controller.abort()
+    disposeListener()
     unsubscribeCardAction()
-    for (const pending of pendingCards.values()) pending.abortController.abort()
+    for (const pending of pendingCards.values()) {
+      pending.resolve(undefined)
+      pending.abortController.abort()
+    }
     pendingCards.clear()
   }
 }
 
 /**
- * Render each question as its own card (one card per question, single question
- * per `ask_user_question` call by default). The card has the question text,
- * the optional detail block, and a row of buttons — one per option. Multi-
- * select prompts ask for a single "Confirm" press after multiple selections.
+ * Render each question as its own card and present the batch sequentially:
+ * one card at a time, awaiting that card's answer before sending the next
+ * question. A skipped question still yields an (empty-selection) answer item,
+ * so the returned batch always has one item per question unless the request is
+ * aborted or a card fails to send. This matches the WebUI's whole-batch answer
+ * encoding while keeping Feishu's one-card-at-a-time chat UX.
  */
 async function presentQuestions(
   chat: ConversationMessage,
   channel: FeishuQuestionsChannel,
   pendingCards: Map<string, PendingCard>,
-  rpcId: string,
-  sessionId: string,
   questions: readonly AskUserQuestionItem[],
-): Promise<void> {
-  for (const question of questions) {
-    const options = question.options ?? []
-    const card = renderQuestionCard(question, options, rpcId, sessionId)
-    try {
-      const result = await channel.send(chat.chatId, { card }, chat.threadId !== undefined
-        ? { replyInThread: true, ...(chat.rootId !== undefined ? { replyTo: chat.rootId } : {}) }
-        : {})
-      const mid = (result as { messageId?: string })?.messageId
-      pendingCards.set(rpcId, {
-        rpcId,
-        sessionId,
-        question,
-        abortController: new AbortController(),
-        ...(mid !== undefined ? { cardMessageId: mid } : {}),
-      })
-    } catch (error: unknown) {
-      // Sending failed; abandon the prompt so the agent isn't blocked on a
-      // user who never sees the question.
-      return
-    }
+  abortController: AbortController,
+  logger?: PluginLogger,
+): Promise<AskUserQuestionAnswer> {
+  if (questions.length === 0) {
+    return { answers: [] }
   }
+  console.log(`dsh-feishu: [q] presenting ${questions.length} question(s) to chat=${chat.chatId} thread=${chat.threadId ?? '-'}`)
+  const answers: AskUserQuestionAnswerItem[] = []
+  for (const question of questions) {
+    const item = await presentOneQuestion(chat, channel, pendingCards, question, abortController, logger)
+    if (item === undefined) break
+    answers.push(item)
+  }
+  if (answers.length === 0) {
+    return { answers: [] }
+  }
+  return { answers }
+}
+
+/**
+ * Render one question card and wait for its answer. Returns the single
+ * `{ id, selected, custom }` answer item, or `undefined` when the card could
+ * not be sent or the request is aborted (the caller stops the batch).
+ */
+async function presentOneQuestion(
+  chat: ConversationMessage,
+  channel: FeishuQuestionsChannel,
+  pendingCards: Map<string, PendingCard>,
+  question: AskUserQuestionItem,
+  abortController: AbortController,
+  logger?: PluginLogger,
+): Promise<AskUserQuestionAnswerItem | undefined> {
+  const pendingId = `feishu-q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const options = question.options ?? []
+  const card = renderQuestionCard(question, options, pendingId)
+  // The cardAction -> deferred bridge carries the whole `{ answers: [item] }`
+  // settle value; extract the single item here so the batch loop can accumulate.
+  const deferred = new Promise<AskUserQuestionAnswerItem | undefined>((resolve) => {
+    const pending: PendingCard = {
+      pendingId,
+      question,
+      sessionId: '',
+      abortController,
+      resolve: (answer) => resolve(answer?.answers?.[0]),
+    }
+    pendingCards.set(pendingId, pending)
+  })
+  try {
+    console.log(`dsh-feishu: [q] sending card to chat=${chat.chatId} thread=${chat.threadId ?? '-'}`)
+    const result = await channel.send(chat.chatId, { card }, chat.threadId !== undefined
+      ? { replyInThread: true, ...(chat.rootId !== undefined ? { replyTo: chat.rootId } : {}) }
+      : {})
+    const mid = (result as { messageId?: string })?.messageId
+    console.log(`dsh-feishu: [q] card sent messageId=${mid ?? 'none'}`)
+    const pending = pendingCards.get(pendingId)
+    if (pending !== undefined && mid !== undefined) {
+      pending.cardMessageId = mid
+    }
+  } catch (error: unknown) {
+    console.log(`dsh-feishu: [q] card send failed: ${error instanceof Error ? error.message : String(error)}`)
+    logger?.warn(`dsh-feishu: [q] card send failed: ${error instanceof Error ? error.message : String(error)}`)
+    pendingCards.delete(pendingId)
+    return undefined
+  }
+  return await deferred
 }
 
 /**
@@ -335,8 +384,7 @@ function renderSettledQuestionCard(
 function renderQuestionCard(
   question: AskUserQuestionItem,
   options: readonly AskUserQuestionOption[],
-  rpcId: string,
-  _sessionId: string,
+  pendingId: string,
 ): object {
   const mdParts: string[] = []
   if (question.header !== undefined && question.header !== '') {
@@ -357,7 +405,7 @@ function renderQuestionCard(
         tag: 'button',
         text: { tag: 'plain_text', content: option.label },
         type: multiSelect ? 'default' : 'primary',
-        behaviors: [{ type: 'callback', value: { rpcId, questionId: question.id, selected: [option.label] } }],
+        behaviors: [{ type: 'callback', value: { pendingId, questionId: question.id, selected: [option.label] } }],
       })
     }
   }
@@ -370,7 +418,7 @@ function renderQuestionCard(
     : '请输入你的回答：'
   body.push({
     tag: 'form',
-    name: `custom_form_${rpcId}`,
+    name: `custom_form_${pendingId}`,
     elements: [
       { tag: 'markdown', content: hint },
       {
@@ -385,7 +433,7 @@ function renderQuestionCard(
         type: 'primary',
         name: 'submit_custom',
         form_action_type: 'submit',
-        behaviors: [{ type: 'callback', value: { rpcId, questionId: question.id, type: 'custom' } }],
+        behaviors: [{ type: 'callback', value: { pendingId, questionId: question.id, type: 'custom' } }],
       },
     ],
   })
@@ -394,7 +442,7 @@ function renderQuestionCard(
     tag: 'button',
     text: { tag: 'plain_text', content: '⏭️ 跳过本题' },
     type: 'default',
-    behaviors: [{ type: 'callback', value: { rpcId, questionId: question.id, selected: [], type: 'skip' } }],
+    behaviors: [{ type: 'callback', value: { pendingId, questionId: question.id, selected: [], type: 'skip' } }],
   })
   return {
     schema: '2.0',

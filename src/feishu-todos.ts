@@ -1,13 +1,12 @@
 /**
- * Feishu UI bridge for todo visualization: subscribes to the apiproxy mux
- * stream so the Feishu chat can render a card showing the current todo list
- * whenever it changes.
+ * Feishu UI bridge for todo visualization: subscribes to the host's
+ * `session/event` fan-out so the Feishu chat can render a card showing the
+ * current todo list whenever it changes.
  *
  * @module @starxer/dsh-feishu/feishu-todos
  */
 
-import type { ApiProxy, MuxFrame } from '@deepseek-ai/dsh-host-apiproxy'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy'
+import type { Context } from '@deepseek-ai/cordis'
 import type { HarnessConversationService } from './harness.ts'
 import type { ConversationMessage } from './conversation.ts'
 
@@ -30,7 +29,7 @@ export interface FeishuTodosChannel {
 
 /** Public deps for the todos module. */
 export interface FeishuTodosDeps {
-  apiProxy: ApiProxy
+  ctx: Context
   channel: FeishuTodosChannel
   bridgeHolder: BridgeHolder
   logger: PluginLogger
@@ -52,12 +51,12 @@ interface SessionTodoState {
 }
 
 /**
- * Subscribe to the apiproxy mux stream and render todo status cards.
- * Returns a disposer.
+ * Subscribe to the host's `session/event` fan-out and render todo status
+ * cards. Returns a disposer that unsubscribes the listener and clears any
+ * pending debounce timers.
  */
 export function startFeishuTodos(deps: FeishuTodosDeps): () => void {
-  const { apiProxy, channel, bridgeHolder, logger } = deps
-  const controller = new AbortController()
+  const { ctx, channel, bridgeHolder, logger } = deps
   const sessionStates = new Map<string, SessionTodoState>()
 
   const getState = (sessionId: string): SessionTodoState => {
@@ -99,35 +98,25 @@ export function startFeishuTodos(deps: FeishuTodosDeps): () => void {
     state.debounceTimer = setTimeout(() => sendTodoCard(state), 500)
   }
 
-  const iterate = async (): Promise<void> => {
-    try {
-      for await (const envelope of apiProxy.events.mux(
-        { rpcId: RpcId(`feishu-todos-${Date.now()}`), payload: {} },
-        controller.signal,
-      )) {
-        const frame = envelope.payload as MuxFrame
-        if (frame.type !== 'session/event') continue
-        const event = frame.event
-        if (event === undefined) continue
-        if (event.type !== 'todo/write') continue
-        const bridge = bridgeHolder.current
-        if (bridge === undefined) continue
-        const chat = bridge.resolveChat(frame.sessionId)
-        if (chat === undefined) continue
-        const state = getState(frame.sessionId)
-        const todos = parseTodos(event.data?.todos)
-        if (todos.length === 0) continue
-        scheduleTodoCard(state, chat, todos)
-      }
-    } catch (error: unknown) {
-      if (controller.signal.aborted) return
-      logger.warn(`dsh-feishu: todo stream interrupted: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
-  void iterate()
+  // session/event is the host's host-to-host fan-out. Filter on event.type
+  // for `todo/write`; the (session, event) callback receives the full session
+  // object (no sessionId hop) and the event object directly (no envelope
+  // wrapper).
+  const disposeListener = ctx.on('session/event', (session, event) => {
+    if (event.type !== 'todo/write') return
+    const sessionId = session.id
+    const bridge = bridgeHolder.current
+    if (bridge === undefined) return
+    const chat = bridge.resolveChat(sessionId)
+    if (chat === undefined) return
+    const state = getState(sessionId)
+    const todos = parseTodos(event.data?.todos)
+    if (todos.length === 0) return
+    scheduleTodoCard(state, chat, todos)
+  })
 
   return () => {
-    controller.abort()
+    disposeListener()
     for (const state of sessionStates.values()) {
       if (state.debounceTimer !== undefined) clearTimeout(state.debounceTimer)
     }

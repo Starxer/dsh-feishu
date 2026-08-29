@@ -1,4 +1,7 @@
 import { Readable } from 'node:stream'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { Domain, LoggerLevel, createLarkChannel } from '@larksuiteoapi/node-sdk'
 import type { LarkChannel, LarkChannelOptions, NormalizedMessage, ResourceDescriptor } from '@larksuiteoapi/node-sdk'
 import type { AttachmentStore, ImageAttachmentRef, SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
@@ -113,6 +116,58 @@ async function admitImagesForMessage(
   const refs: ImageAttachmentRef[] = []
   for (const input of inputs) refs.push(await attachments.saveImage(input))
   return refs
+}
+
+/** Download directory for inbound file attachments. Lazily created. */
+let fileDownloadDir: string | undefined
+
+/**
+ * Shared, persistent inbox directory for inbound files. Files live here so the
+ * agent session (which reads from the same user home) can open them with its
+ * file tools. A plain `/tmp` path is unusable because the channel service and
+ * the agent's tool sandbox have isolated `/tmp` mounts; DSH_HOME is a real
+ * on-disk directory both sides can reach.
+ */
+async function getFileDownloadDir(): Promise<string> {
+  if (fileDownloadDir !== undefined) return fileDownloadDir
+  const dshHome = process.env.DSH_HOME || `${homedir()}/.dsh`
+  const dir = join(dshHome, 'feishu-inbox')
+  await mkdir(dir, { recursive: true })
+  fileDownloadDir = dir
+  return dir
+}
+
+/**
+ * Download every file resource off one normalized message and persist the
+ * bytes to a temp directory. Returns an array of `{ path, fileName }` entries
+ * so the inbound message content can reference them. Returns an empty array
+ * when the message carries no file resources.
+ */
+async function admitFilesForMessage(
+  channel: LarkChannel,
+  message: NormalizedMessage,
+  signal: AbortSignal,
+): Promise<readonly { path: string; fileName: string }[]> {
+  const resources = (message.resources ?? []).filter(resource => resource.type === 'file')
+  if (resources.length === 0) return []
+  const dir = await getFileDownloadDir()
+  const results: { path: string; fileName: string }[] = []
+  for (const resource of resources) {
+    if (signal.aborted) throw new Error('dsh-feishu: file admission aborted')
+    const raw = await channel.rawClient.im.v1.messageResource.get({
+      params: { type: 'file' },
+      path: { message_id: message.messageId, file_key: resource.fileKey },
+    })
+    if (signal.aborted) throw new Error('dsh-feishu: file admission aborted')
+    const bytes = await readDownloadStream(raw)
+    const fileName = resource.fileName ?? resource.fileKey
+    const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_')
+    const ts = Date.now()
+    const filePath = join(dir, `${ts}_${safeName}`)
+    await writeFile(filePath, bytes)
+    results.push({ path: filePath, fileName })
+  }
+  return results
 }
 
 /** Metadata for the reply card footer. */
@@ -262,6 +317,24 @@ export async function startChannel(
             replyInThread,
           }).catch(() => undefined)
           return
+        }
+      }
+      // Admit file resources: download them to a temp directory and inject
+      // file paths into the message content so the agent can read them.
+      if ((message.resources ?? []).some(resource => resource.type === 'file')) {
+        try {
+          const files = await admitFilesForMessage(channel, message, new AbortController().signal)
+          if (files.length > 0) {
+            const fileRefs = files.map(f => `[文件: ${f.fileName} → ${f.path}]`).join('\n')
+            const extraContent = inboundMessage.content.length > 0
+              ? `${inboundMessage.content}\n${fileRefs}`
+              : fileRefs
+            inboundMessage = { ...inboundMessage, content: extraContent }
+          }
+        } catch (error: unknown) {
+          logError(`dsh-feishu: file admission failed: ${error instanceof Error ? error.message : String(error)}`)
+          // Non-fatal: continue with the message even if file download fails.
+          // The agent will see the raw <file .../> tag and can report the issue.
         }
       }
       try {

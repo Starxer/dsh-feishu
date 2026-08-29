@@ -11,7 +11,6 @@
  */
 
 import type { AgentDefaultModelConfig } from '@deepseek-ai/dsh-agent-default-model'
-import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import type { LlmProviderInfo, LlmModelInfo } from '@deepseek-ai/dsh-llm'
 import type { HarnessConversationService } from './harness.ts'
 import type { ConversationMessage } from './conversation.ts'
@@ -56,11 +55,9 @@ interface LlmDirectoryLike {
   resolveModelInfo(provider: string, model: string): Promise<{ reasoning?: { efforts: readonly { id: string }[]; defaultEffort?: string } | undefined }>
 }
 
-/** Narrow apiProxy view. */
-interface ApiProxyLike {
-  sessions: {
-    selectModel(request: { rpcId?: string; payload: { sessionId: string; provider: string; model: string; reasoningEffort?: string } }): Promise<unknown>
-  }
+/** Narrow SessionController view — what feishu-model-select actually uses. */
+interface SessionControllerLike {
+  selectModel(request: { sessionId: string; provider: string; model: string; reasoningEffort?: string }): Promise<unknown>
 }
 
 /** A resolved model selection. */
@@ -407,7 +404,7 @@ export function startFeishuModelSelect(deps: {
   llm: LlmDirectoryLike
   agentDefaultModel: AgentDefaultModelConfig
   bridgeHolder: BridgeHolder
-  apiProxy?: ApiProxyLike
+  sessionController: SessionControllerLike
   channel: ModelSelectChannel
   logger: PluginLogger
   /** When set, confirm actions carrying the `new-session` flow marker are
@@ -421,7 +418,7 @@ export function startFeishuModelSelect(deps: {
    *  would target the main chat key instead of the topic key. */
   topicFor?: (chatId: string) => { rootId?: string; threadId?: string }
 }): { dispose: () => void; cardByMessage: Map<string, string>; sequenceByCard: Map<string, number> } {
-  const { llm, agentDefaultModel, bridgeHolder, apiProxy, channel, logger, onNewSessionConfirm, topicFor } = deps
+  const { llm, agentDefaultModel, bridgeHolder, sessionController, channel, logger, onNewSessionConfirm, topicFor } = deps
 
   const processing = new Map<string, true>()
   const actionQueue = new Map<string, QueuedAction[]>()
@@ -465,7 +462,7 @@ export function startFeishuModelSelect(deps: {
   ): Promise<void> {
     const bridge = bridgeHolder.current
     if (bridge === undefined) return
-    const current = bridge.currentSelectionFor(chatMessage) ?? agentDefaultModel.currentSelection()
+    const current = agentDefaultModel.currentSelection()
 
     let models: readonly LlmModelInfo[]
     try {
@@ -505,7 +502,7 @@ export function startFeishuModelSelect(deps: {
   ): Promise<void> {
     const bridge = bridgeHolder.current
     if (bridge === undefined) return
-    const current = bridge.currentSelectionFor(chatMessage) ?? agentDefaultModel.currentSelection()
+    const current = agentDefaultModel.currentSelection()
     const providers = llm.listProviders()
     const card = renderProviderSelectCard(providers, current, flow)
     await updateCardInstanceOnMessage(messageId, chatMessage, card)
@@ -561,48 +558,32 @@ export function startFeishuModelSelect(deps: {
     // Strip reasoning effort if the model doesn't support it.
     const effectiveReasoningEffort = modelSupportsReasoning ? reasoningEffort : undefined
 
-    // Step 1: Sync to WebUI first — this is the authoritative switch.
-    // Only persist locally AFTER the remote switch succeeds.
-    if (apiProxy !== undefined) {
-      try {
-        const sessionId = bridge.resolveSessionIdFor(chatMessage)
-        const response = await apiProxy.sessions.selectModel({
-          payload: { sessionId, provider, model, ...(effectiveReasoningEffort !== undefined ? { reasoningEffort: effectiveReasoningEffort } : {}) },
-        }) as { result?: { ok?: boolean; error?: { code?: string; message?: string } } } | undefined
-        // Check for API-level errors (selectModel may return error responses without throwing).
-        if (response?.result?.ok === false) {
-          const errMsg = response.result.error?.message ?? 'unknown error'
-          const errCode = response.result.error?.code ?? 'no code'
-          logger.warn(`dsh-feishu: model-select apiProxy returned error: ${errCode} ${errMsg}`)
-          const card = {
-            schema: '2.0',
-            config: { wide_screen_mode: true },
-            header: { title: { tag: 'plain_text', content: '🤖 模型选择' }, template: 'red' },
-            body: { elements: [{ tag: 'markdown', content: `⚠️ **切换失败**\n\n${errMsg} (${errCode})` }] },
-          }
-          await updateCardInstanceOnMessage(messageId, chatMessage, card)
-          return
-        }
-      } catch (error: unknown) {
-        const msg = error instanceof Error ? error.message : String(error)
-        logger.warn(`dsh-feishu: model-select failed to sync apiProxy: ${msg}`)
-        // Show error card instead of success card.
-        const card = {
-          schema: '2.0',
-          config: { wide_screen_mode: true },
-          header: { title: { tag: 'plain_text', content: '🤖 模型选择' }, template: 'red' },
-          body: { elements: [{ tag: 'markdown', content: `⚠️ **切换失败**\n\n${msg}` }] },
-        }
-        await updateCardInstanceOnMessage(messageId, chatMessage, card)
-        return
-      }
-    }
+    // Atomic model switch via session controller: resolves the session
+    // (creating the live agent if needed), validates the model, writes the
+    // agent-scoped selection ref so the WebUI sees the change immediately,
+    // AND persists the default selection. No two-step fallback needed.
+    try {
+      const sessionId = bridge.resolveSessionIdFor(chatMessage)
+      await sessionController.selectModel({
+        sessionId,
+        provider,
+        model,
+        ...(effectiveReasoningEffort !== undefined ? { reasoningEffort: effectiveReasoningEffort } : {}),
+      })
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error)
+      logger.warn(`dsh-feishu: model-select failed: ${msg}`)
+      const card = {
+        schema: '2.0',
+        config: { wide_screen_mode: true },
+        header: { title: { tag: 'plain_text', content: '🤖 模型选择' }, template: 'red' },
+        body: { elements: [{ tag: 'markdown', content: `⚠️ **切换失败**
 
-    // Step 2: Remote switch succeeded (or no apiProxy) — persist locally.
-    const selection: ModelSelection = { provider, model }
-    if (effectiveReasoningEffort !== undefined) selection.reasoningEffort = effectiveReasoningEffort
-    await agentDefaultModel.saveSelection(selection as never)
-    bridge.setCurrentSelection(chatMessage, selection as never)
+${msg}` }] },
+      }
+      await updateCardInstanceOnMessage(messageId, chatMessage, card)
+      return
+    }
 
     // Step 3: Show success card.
     const card = renderSwitchedCard(provider, model, modelName, effectiveReasoningEffort)
@@ -657,7 +638,7 @@ export function startFeishuModelSelect(deps: {
             case 'enter-select': {
               const bridge = bridgeHolder.current
               if (bridge === undefined) break
-              const current = bridge.currentSelectionFor(item.chatMessage) ?? agentDefaultModel.currentSelection()
+              const current = agentDefaultModel.currentSelection()
               const providers = llm.listProviders()
               const card = renderProviderSelectCard(providers, current, item.flow)
               await updateCardInstanceOnMessage(item.messageId, item.chatMessage, card)

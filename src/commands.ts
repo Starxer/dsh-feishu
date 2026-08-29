@@ -1,7 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult, CommandRuntime } from '@deepseek-ai/dsh-commands'
 import type { AgentDefaultModelConfig } from '@deepseek-ai/dsh-agent-default-model'
-import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import type { LlmProviderInfo, LlmModelInfo } from '@deepseek-ai/dsh-llm'
 import type { HarnessConversationService } from './harness.ts'
 import type { ConversationMessage } from './conversation.ts'
@@ -198,10 +197,8 @@ export interface ApprovalControl {
  * the agent (and therefore the session), not the chatId/threadId the bridge
  * needs.
  */
-interface ApiProxyLike {
-  sessions: {
-    selectModel(request: { rpcId?: string; payload: { sessionId: string; provider: string; model: string; reasoningEffort?: string } }): Promise<unknown>
-  }
+interface SessionControllerLike {
+  selectModel(request: { sessionId: string; provider: string; model: string; reasoningEffort?: string }): Promise<unknown>
 }
 
 export function registerLarkCommands(
@@ -210,14 +207,14 @@ export function registerLarkCommands(
   agentDefaultModel: AgentDefaultModelConfig,
   bridge: Pick<
     HarnessConversationService,
-    'setCurrentSelection' | 'currentSelectionFor' | 'startNewSession' | 'switchToSession' | 'detachSession' | 'listSessions' | 'getSessionMeta' | 'resolveAgent' | 'resolveSessionIdFor' | 'describeChatKey'
+    'startNewSession' | 'switchToSession' | 'detachSession' | 'listSessions' | 'getSessionMeta' | 'resolveAgent' | 'resolveSessionIdFor' | 'describeChatKey'
   >,
   chatMessageFor: (invocation: CommandInvocation) => ConversationMessage,
   t: CommandTranslations,
   commands: Pick<CommandRuntime, 'list'>,
   approvals: ApprovalControl,
   showReasoning: { get: () => boolean; toggle: () => void },
-  apiProxy?: ApiProxyLike,
+  sessionController: SessionControllerLike,
 ): void {
   ctx.effect(function* () {
     yield ctx.commands.register({
@@ -230,7 +227,7 @@ export function registerLarkCommands(
         bridge,
         chatMessageFor,
         t,
-        apiProxy,
+        sessionController,
       ),
     })
     yield ctx.commands.register({
@@ -302,7 +299,7 @@ export function registerLarkCommands(
         chatMessageFor,
         t,
         showReasoning,
-        apiProxy,
+        sessionController,
       ),
     })
   }, 'dsh-feishu: /model /new /thread /detach /help /approve /deny /approvals /status /stream /reasoning commands')
@@ -312,10 +309,10 @@ async function handleModelCommand(
   invocation: CommandInvocation,
   llm: LlmDirectoryLike,
   agentDefaultModel: AgentDefaultModelConfig,
-  bridge: Pick<HarnessConversationService, 'setCurrentSelection' | 'currentSelectionFor' | 'resolveAgent' | 'resolveSessionIdFor'>,
+  bridge: Pick<HarnessConversationService, 'resolveAgent' | 'resolveSessionIdFor'>,
   chatMessageFor: (invocation: CommandInvocation) => ConversationMessage,
   t: CommandTranslations,
-  apiProxy?: ApiProxyLike,
+  sessionController: SessionControllerLike,
 ): Promise<CommandResult> {
   const rawInput = invocation.rawInput.trim()
   if (rawInput === 'list') {
@@ -326,11 +323,8 @@ async function handleModelCommand(
   if (rawInput !== '' && route === undefined) {
     return { kind: 'error', text: `${t.modelUnknown(rawInput)}\n${t.modelUsage}` }
   }
-  // Prefer the chat's live selection ref over the global default so the
-  // status reflects in-flight switches made earlier in this session.
-  const liveCurrent = bridge.currentSelectionFor(chatMessageFor(invocation))
   const defaultCurrent = agentDefaultModel.currentSelection()
-  const current = liveCurrent ?? defaultCurrent
+  const current = defaultCurrent
   if (route === undefined) {
     return {
       kind: 'success',
@@ -349,36 +343,24 @@ async function handleModelCommand(
   // saveSelection accepts a string-typed reasoning effort; cast at the boundary
   // because the parser does not yet know the target provider's brand type.
   await agentDefaultModel.saveSelection(selection as Parameters<AgentDefaultModelConfig['saveSelection']>[0])
-  // Mutate the chat's cached selection ref so the agent loop's
-  // `installModelSelection` listener reads the new provider/model on the next
-  // inbound message. `setCurrentSelection` returns undefined when the chat has
-  // not yet produced an agent (slash command before any user message); in
-  // that case `agentDefaultModel.currentSelection()` already returns the new
-  // value for the next `createAgent` call.
-  const previous = bridge.setCurrentSelection(chatMessageFor(invocation), selection)
-  const liveNote = previous === undefined ? t.modelPersisted : t.modelLiveApplied
-
-  // Sync model selection to apiProxy so WebUI shows the same model.
-  // Without this, WebUI reads from its own selections Map (populated by
-  // apiProxy's selectionFor()) which is separate from bridge.selections.
-  if (apiProxy !== undefined) {
-    try {
-      const message = chatMessageFor(invocation)
-      const sessionId = bridge.resolveSessionIdFor(message)
-      await apiProxy.sessions.selectModel({
-        payload: {
-          sessionId,
-          provider: route.provider,
-          model: route.model,
-          ...route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort },
-        },
-      })
-    } catch {
-      // Non-fatal: model is already saved to settings and bridge selections
-    }
+  // Sync to the live agent and WebUI via the session controller. This
+  // internally calls `selectForNextRequest` (writes the agent-scoped ref the
+  // WebUI reads) AND `agentDefaultModel.saveSelection` (persists). For chats
+  // without a live agent yet, the session controller's `resolveAgent` will
+  // create one — that's an intentional consequence of the new atomic API.
+  try {
+    const message = chatMessageFor(invocation)
+    const sessionId = bridge.resolveSessionIdFor(message)
+    await sessionController.selectModel({
+      sessionId,
+      provider: route.provider,
+      model: route.model,
+      ...route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort },
+    })
+    return { kind: 'success', text: `${t.modelSwitched(route.provider, route.model)}\n${t.modelLiveApplied}` }
+  } catch {
+    return { kind: 'success', text: `${t.modelSwitched(route.provider, route.model)}\n${t.modelPersisted}` }
   }
-
-  return { kind: 'success', text: `${t.modelSwitched(route.provider, route.model)}\n${liveNote}` }
 }
 
 const VALID_REASONING_LEVELS = ['off', 'low', 'high', 'max'] as const
@@ -391,11 +373,11 @@ const VALID_REASONING_LEVELS = ['off', 'low', 'high', 'max'] as const
 async function handleReasoningCommand(
   invocation: CommandInvocation,
   agentDefaultModel: AgentDefaultModelConfig,
-  bridge: Pick<HarnessConversationService, 'setCurrentSelection' | 'currentSelectionFor' | 'resolveSessionIdFor'>,
+  bridge: Pick<HarnessConversationService, 'resolveSessionIdFor'>,
   chatMessageFor: (invocation: CommandInvocation) => ConversationMessage,
   t: CommandTranslations,
   showReasoning: { get: () => boolean; toggle: () => void },
-  apiProxy?: ApiProxyLike,
+  sessionController: SessionControllerLike,
 ): Promise<CommandResult> {
   const rawInput = invocation.rawInput.trim().toLowerCase()
   const current = agentDefaultModel.currentSelection()
@@ -443,25 +425,18 @@ async function handleReasoningCommand(
     reasoningEffort: level as never,
   }
   await agentDefaultModel.saveSelection(selection)
-  bridge.setCurrentSelection(chatMessageFor(invocation), selection)
-  // Sync reasoning effort to apiProxy so WebUI shows the same effort.
-  // Without this, WebUI reads from its own selections Map (populated by
-  // apiProxy's selectionFor()) which is separate from bridge.selections.
-  if (apiProxy !== undefined) {
-    try {
-      const message = chatMessageFor(invocation)
-      const sessionId = bridge.resolveSessionIdFor(message)
-      await apiProxy.sessions.selectModel({
-        payload: {
-          sessionId,
-          provider: current.provider,
-          model: current.model,
-          reasoningEffort: level,
-        },
-      })
-    } catch {
-      // Non-fatal: reasoning effort is already saved to settings and bridge selections
-    }
+  // Sync to live agent + WebUI via session controller (atomic).
+  try {
+    const message = chatMessageFor(invocation)
+    const sessionId = bridge.resolveSessionIdFor(message)
+    await sessionController.selectModel({
+      sessionId,
+      provider: current.provider,
+      model: current.model,
+      reasoningEffort: level,
+    })
+  } catch {
+    // Non-fatal: reasoning effort is already saved to settings.
   }
   return { kind: 'success', text: t.reasoningSwitched(level) }
 }
