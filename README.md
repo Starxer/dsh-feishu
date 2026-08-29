@@ -16,6 +16,9 @@
 | Turn Complete 卡片 | turn 结束后展示总时长/LLM 时间/工具时间、TTFT/吞吐量、token/缓存命中率 |
 | 斜杠命令 | `/model` `/new` `/thread` `/status` `/stop` `/reasoning` `/approve` `/deny` 等 |
 | 审批 | 与 DSH Web UI 共享同一份 pending 审批状态 |
+| `ask_user_question` 卡片 | 问题卡片（选项/自定义输入/跳过），一次多问时**顺序迭代**、整批返回答案 |
+| 图片 / 文件接收 | 用户发送的图片经 attachment store 落盘，文件下载到 `~/.dsh/feishu-inbox/` 供 agent 读取 |
+| agent 主动发文件 | `feishu_send_file` 模型工具：agent 可把工作区文件推送到当前飞书聊天（≤30MB） |
 | WebSocket 长连接 | 无需公网服务器，支持飞书中国版和国际版 Lark |
 | 访问控制 | 群聊白名单、单聊白名单、@机器人 要求 |
 
