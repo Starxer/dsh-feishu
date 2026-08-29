@@ -48,6 +48,8 @@ interface PendingApproval {
   sessionId: string
   chat: ConversationMessage
   toolName: string
+  /** Human-readable reason supplied by the asker, rendered on the card. */
+  reason?: string
   shortCode: string
   createdAt: number
   /** Resolves with the user's outcome (or 'cancelled' on abort). */
@@ -179,6 +181,7 @@ export function startFeishuApprovals(deps: FeishuApprovalsDeps): {
       sessionId,
       chat,
       toolName: request.toolName,
+      ...(request.reason === undefined ? {} : { reason: request.reason }),
       shortCode,
       createdAt: Date.now(),
       resolve: (_outcome) => undefined,
@@ -291,14 +294,20 @@ function shortCodeFor(rpcId: string): string {
  * Build a Feishu interactive-card payload for one approval request. Header
  * "Approval needed", body with tool/reason, action row with Reject / Approve.
  */
-function renderApprovalCard(entry: PendingApproval): object {
+export function renderApprovalCard(entry: PendingApproval): object {
   const locationHint = entry.chat.threadId !== undefined
     ? `_id \`${entry.shortCode}\` · pending in this thread_`
     : `_id \`${entry.shortCode}\` · pending in this chat_`
   const body: object[] = [
     { tag: 'markdown', content: `**Tool:** \`${entry.toolName}\`\n${locationHint}` },
   ]
+  // Render the asker's reason on the card so the user can decide without
+  // guessing what the tool is about to do. Omit the line when no reason exists.
+  if (entry.reason !== undefined && entry.reason.trim() !== '') {
+    body.push({ tag: 'markdown', content: `**Reason:** ${entry.reason}` })
+  }
   // Card JSON 2.0: buttons go directly in body.elements (no 'action' wrapper).
+  // Confirm-first order: Approve (primary) above Reject (danger).
   return {
     schema: '2.0',
     config: { wide_screen_mode: true },
@@ -311,15 +320,15 @@ function renderApprovalCard(entry: PendingApproval): object {
         ...body,
         {
           tag: 'button',
-          text: { tag: 'plain_text', content: 'Reject' },
-          type: 'danger',
-          value: JSON.stringify({ pendingId: entry.pendingId, outcome: 'rejected' }),
-        },
-        {
-          tag: 'button',
           text: { tag: 'plain_text', content: 'Approve once' },
           type: 'primary',
           value: JSON.stringify({ pendingId: entry.pendingId }),
+        },
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: 'Reject' },
+          type: 'danger',
+          value: JSON.stringify({ pendingId: entry.pendingId, outcome: 'rejected' }),
         },
       ],
     },
