@@ -16,7 +16,6 @@ import type { LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk'
 import { createLarkChannel } from '@larksuiteoapi/node-sdk'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { ConfigSchema, LARK_SETTINGS_NAMESPACE, resolveSettingsConfig } from './config.ts'
-import { errorText } from './error-text.ts'
 import type { Config as PluginConfig, SettingsConfig } from './config.ts'
 import { HarnessConversationService } from './harness.ts'
 import type { ConversationMessage } from './conversation.ts'
@@ -315,7 +314,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
           ctx.logger('dsh-feishu').info(`dsh-feishu: /stream toggle: ${current} → ${next}`)
           void settings.mutate(namespace, [{ op: 'set', path: ['showIntermediateMessages'], value: next }], currentRevision())
           return { enabled: next as boolean }
-        }, sessionController, llm, defaultModel, cardChannel,
+        }, sessionController, agents, llm, defaultModel, cardChannel,
         modelSelectHandle !== undefined ? { cardByMessage: modelSelectHandle.cardByMessage, sequenceByCard: modelSelectHandle.sequenceByCard } : undefined,
         onboardingHandle, workspaceRegistry, agentPresets),
         attachments,
@@ -878,6 +877,7 @@ async function executeSlashCommand(
   bridgeHolder: { lastChatMessage: { chatId: string; chatType: 'p2p' | 'group'; threadId?: string } | undefined },
   toggleStream?: () => { enabled: boolean },
   sessionController?: { selectModel?: (r: any) => Promise<any>; cancel?: (r: any) => Promise<any> },
+  agents?: { get: (id: any) => { cancel: (cause: { kind: 'user' }, opts: { keepInbox?: boolean }) => void } | undefined },
   llm?: LlmRuntime,
   agentDefaultModel?: AgentDefaultModelConfig,
   cardChannel?: ModelSelectChannel,
@@ -1003,34 +1003,27 @@ async function executeSlashCommand(
     ]
     return { kind: 'success', text: lines.join('\n') }
   }
-  // /stop cancels the running agent — mirrors the WebUI stop button's
-  // session-controller cancel RPC. Unlike `/approve`/`/deny`, this does not
-  // need a live agent handle; the session controller reaches the host directly.
+  // /stop cancels the running agent — mirrors the WebUI stop button. It reaches
+  // the live agent directly (rather than `sessionController.cancel`, which
+  // hardcodes `keepInbox: true`) so it can also drop the pending inbox.
   if (parsed.name === 'stop') {
     if (sessionController === undefined) {
       return { kind: 'error', text: '⚠️ Cannot stop: sessionController is not available.' }
     }
     // Resolve the session id for this chat without creating an agent.
     const sessionId = bridge.resolveSessionIdFor(chatMessage)
-    try {
-      // `sessionController.cancel` resolves with `{ accepted: true }` on
-      // success. Failure paths (e.g. session not attached to a live agent)
-      // THROW — they do not resolve with a `{ ok: false, error }` envelope.
-      // The older apiproxy RPC used `{ ok, error }`, which is why the previous
-      // check against `response.ok` always fell into the error branch.
-      const response = await (sessionController as unknown as {
-        cancel: (r: { sessionId: string }) => Promise<{ accepted?: boolean }>
-      }).cancel({ sessionId })
-      if (response.accepted === true) {
-        return { kind: 'success', text: '⏹️ Agent 已停止。当前 turn 的工具执行将尽快终止。' }
-      }
-      return { kind: 'error', text: '⚠️ 停止失败: cancel did not confirm (unexpected response).' }
-    } catch (error: unknown) {
-      if (error instanceof Error && (error as { code?: unknown }).code === 'session-not-found') {
-        return { kind: 'error', text: '⚠️ 该 session 当前没有运行中的 agent，无需停止。' }
-      }
-      return { kind: 'error', text: `⚠️ 停止失败: ${errorText(error, 'unknown error')}` }
+    const agent = agents?.get(sessionId)
+    if (agent === undefined) {
+      return { kind: 'error', text: '⚠️ 该 session 当前没有运行中的 agent，无需停止。' }
     }
+    // Cancel with `keepInbox: false` so the pending inbox (a Feishu message
+    // queued while the previous turn was still running) is DROPPED as well —
+    // matching the WebUI stop button, which terminates all runs instead of
+    // letting a queued message immediately spawn a new loop. The session
+    // controller's own `cancel` hardcodes `keepInbox: true`, which is exactly
+    // the "abort turn but restart from the queue" behaviour we are replacing.
+    agent.cancel({ kind: 'user' }, { keepInbox: false })
+    return { kind: 'success', text: '⏹️ Agent 已停止，排队中的消息已丢弃。当前 turn 的工具执行将尽快终止。' }
   }
   // /model with no arguments renders the model selector card (V2 card
   // instance) instead of falling through to commands.execute. The card's
