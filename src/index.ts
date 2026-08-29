@@ -16,6 +16,7 @@ import type { LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk'
 import { createLarkChannel } from '@larksuiteoapi/node-sdk'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { ConfigSchema, LARK_SETTINGS_NAMESPACE, resolveSettingsConfig } from './config.ts'
+import { errorText } from './error-text.ts'
 import type { Config as PluginConfig, SettingsConfig } from './config.ts'
 import { HarnessConversationService } from './harness.ts'
 import type { ConversationMessage } from './conversation.ts'
@@ -1012,21 +1013,23 @@ async function executeSlashCommand(
     // Resolve the session id for this chat without creating an agent.
     const sessionId = bridge.resolveSessionIdFor(chatMessage)
     try {
-      // The new session-controller API: `cancel({ sessionId })` is the host-side
-      // equivalent of the apiproxy `sessions.cancel` RPC. It returns either
-      // `{ ok: true }` or `{ ok: false, error: { code, message } }`.
-      const response = await (sessionController as unknown as { cancel: (r: { sessionId: string }) => Promise<{ ok: boolean; error?: { code?: string; message?: string } }> }).cancel({ sessionId })
-      if (response.ok) {
+      // `sessionController.cancel` resolves with `{ accepted: true }` on
+      // success. Failure paths (e.g. session not attached to a live agent)
+      // THROW — they do not resolve with a `{ ok: false, error }` envelope.
+      // The older apiproxy RPC used `{ ok, error }`, which is why the previous
+      // check against `response.ok` always fell into the error branch.
+      const response = await (sessionController as unknown as {
+        cancel: (r: { sessionId: string }) => Promise<{ accepted?: boolean }>
+      }).cancel({ sessionId })
+      if (response.accepted === true) {
         return { kind: 'success', text: '⏹️ Agent 已停止。当前 turn 的工具执行将尽快终止。' }
       }
-      const code = response.error?.code
-      if (code === 'session-not-found') {
+      return { kind: 'error', text: '⚠️ 停止失败: cancel did not confirm (unexpected response).' }
+    } catch (error: unknown) {
+      if (error instanceof Error && (error as { code?: unknown }).code === 'session-not-found') {
         return { kind: 'error', text: '⚠️ 该 session 当前没有运行中的 agent，无需停止。' }
       }
-      return { kind: 'error', text: `⚠️ 停止失败: ${response.error?.message ?? 'unknown error'} (${code ?? 'no code'})` }
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : String(error)
-      return { kind: 'error', text: `⚠️ 停止失败: ${msg}` }
+      return { kind: 'error', text: `⚠️ 停止失败: ${errorText(error, 'unknown error')}` }
     }
   }
   // /model with no arguments renders the model selector card (V2 card
