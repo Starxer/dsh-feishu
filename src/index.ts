@@ -47,6 +47,9 @@ import { startFeishuModelSelect, renderProviderSelectCard, sendModelCardV2, type
 import { startFeishuOnboarding, type FeishuOnboardingHandle } from './feishu-onboarding.ts'
 import type { ChatCreationOptions } from './harness.ts'
 
+/** DSH file-sandbox mode vocabulary (mirrors `dsh-sandbox-policy`). */
+const SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const
+
 export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void> {
   console.log('dsh-feishu: apply() called, sessionController=', ctx.get('sessionController') !== undefined ? 'available' : 'UNDEFINED', 'userQuestions=', ctx.get('userQuestions') !== undefined ? 'available' : 'UNDEFINED', 'approval=', ctx.get('approval') !== undefined ? 'available' : 'UNDEFINED')
   const agents = ctx.get('agents')
@@ -55,6 +58,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   const defaultModel = ctx.get('agentDefaultModel')
   const agentPresets = ctx.get('agentPresets')
   const sessionController = ctx.get('sessionController')
+  const sandboxPolicy = ctx.get('sandboxPolicy') as { resolve?: (r: { session?: any }) => { mode: string; workspaceRoot?: string } } | undefined
   const userQuestions = ctx.get('userQuestions')
   const approval = ctx.get('approval')
   const workspaceRegistry = ctx.get('workspaceRegistry')
@@ -314,7 +318,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
           ctx.logger('dsh-feishu').info(`dsh-feishu: /stream toggle: ${current} → ${next}`)
           void settings.mutate(namespace, [{ op: 'set', path: ['showIntermediateMessages'], value: next }], currentRevision())
           return { enabled: next as boolean }
-        }, sessionController, agents, llm, defaultModel, cardChannel,
+        }, sessionController, agents, sandboxPolicy, llm, defaultModel, cardChannel,
         modelSelectHandle !== undefined ? { cardByMessage: modelSelectHandle.cardByMessage, sequenceByCard: modelSelectHandle.sequenceByCard } : undefined,
         onboardingHandle, workspaceRegistry, agentPresets),
         attachments,
@@ -704,7 +708,7 @@ function renderStatusCard(meta: {
   sessionId: string; workspace: string; agentPreset: string; model: string; reasoningEffort: string; title: string
   turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number
   contextWindow: number; lastInputTokens: number
-}, agentRunning: boolean): object {
+}, agentRunning: boolean, sandboxMode?: string): object {
   const fields: string[] = []
   fields.push(`**Session:** \`${meta.sessionId}\``)
   if (meta.title !== '') fields.push(`**Title:** ${meta.title}`)
@@ -712,6 +716,12 @@ function renderStatusCard(meta: {
   fields.push(`**Preset:** \`${meta.agentPreset || '(default)'}\``)
   fields.push(`**Model:** \`${meta.model}\``)
   if (meta.reasoningEffort !== '') fields.push(`**Reasoning:** \`${meta.reasoningEffort}\``)
+  if (sandboxMode !== undefined) {
+    const label = sandboxMode === 'workspace-write' ? 'workspace-write ✍️'
+      : sandboxMode === 'danger-full-access' ? 'danger-full-access 🔓'
+        : sandboxMode === 'read-only' ? 'read-only 📖' : sandboxMode
+    fields.push(`**Sandbox:** \`${sandboxMode}\` (${label})`)
+  }
   fields.push(`**Agent:** ${agentRunning ? '🔄 Running' : '⏸️ Idle'}`)
   if (meta.turns > 0 || meta.steps > 0) {
     const parts: string[] = [`${meta.turns} turns`, `${meta.steps} steps`]
@@ -877,7 +887,8 @@ async function executeSlashCommand(
   bridgeHolder: { lastChatMessage: { chatId: string; chatType: 'p2p' | 'group'; threadId?: string } | undefined },
   toggleStream?: () => { enabled: boolean },
   sessionController?: { selectModel?: (r: any) => Promise<any>; cancel?: (r: any) => Promise<any> },
-  agents?: { get: (id: any) => { cancel: (cause: { kind: 'user' }, opts: { keepInbox?: boolean }) => void } | undefined },
+  agents?: { get: (id: any) => { cancel: (cause: { kind: 'user' }, opts: { keepInbox?: boolean }) => void; session?: any } | undefined },
+  sandboxPolicy?: { resolve?: (r: { session?: any }) => { mode: string; workspaceRoot?: string } },
   llm?: LlmRuntime,
   agentDefaultModel?: AgentDefaultModelConfig,
   cardChannel?: ModelSelectChannel,
@@ -910,7 +921,10 @@ async function executeSlashCommand(
   if (parsed.name === 'status') {
     const meta = await bridge.getSessionMeta(chatMessage)
     const agentRunning = bridge.isAgentRunning(chatMessage)
-    return { kind: 'success', text: '', card: renderStatusCard(meta, agentRunning) }
+    const sessionId = meta.sessionId
+    const session = agents?.get(sessionId)?.session as any
+    const sandboxMode = sandboxPolicy?.resolve?.({ session })?.mode
+    return { kind: 'success', text: '', card: renderStatusCard(meta, agentRunning, sandboxMode) }
   }
   if (parsed.name === 'new') {
     const args = parsed.rawInput.trim().split(/\s+/).filter(s => s !== '')
@@ -1040,6 +1054,43 @@ async function executeSlashCommand(
     } catch (error: unknown) {
       return { kind: 'error', text: `⚠️ /steer 失败：${error instanceof Error ? error.message : String(error)}` }
     }
+  }
+  // /sandbox [mode] shows the current file-sandbox mode or switches it. The
+  // switch mirrors DSH's `dsh-sandbox-policy` per-session override: one
+  // log-only `sandbox/mode` event (the `setSandboxMode` write path) that takes
+  // effect on the session's next confined call. Reading uses the policy
+  // service's resolve (explicit grant > session override > deployment default).
+  if (parsed.name === 'sandbox') {
+    if (sandboxPolicy?.resolve === undefined) {
+      return { kind: 'error', text: '⚠️ dsh-sandbox-policy 服务不可用，无法管理沙箱模式。' }
+    }
+    const sessionId = bridge.resolveSessionIdFor(chatMessage)
+    const session = agents?.get(sessionId)?.session as any
+    if (session === undefined) {
+      return { kind: 'error', text: '⚠️ 当前 chat 还没有会话，请先发一条消息再执行 /sandbox。' }
+    }
+    const raw = parsed.rawInput.trim()
+    const current = sandboxPolicy.resolve({ session }).mode
+    if (raw === '') {
+      const lines = [
+        '**当前沙箱模式：**',
+        `- \`${current}\`${current === 'workspace-write' ? ' ✍️' : current === 'danger-full-access' ? ' 🔓' : current === 'read-only' ? ' 📖' : ''}`,
+        '',
+        '**切换方法：** `/sandbox <模式>`',
+        '',
+        '**可选模式：**',
+        ...SANDBOX_MODES.map(m => `- \`${m}\`${m === current ? ' （当前）' : ''}`),
+        '',
+        '_切换写入会话日志，下一次受限调用（bash / 文件系统）即生效。_',
+      ]
+      return { kind: 'success', text: lines.join('\n') }
+    }
+    if (!(SANDBOX_MODES as readonly string[]).includes(raw)) {
+      return { kind: 'error', text: `⚠️ 未知沙箱模式 \`${raw}\`。可选：${SANDBOX_MODES.join(' | ')}` }
+    }
+    // setSandboxMode(session, raw) — appends the log-only switch event.
+    session.append('sandbox/mode', { mode: raw })
+    return { kind: 'success', text: `✅ 沙箱模式已切换为 \`${raw}\`。将从下一次受限调用起生效。` }
   }
   // /model with no arguments renders the model selector card (V2 card
   // instance) instead of falling through to commands.execute. The card's
