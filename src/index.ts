@@ -1025,6 +1025,22 @@ async function executeSlashCommand(
     agent.cancel({ kind: 'user' }, { keepInbox: false })
     return { kind: 'success', text: '⏹️ Agent 已停止，排队中的消息已丢弃。当前 turn 的工具执行将尽快终止。' }
   }
+  // /steer <text> injects a message into the RUNNING agent turn (DSH next-step
+  // inbox) instead of queueing it as a new turn — the Feishu equivalent of the
+  // WebUI's steer gesture while busy. Returns consumed so the steered content
+  // renders through the per-step cards and no duplicate reply card is sent.
+  if (parsed.name === 'steer') {
+    const text = parsed.rawInput.trim()
+    if (text === '') {
+      return { kind: 'error', text: '⚠️ 用法：/steer <内容> —— 在 agent 运行中把一条消息注入当前 turn。' }
+    }
+    try {
+      await bridge.steer({ ...chatMessage, content: text })
+      return { kind: 'consumed' }
+    } catch (error: unknown) {
+      return { kind: 'error', text: `⚠️ /steer 失败：${error instanceof Error ? error.message : String(error)}` }
+    }
+  }
   // /model with no arguments renders the model selector card (V2 card
   // instance) instead of falling through to commands.execute. The card's
   // dropdowns drive the feishu-model-select flow; `/model provider/model`

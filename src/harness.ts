@@ -12,6 +12,7 @@ interface AgentLike {
   session: { id: unknown; seq: number; events: readonly { seq: number; type: string; data: any }[] }
   whenIdle(): Promise<void>
   followup(message: ReturnType<typeof createUserMessage>): void
+  steer(message: ReturnType<typeof createUserMessage>): void
   status: 'idle' | 'running'
 }
 
@@ -204,6 +205,40 @@ export class HarnessConversationService {
     const result = summarizeTurn(agent.session.events, firstSeq)
     if (!result.ok) throw new Error('Harness turn did not produce a successful assistant response')
     return result.text
+  }
+
+  /**
+   * Steer one message into a RUNNING agent turn (the DSH `next-step` inbox),
+   * instead of queueing it as a new turn. Unlike {@link reply} this does not
+   * wait for the agent to become idle — it injects into the live turn so the
+   * model reacts immediately (matching the WebUI's steer gesture while busy).
+   *
+   * The target agent must already exist and be running; otherwise no turn can
+   * receive the injection and the call throws a clear error.
+   */
+  async steer(message: InboundMessage): Promise<void> {
+    const agent = await this.resolveAgent(message)
+    if (agent === undefined) {
+      throw new Error('没有运行中的 turn 可注入（该聊天尚未开始会话，请先发一条消息）')
+    }
+    if ((agent as unknown as AgentLike).status !== 'running') {
+      throw new Error('当前没有运行中的 turn 可注入 —— 请直接发新消息（会排队为新轮），或用 /steer 在它运行时注入')
+    }
+    const text = message.content
+    if (text.trim() === '') {
+      throw new Error('steer 内容为空')
+    }
+    // Same `[Feishu] ` marker as reply() so the model and session log can tell
+    // the injection came from the Lark channel rather than the webui composer.
+    const content: Array<{ type: 'text'; text: string } | { type: 'image'; attachment: ImageAttachmentRef }> = []
+    content.push({ type: 'text', text: `[Feishu] ${text}` })
+    for (const attachment of (message.imageBlocks ?? [])) content.push({ type: 'image', attachment })
+    ;(agent as unknown as AgentLike).steer(createUserMessage({
+      content,
+      source: { kind: 'user' },
+    }))
+    // Do NOT `await whenIdle()`: steering injects into the running turn and
+    // returns immediately. The steered step renders through feishu-streaming.
   }
 
   /**

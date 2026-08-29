@@ -22,6 +22,7 @@ function fixture() {
         events.push({ seq: seq++, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: `answer:${echoed}` }] } } })
         events.push({ seq: seq++, type: 'turn/end', data: { reason: { kind: 'completed' } } })
       }),
+      steer: vi.fn(() => undefined),
       status: 'idle' as const,
     }
     agents.set(String(sessionId), agent)
@@ -87,6 +88,32 @@ describe('HarnessConversationService', () => {
     expect(liveHandle.dispose).not.toHaveBeenCalled()
   })
 
+  it('steers into a running turn instead of queueing a new one', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu' })
+    await service.reply({ chatId: 'oc_1', chatType: 'p2p', content: 'warmup' })
+    const agent = [...f.agents.values()][0] as any
+    agent.status = 'running'
+    agent.followup.mockClear()
+    agent.steer.mockClear()
+    await service.steer({ chatId: 'oc_1', chatType: 'p2p', content: 'inject me' })
+    expect(agent.followup).not.toHaveBeenCalled()
+    expect(agent.steer).toHaveBeenCalledTimes(1)
+    const msg = agent.steer.mock.calls[0]![0]
+    expect(msg.content).toEqual([{ type: 'text', text: '[Feishu] inject me' }])
+    expect(msg.source).toEqual({ kind: 'user' })
+  })
+
+  it('rejects steer when no agent exists or it is not running', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu' })
+    // No conversation started yet.
+    await expect(service.steer({ chatId: 'oc_2', chatType: 'p2p', content: 'x' })).rejects.toThrow(/尚未开始会话/)
+    // Agent exists but idle.
+    await service.reply({ chatId: 'oc_1', chatType: 'p2p', content: 'warmup' })
+    await expect(service.steer({ chatId: 'oc_1', chatType: 'p2p', content: 'x' })).rejects.toThrow(/没有运行中的 turn/)
+  })
+
   // NOTE: /model selection mutation now goes through the session controller's
   // `selectModel` host API; the plugin no longer maintains a per-chat `selections`
   // map or installs `installModelSelection` against the agent ctx. That logic
@@ -139,7 +166,7 @@ describe('HarnessConversationService', () => {
   })
 
   it('rejects a turn that commits no successful assistant answer', async () => {
-    const create = vi.fn(async ({ sessionId }: any) => ({ agent: { session: { id: sessionId, seq: 0, events: [{ seq: 0, type: 'turn/end', data: { reason: { kind: 'error' } } }] }, whenIdle: async () => undefined, followup() {}, status: 'idle' as const }, dispose: async () => undefined }))
+    const create = vi.fn(async ({ sessionId }: any) => ({ agent: { session: { id: sessionId, seq: 0, events: [{ seq: 0, type: 'turn/end', data: { reason: { kind: 'error' } } }] }, whenIdle: async () => undefined, followup() {}, steer() {}, status: 'idle' as const }, dispose: async () => undefined }))
     const service = new HarnessConversationService({ agents: { create, resume: vi.fn(), get: () => undefined }, sessions: { flush: async () => true }, sessionPersistence: { list: async () => [] }, selection: () => ({ provider: 'p', model: 'm' }), agentPresets: { resolve: async () => ({ id: 'default' }), mount: async () => undefined }, workspaceRegistry: { list: () => [], resolveByPath: async () => undefined, archivedSessionIds: [] } }, { domain: 'feishu', workspace: '/work' })
     await expect(service.reply({ chatId: 'a', chatType: 'p2p', content: 'one' })).rejects.toThrow(/successful assistant response/)
   })
