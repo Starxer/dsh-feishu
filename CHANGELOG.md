@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### `/session` 切换：一律弹确认 + 释放被离开的旧会话（`src/feishu-session.ts` / `src/harness.ts`）
+
+- **切换一律弹确认**（`feishu-session.ts` `handlePanel`）：原来只有「目标被别的 chat 占用」时才弹「接管/取消」确认卡，目标空闲时点「🔀 切换」直接切到新会话（`attachSession`）。改为**任何切换都先弹确认卡**——切换 = 离开当前会话、改绑到另一个，误触会静默丢掉当前进行中的对话。确认后才 `execOp → attachSession`。
+- **释放被离开的旧会话**（`harness.ts` `attachSession` + 新 `releaseSessionForChat`）：切换时 chat 原本绑定一个旧会话 S1，改绑到 S2 后 S1 未被释放，其 agent 仍可能把问题/步骤卡片路由回这个 chat（"原会话的卡片仍推到已切换的飞书"的幽灵）。新增 `releaseSessionForChat(S1, key, S2)`：切换前若该 chat 绑定了不同于目标的会话，则清理它——删除该 chat 的 live handle、落盘，使 S1 不再解析回当前 chat（`resolveChat(S1)`/`sessionOwnerKey(S1)` 均返回 undefined）。注意：不用 `detachSession`（那会把 owner 重置到全新空会话、与改绑冲突），只做「断旧会话→chat 关联」。
+- 测试：`harness.spec.ts` 新增「attachSession 改绑并释放旧会话（无幽灵）」；`feishu-session.spec.ts` 的「free 会话切换」改为「free 也先弹确认、确认后才 attach」。
+
 ### 中英双语 i18n：`locale` 设置 + `/lang` + 命令/卡片层双语（`src/i18n.ts` 等）
 
 - **语言源**：新增插件 `locale` 字段（`auto`/`zh`/`en`，默认 `auto`）。`auto` 时读 DSH host 侧 `settings.get('locale').preference` 的浏览器语言偏好（由 `@deepseek-ai/dsh-client-locale` 注册的 `'locale'` namespace），无值回退 `zh`。`/lang [zh|en|auto]` 切换并持久化（`auto` unset 字段回到跟随 DSH），`/lang` 无参显示当前与来源。

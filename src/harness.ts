@@ -512,11 +512,39 @@ export class HarnessConversationService {
       // Force takeover: release the previous owner first.
       this.detachSession(sessionId)
     }
+    // Leaving the chat's previous session: if this chat was explicitly bound
+    // to a different session, release it so it no longer resolves to this chat
+    // (otherwise a lingering "old session" could still push question/step
+    // cards here after the switch).
+    const previous = this.chatToSession.get(key)
+    if (previous !== undefined && previous !== sessionId) {
+      this.releaseSessionForChat(previous, key, sessionId)
+    }
     this.chatToSession.set(key, sessionId)
     this.seenChatKeys.add(key)
     this.saveSessionMap()
     this.handles.delete(key)
     return 'ok'
+  }
+
+  /**
+   * Release a session that a chat is leaving (its previous binding) when that
+   * session is owned by nobody else. The chat is about to be rebound to
+   * `nextSessionId`, so we only need to sever the old session→chat association
+   * and drop any live handle so the old session never routes cards back to
+   * this chat. Does NOT reset the chat (unlike {@link detachSession}, which
+   * reassigns the owner) — that would clobber the pending rebind.
+   */
+  private releaseSessionForChat(sessionId: string, chatKey: string, nextSessionId: string): void {
+    if (this.deps.workspaceRegistry.archivedSessionIds.includes(sessionId)) {
+      // An archived session is already out of rotation; nothing to sever.
+      return
+    }
+    // Remove any handle keyed by this chat that still points at the old
+    // session's live agent, so a fresh one is built for the new session.
+    this.handles.delete(chatKey)
+    this.saveSessionMap()
+    console.log(`dsh-feishu: released previous session ${sessionId} for ${chatKey} → next ${nextSessionId}`)
   }
 
   /**

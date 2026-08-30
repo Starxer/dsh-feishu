@@ -352,13 +352,11 @@ export function startFeishuSession(deps: FeishuSessionDeps): FeishuSessionHandle
       return
     }
     if (op === 'switch') {
-      // Free → attach directly. Occupied by another chat → confirm takeover.
-      const key = conversationKey(state.chat)
-      if (entry !== undefined && entry.ownedBy !== undefined && entry.ownedBy !== key) {
-        await openConfirm(state.chat, { op: 'switch', sessionId, sessionLabel: label })
-        return
-      }
-      await execOp(state.chat, { op: 'switch', sessionId, sessionLabel: label })
+      // Always confirm before switching — the chat is leaving its current
+      // session and rebinding to another, so a stray tap could otherwise
+      // silently drop the active conversation. The target may be free or
+      // occupied; confirm covers both (see handleConfirm → execOp).
+      await openConfirm(state.chat, { op: 'switch', sessionId, sessionLabel: label })
       return
     }
     await openConfirm(state.chat, { op, sessionId, sessionLabel: label })

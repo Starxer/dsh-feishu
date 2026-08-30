@@ -553,6 +553,22 @@ describe('HarnessConversationService', () => {
     expect(service.resolveSessionIdFor(topicA)).not.toBe(topicAId)
   })
 
+  it('attachSession rebinds a chat and releases its previous session (no ghost push)', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu' })
+    const A = { chatId: 'a', chatType: 'p2p' as const, threadId: 't1' }
+    // A explicitly owns S1 via /new, then switches to S2.
+    const S1 = service.startNewSession(A, 'orig')
+    expect(service.resolveSessionIdFor(A)).toBe(S1)
+    const S2 = service.startNewSession(A, 'switch-target')
+    expect(service.attachSession(A, S2)).toBe('ok')
+    // A now resolves to S2...
+    expect(service.resolveSessionIdFor(A)).toBe(S2)
+    // ...and the old S1 no longer resolves to A (no ghost cards to A after the switch).
+    expect(service.resolveChat(S1)).toBeUndefined()
+    expect(service.sessionOwnerKey(S1)).toBeUndefined()
+  })
+
   it('startNewSession stores creation options and createAgent honors them', async () => {
     const f = fixture()
     const service = new HarnessConversationService(dependencies(f), { domain: 'feishu', workspace: '/work' })

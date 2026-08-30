@@ -83,7 +83,7 @@ describe('renderSessionConfirmCard', () => {
 })
 
 describe('startFeishuSession', () => {
-  it('open sends the panel and a free switch attaches directly', async () => {
+  it('open sends the panel and a free switch still asks for confirm first', async () => {
     const harness: any = { sentCards: [], cardActionHandler: undefined }
     const attachSession = vi.fn(() => 'ok' as const)
     const bridge = {
@@ -102,14 +102,25 @@ describe('startFeishuSession', () => {
     try {
       await handle.open({ chatId: 'oc_x', chatType: 'p2p' })
       expect(harness.sentCards).toHaveLength(1)
-      // Simulate: pick session s2 (free) and click 切换.
+      // Simulate: pick session s2 (free) and click 切换 → must confirm first.
       await harness.cardActionHandler!({
         messageId: 'om_card',
         action: { value: { action: 'switch' } },
         raw: { action: { form_value: { session: 's2' } } },
       })
+      // No direct attach yet: a confirm card is sent instead.
+      expect(attachSession).not.toHaveBeenCalled()
+      // Card actions resolve fire-and-forget; let the confirm card land.
+      await new Promise((resolve) => setImmediate(resolve))
+      const confirmCard = harness.sentCards[1].card
+      expect(confirmCard.header.title.content).toContain('切换')
+      // Confirm the takeover → attach happens (the channel mock returns 'om_card' for every card).
+      await harness.cardActionHandler!({
+        messageId: 'om_card',
+        action: { value: { action: 'confirm-ok' } },
+      })
+      await new Promise((resolve) => setImmediate(resolve))
       expect(attachSession).toHaveBeenCalledWith({ chatId: 'oc_x', chatType: 'p2p' }, 's2')
-      // A result (switched) card is sent.
       const last = harness.sentCards[harness.sentCards.length - 1]
       expect(last.card.header.title.content).toBe('✅ 已切换')
     } finally {
