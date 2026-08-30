@@ -7,6 +7,7 @@ import type { LarkChannel, LarkChannelOptions, NormalizedMessage, ResourceDescri
 import type { AttachmentStore, ImageAttachmentRef, SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
 import type { RuntimeConfig } from './config.ts'
 import type { HarnessConversationService, InboundMessage } from './harness.ts'
+import type { BusyMode } from './harness.ts'
 import { TurnDroppedError } from './harness.ts'
 import type { TurnStats } from './feishu-streaming.ts'
 import { errorText } from './error-text.ts'
@@ -180,6 +181,8 @@ export interface ReplyCardMeta {
   reasoningEffort?: string
   contextWindow?: number
   lastInputTokens?: number
+  /** Per-chat Enter-behavior-while-busy mode (Queue / Steer), shown in the Turn Complete footer. */
+  busyMode?: BusyMode
 }
 
 /** Chat coordinates passed to the footer callback for session lookup. */
@@ -539,7 +542,7 @@ function renderReplyCard(text: string, meta?: ReplyCardMeta, reasoning?: string)
  * Render a Turn Complete card with turn stats and optional session metadata.
  * Returns undefined when there's nothing to show.
  */
-function renderFooterCard(
+export function renderFooterCard(
   meta?: ReplyCardMeta,
   turnStats?: TurnStats,
 ): object | undefined {
@@ -607,6 +610,11 @@ function renderFooterCard(
   if (meta?.contextWindow !== undefined && meta.contextWindow > 0 && meta?.lastInputTokens !== undefined) {
     const pct = Math.min(100, Math.round(meta.lastInputTokens / meta.contextWindow * 100))
     metaParts.push(`📊 ${formatTokenCount(meta.lastInputTokens)}/${formatTokenCount(meta.contextWindow)} (${pct}%)`)
+  }
+  if (meta?.busyMode !== undefined) {
+    const label = meta.busyMode === 'steer' ? 'Steer' : 'Queue'
+    const icon = meta.busyMode === 'steer' ? '🎯' : '📥'
+    metaParts.push(`**Enter while busy:** \`${meta.busyMode}\` ${label} ${icon}`)
   }
 
   // If nothing to show, return undefined.

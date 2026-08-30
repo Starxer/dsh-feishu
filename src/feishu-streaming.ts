@@ -580,6 +580,14 @@ function summarizeValue(value: unknown, maxLen: number = 200): string {
   return str.slice(0, maxLen) + '…'
 }
 
+/** Sanitize raw content for embedding in a fenced code block: collapse any
+ *  run of backticks (which would close the fence) and strip control chars. */
+function sanitizeCodeblock(text: string): string {
+  return text
+    .replace(/`+/g, '`')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ')
+}
+
 /** Format a token count for display (e.g. 1234 → "1.2K"). */
 function formatTokenCount(n: number): string {
   if (n < 1_000) return String(n)
@@ -587,10 +595,124 @@ function formatTokenCount(n: number): string {
   return `${Math.round(n / 100_000) / 10}M`
 }
 
+// ─── Tool-call summary (recovered) ─────────────────────────────────────────
+// The old per-step cards got the tool summary from `presentCall` views carried
+// on the apiproxy mux frame (`<frame>.view.for === 'call'`). DSH 0.1.2-alpha.1
+// no longer emits `presentCall` anywhere, so that source is gone. The current
+// Web UI recovers the same "what the model wants to do" line by deriving it
+// from the call `arguments` (packages/client/ui-tool/.../tool-call-model.ts:
+// `classifyTool` + `deriveSummary`). We replicate that derivation here so the
+// Feishu tool rows show the same short summary.
+//
+// Tool-row variants as the generic atomic renderer classifies them.
+type ToolSummaryVariant = 'search' | 'read' | 'bash' | 'write' | 'edit' | 'code' | 'todo' | 'others'
+
+/** Known tool name → variant (mirrors Web UI `TOOL_VARIANTS`). */
+const TOOL_SUMMARY_VARIANTS: Record<string, ToolSummaryVariant> = {
+  bash: 'bash',
+  pwsh: 'bash',
+  read: 'read',
+  web_fetch: 'read',
+  web_search: 'search',
+  grep: 'search',
+  glob: 'search',
+  write: 'write',
+  edit: 'edit',
+  run_code: 'code',
+  todo_write: 'todo',
+  cordis_package_inspect: 'read',
+  cordis_runtime_inspect: 'read',
+  cordis_run: 'others',
+  cordis_stop: 'others',
+  cordis_undefine: 'others',
+}
+
+/** Tools with an owned title: the `others`-prefix rule does not apply to them. */
+const TOOL_SUMMARY_TITLED: ReadonlySet<string> = new Set([
+  'cordis_package_inspect', 'cordis_runtime_inspect', 'cordis_run', 'cordis_stop',
+  'cordis_undefine', 'pwsh',
+])
+
+/** Summary key preference per variant (mirrors Web UI `SUMMARY_KEYS`). */
+const TOOL_SUMMARY_KEYS: Record<ToolSummaryVariant, readonly string[]> = {
+  bash: ['description', 'command'],
+  read: ['path', 'file_path', 'url'],
+  search: ['query', 'pattern', 'url'],
+  write: ['path', 'file_path'],
+  edit: ['path', 'file_path'],
+  code: ['description'],
+  todo: [],
+  others: [],
+}
+
+/** Classify a tool name into its summary variant (defaults to `others`). */
+function classifyToolSummary(toolName: string): ToolSummaryVariant {
+  return TOOL_SUMMARY_VARIANTS[toolName] ?? 'others'
+}
+
+/** Parse a tool-call `arguments` JSON string; `undefined` when it is not JSON. */
+function parseToolArgs(argsRaw: string): unknown {
+  try { return JSON.parse(argsRaw) } catch { return undefined }
+}
+
+function firstLine(text: string): string {
+  const nl = text.indexOf('\n')
+  return nl === -1 ? text : text.slice(0, nl)
+}
+
+/** Pick the first non-empty string among `keys` from an args object. */
+function pickToolArg(args: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = args[key]
+    if (typeof value === 'string' && value !== '') return value
+  }
+  return undefined
+}
+
+/** Derive the short one-line summary from a variant and the raw args JSON. */
+function deriveToolSummaryValue(variant: ToolSummaryVariant, argsRaw: string): string {
+  const parsed = parseToolArgs(argsRaw)
+  if (typeof parsed !== 'object' || parsed === null) return firstLine(argsRaw)
+  const args = parsed as Record<string, unknown>
+  if (variant === 'todo' && Array.isArray(args.todos)) {
+    const items = args.todos.filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+    const pending = items.filter((item) => item.status === 'pending').length
+    const inProgress = items.filter((item) => item.status === 'in_progress').length
+    const completed = items.filter((item) => item.status === 'completed').length
+    return `待办清单：${items.length} 项 · 进行中 ${inProgress} · 待办 ${pending} · 完成 ${completed}`
+  }
+  if (variant === 'search' && Array.isArray(args.queries)) {
+    const queries = args.queries
+      .filter((query): query is string => typeof query === 'string' && query !== '')
+      .map(firstLine)
+    if (queries.length > 0) return queries.join(', ')
+  }
+  const picked = pickToolArg(args, TOOL_SUMMARY_KEYS[variant])
+  if (picked !== undefined) return firstLine(picked)
+  for (const value of Object.values(args)) {
+    if (typeof value === 'string' && value !== '') return firstLine(value)
+  }
+  return firstLine(argsRaw)
+}
+
+/**
+ * Recover the "what the model wants to do" summary line for a tool call,
+ * mirroring the Web UI's `toolRowModel().summary`. Unknown tools render as
+ * `toolName · <first field>` unless the tool owns a title.
+ */
+export function deriveToolSummary(toolName: string, argsRaw: string): string {
+  const variant = classifyToolSummary(toolName)
+  const base = deriveToolSummaryValue(variant, argsRaw)
+  const titled = TOOL_SUMMARY_TITLED.has(toolName)
+  return variant === 'others' && toolName !== '' && !titled
+    ? `${toolName} · ${base}`
+    : base
+}
+
 /**
  * Render a unified per-step card with reasoning, text, and tool calls.
  */
-function renderStepCard(
+export function renderStepCard(
   reasoning: string | undefined,
   text: string | undefined,
   tools: StepToolCall[],
@@ -626,9 +748,13 @@ function renderStepCard(
     for (const tool of tools) {
       const toolLines: string[] = []
 
-      // Description BEFORE title (summary from callView.description or callView.title)
-      const description = tool.callView?.description ?? tool.callView?.title
-      if (description !== undefined) {
+      // Description BEFORE title. Prefer a presentCall view when one is ever
+      // attached (the DSH 0.1.2-alpha.1 seam does not emit it), else restore
+      // the summary by deriving it from the call arguments (Web UI behavior).
+      const description = tool.callView?.description
+        ?? tool.callView?.title
+        ?? deriveToolSummary(tool.toolName, typeof tool.arguments === 'string' ? tool.arguments : JSON.stringify(tool.arguments ?? ''))
+      if (description !== undefined && description !== '') {
         toolLines.push(`> ${description}`)
       }
 
@@ -640,11 +766,15 @@ function renderStepCard(
         toolLines.push(`⏳ \`${tool.toolName}\` — running…`)
       }
 
-      // Args: always show when available (inline code)
-      const argsSummary = summarizeValue(tool.arguments, 200)
-      if (argsSummary !== '') toolLines.push(`> args: \`${argsSummary}\``)
-
       elements.push({ tag: 'markdown', content: toolLines.join('\n') })
+
+      // Args in a dedicated fenced code block: it wraps/scrolls instead of
+      // overflowing, and tolerates backticks/newlines that would otherwise
+      // break the inline `...` formatting.
+      const argsCode = sanitizeCodeblock(summarizeValue(tool.arguments, 200))
+      if (argsCode !== '') {
+        elements.push({ tag: 'markdown', content: '```\n' + argsCode + '\n```' })
+      }
 
       // Result preview: dispatch on resultView.card type
       if (tool.result !== undefined) {
@@ -720,6 +850,16 @@ function renderStepCard(
 function renderResultPreview(tool: StepToolCall): object[] {
   const rv = tool.resultView
   const elements: object[] = []
+  // If a matched card view has no rendered content (e.g. a terminal view
+  // without an `output` field), fall back to the raw result content so the
+  // result is always visible instead of silently dropping it.
+  const finish = (els: object[]): object[] => {
+    if (els.length === 0 && tool.result !== undefined && tool.result.content !== '') {
+      const output = tool.result.content.length > 500 ? tool.result.content.slice(0, 500) + '…' : tool.result.content
+      els.push({ tag: 'markdown', content: `\`\`\`\n${output}\n\`\`\`` })
+    }
+    return els
+  }
 
   // Terminal card (bash, pwsh): code block with output + exit code
   if (rv?.card === 'terminal') {
@@ -727,7 +867,7 @@ function renderResultPreview(tool: StepToolCall): object[] {
       const output = rv.output.length > 500 ? rv.output.slice(0, 500) + '…' : rv.output
       elements.push({ tag: 'markdown', content: `\`\`\`\n${output}\n\`\`\`` })
     }
-    return elements
+    return finish(elements)
   }
 
   // Web search card: structured source list
@@ -749,14 +889,14 @@ function renderResultPreview(tool: StepToolCall): object[] {
     if (lines.length > 0) {
       elements.push({ tag: 'markdown', content: lines.join('\n') })
     }
-    return elements
+    return finish(elements)
   }
 
   // Web fetch card: URL + status
   if (rv?.card === 'web' && rv.kind === 'fetch') {
     const status = rv.statusCode >= 200 && rv.statusCode < 300 ? '✅' : '⚠️'
     elements.push({ tag: 'markdown', content: `${status} \`${rv.url}\` — HTTP ${rv.statusCode}${rv.truncated ? ' (truncated)' : ''}` })
-    return elements
+    return finish(elements)
   }
 
   // Search card (grep/glob): file matches or paths
@@ -783,7 +923,7 @@ function renderResultPreview(tool: StepToolCall): object[] {
         elements.push({ tag: 'markdown', content: lines.join('\n') })
       }
     }
-    return elements
+    return finish(elements)
   }
 
   // Read card: file content with line numbers
@@ -796,7 +936,7 @@ function renderResultPreview(tool: StepToolCall): object[] {
       const lang = rv.lang !== undefined ? rv.lang : ''
       elements.push({ tag: 'markdown', content: `\`\`\`${lang}\n${content}\n\`\`\`` })
     }
-    return elements
+    return finish(elements)
   }
 
   // Diff card: show diff hunks
@@ -814,7 +954,7 @@ function renderResultPreview(tool: StepToolCall): object[] {
         elements.push({ tag: 'markdown', content: `**${diff.path}**\n\`\`\`diff\n${lines.join('\n')}\n\`\`\`` })
       }
     }
-    return elements
+    return finish(elements)
   }
 
   // Generic card or fallback: use content blocks or raw result
@@ -827,7 +967,7 @@ function renderResultPreview(tool: StepToolCall): object[] {
       const output = text.length > 500 ? text.slice(0, 500) + '…' : text
       elements.push({ tag: 'markdown', content: `\`\`\`\n${output}\n\`\`\`` })
     }
-    return elements
+    return finish(elements)
   }
 
   // Last resort: use raw result content from the tool result

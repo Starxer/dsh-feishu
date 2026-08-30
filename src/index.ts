@@ -47,6 +47,7 @@ import { startFeishuSendFileTool } from './feishu-send-file.ts'
 import { startFeishuModelSelect, renderProviderSelectCard, sendModelCardV2, type ModelSelectChannel } from './feishu-model-select.ts'
 import { startFeishuPermission, SANDBOX_MODES, PERMISSION_LABELS, type FeishuPermissionHandle } from './feishu-permission.ts'
 import { startFeishuBusy, type FeishuBusyHandle } from './feishu-busy.ts'
+import { startFeishuSession, renderSessionListCard, renderSessionResultCard, type FeishuSessionHandle } from './feishu-session.ts'
 import { startFeishuOnboarding, type FeishuOnboardingHandle } from './feishu-onboarding.ts'
 import type { ChatCreationOptions } from './harness.ts'
 
@@ -129,6 +130,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   let onboardingHandle: FeishuOnboardingHandle | undefined = undefined
   let permissionHandle: FeishuPermissionHandle | undefined = undefined
   let busyHandle: FeishuBusyHandle | undefined = undefined
+  let sessionHandle: FeishuSessionHandle | undefined = undefined
   const channelHolder: { current: LarkChannel | undefined } = { current: undefined }
   // The approvals handle IS the ApprovalControl surface; the new
   // approval/request waterfall listener inside startFeishuApprovals owns the
@@ -323,7 +325,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         }, sessionController, agents, sandboxPolicy, permissionHandle, llm, defaultModel, cardChannel,
         busyHandle,
         modelSelectHandle !== undefined ? { cardByMessage: modelSelectHandle.cardByMessage, sequenceByCard: modelSelectHandle.sequenceByCard } : undefined,
-        onboardingHandle, workspaceRegistry, agentPresets, approvalControl, showReasoningControl),
+        onboardingHandle, workspaceRegistry, agentPresets, approvalControl, showReasoningControl, sessionHandle),
         attachments,
         async (coords) => {
           const meta = await bridge.getSessionMeta(coords as ConversationMessage)
@@ -334,6 +336,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
             reasoningEffort: meta.reasoningEffort,
             contextWindow: meta.contextWindow,
             lastInputTokens: meta.lastInputTokens,
+            busyMode: bridgeHolder.current?.busyMode(coords as ConversationMessage) ?? 'queue',
           }
         },
         undefined,  // consumeReasoning (unused; bridge handles intermediate tracking)
@@ -398,6 +401,16 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     channel: cardChannel,
     getMode: chat => bridgeHolder.current?.busyMode(chat) ?? 'queue',
     setMode: (chat, mode) => bridgeHolder.current?.setBusyMode(chat, mode),
+    logger: ctx.logger('dsh-feishu'),
+  })
+  // Interactive `/session` management panel (switch / detach / rename /
+  // archive / fork). Independent of the questions/approvals seams; only needs
+  // the live card channel + the bridge + optional DSH session/workspace APIs.
+  sessionHandle = startFeishuSession({
+    channel: cardChannel,
+    bridge: () => bridgeHolder.current,
+    sessionController,
+    workspaceRegistry,
     logger: ctx.logger('dsh-feishu'),
   })
   if (sessionController !== undefined && userQuestions !== undefined && approval !== undefined) {
@@ -529,7 +542,8 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     modelSelectHandle?.dispose()
     permissionHandle?.stop()
     busyHandle?.stop()
-  }, 'dsh-feishu: feishu questions + approvals + todos + streaming + send-file + model-select + permission + busy listeners')
+    sessionHandle?.stop()
+  }, 'dsh-feishu: feishu questions + approvals + todos + streaming + send-file + model-select + permission + busy + session listeners')
 
   let lastPrintedQrUrl: string | undefined
   const provisionManager = new ProvisionManager({
@@ -642,8 +656,8 @@ const larkCommandTranslations: CommandTranslations = {
   newUsage: 'Usage: /new <workspace> <agentPreset> [provider/model[:reasoning]] — or run `/new` with no arguments for the card flow.',
   newSessionReady: sessionId => `Started a new conversation. Next message uses session \`${sessionId}\`.`,
   threadDescription: 'List persisted sessions or switch the chat to one by index',
-  threadUsage: 'Usage: /thread [N]',
-  threadListHeader: 'Available sessions (reply with `/thread N` to switch):',
+  threadUsage: 'Usage: /session [N]',
+  threadListHeader: 'Available sessions (reply with `/session N` to switch):',
   threadListEmpty: 'No persisted sessions yet.',
   threadListEntry: (index, id, title, lastActive) => `${index}. ${title} — ${lastActive} (\`${id}\`)`,
   threadListEntryOwned: (index, id, title, lastActive, ownerLabel) => `${index}. ${title} — ${lastActive} — 🔒 ${ownerLabel} 正在使用 (\`${id}\`)`,
@@ -792,48 +806,6 @@ function renderStatusCard(meta: {
   }
 }
 
-/** Handle /thread directly without needing a live agent. */
-async function handleThreadDirect(
-  rawInput: string,
-  bridge: HarnessConversationService,
-  chatMessage: ConversationMessage,
-): Promise<{ kind: 'success' | 'error'; text: string }> {
-  const t = larkCommandTranslations
-  if (rawInput === '') {
-    const sessions = await bridge.listSessions()
-    if (sessions.length === 0) return { kind: 'success', text: t.threadListEmpty }
-    const lines = [t.threadListHeader]
-    sessions.forEach((entry, index) => {
-      const title = entry.title === '' ? t.threadIdle(entry.id) : entry.title.replace(/\s+/g, ' ').slice(0, 60)
-      const lastActive = formatRelativeTime(entry.updatedAt, t)
-      const ownerLabel = entry.ownedBy === undefined ? undefined : bridge.describeChatKey(entry.ownedBy)
-      lines.push(ownerLabel === undefined
-        ? t.threadListEntry(index + 1, entry.id, title, lastActive)
-        : t.threadListEntryOwned(index + 1, entry.id, title, lastActive, ownerLabel))
-    })
-    lines.push(t.threadUsage)
-    return { kind: 'success', text: lines.join('\n') }
-  }
-  const index = Number.parseInt(rawInput, 10)
-  if (!Number.isInteger(index) || index < 1) {
-    return { kind: 'error', text: `${t.threadInvalidIndex}\n${t.threadUsage}` }
-  }
-  const sessions = await bridge.listSessions()
-  const entry = sessions[index - 1]
-  if (entry === undefined) {
-    return { kind: 'error', text: `${t.threadInvalidIndex}\n${t.threadUsage}` }
-  }
-  const result = bridge.switchToSession(chatMessage, entry.id)
-  if (result === 'archived') {
-    return { kind: 'error', text: t.threadArchived }
-  }
-  if (result === 'occupied') {
-    const ownerLabel = entry.ownedBy === undefined ? '另一个对话框' : bridge.describeChatKey(entry.ownedBy)
-    return { kind: 'error', text: t.threadOccupied(ownerLabel) }
-  }
-  return { kind: 'success', text: t.threadSwitched(index, entry.id) }
-}
-
 /** Handle /detach directly: force-release a session so any dialog can switch to it. */
 async function handleDetachDirect(
   rawInput: string,
@@ -942,6 +914,7 @@ async function executeSlashCommand(
   agentPresets?: { list(): Promise<Array<{ id: string; title?: string }>> },
   approvals?: ApprovalControl,
   showReasoning?: { get: () => boolean; toggle: () => void },
+  sessionCard?: FeishuSessionHandle,
 ): Promise<
   | { kind: 'success' | 'error'; text: string; card?: object }
   | { kind: 'consumed' }
@@ -963,7 +936,7 @@ async function executeSlashCommand(
   if (message.threadId !== undefined) {
     onboardingHandle?.noteTopic(chatMessage)
   }
-  // /status, /new, /thread are handled directly — they don't need a live agent.
+  // /status, /new, /session are handled directly — they don't need a live agent.
   if (parsed.name === 'status') {
     const meta = await bridge.getSessionMeta(chatMessage)
     const agentRunning = bridge.isAgentRunning(chatMessage)
@@ -1043,8 +1016,35 @@ async function executeSlashCommand(
     })
     return { kind: 'consumed' }
   }
-  if (parsed.name === 'thread') {
-    return await handleThreadDirect(parsed.rawInput.trim(), bridge, chatMessage)
+  if (parsed.name === 'session') {
+    const input = parsed.rawInput.trim()
+    if (input === '') {
+      // Interactive management panel (switch / detach / rename / archive / fork).
+      if (sessionCard === undefined) {
+        return { kind: 'error', text: '⚠️ 会话管理卡片不可用。' }
+      }
+      await sessionCard.open(chatMessage)
+      return { kind: 'consumed' }
+    }
+    if (input === 'list') {
+      const sessions = await bridge.listSessions()
+      return { kind: 'success', text: '', card: renderSessionListCard(sessions) }
+    }
+    const index = Number.parseInt(input, 10)
+    if (!Number.isInteger(index) || index < 1) {
+      return { kind: 'error', text: `${larkCommandTranslations.threadInvalidIndex}\n${larkCommandTranslations.threadUsage}` }
+    }
+    const sessions = await bridge.listSessions()
+    const entry = sessions[index - 1]
+    if (entry === undefined) {
+      return { kind: 'error', text: `${larkCommandTranslations.threadInvalidIndex}\n${larkCommandTranslations.threadUsage}` }
+    }
+    // Quick switch with the same detach+attach semantics as the panel.
+    const outcome = bridge.attachSession(chatMessage, entry.id)
+    if (outcome === 'archived') {
+      return { kind: 'error', text: larkCommandTranslations.threadArchived }
+    }
+    return { kind: 'success', text: larkCommandTranslations.threadSwitched(index, entry.id) }
   }
   if (parsed.name === 'detach') {
     return await handleDetachDirect(parsed.rawInput.trim(), bridge)
@@ -1292,12 +1292,14 @@ async function executeSlashCommand(
   if (parsed.name === 'help') {
     // Prefer the full scoped command list when a session/agent exists (a
     // persisted cold session is resumed here); otherwise fall back to listing
-    // the commands this plugin contributes so /help always works.
+    // the commands this plugin contributes so /help always works. Rendered as
+    // a card so markdown (headers / code) renders — a plain text message does
+    // not.
     const scoped = await bridge.resolveAgentOrResume(chatMessage)
-    if (scoped !== undefined) {
-      return toEcho(await handleHelpCommand(freeInvocation(parsed.rawInput, scoped), commands, larkCommandTranslations))
-    }
-    return { kind: 'success', text: renderFeishuCommandsOnly(larkCommandTranslations) }
+    const helpText = scoped !== undefined
+      ? ((await handleHelpCommand(freeInvocation(parsed.rawInput, scoped), commands, larkCommandTranslations))?.text ?? '')
+      : renderFeishuCommandsOnly(larkCommandTranslations)
+    return { kind: 'success', text: '', card: renderSessionResultCard('🧭 帮助', [helpText]) }
   }
   // Stash the chat coordinates so the registered handler can find them
   // without holding per-invocation state on the agent. The bridge serializes

@@ -242,7 +242,7 @@ export function registerLarkCommands(
       ),
     })
     yield ctx.commands.register({
-      name: 'thread',
+      name: 'session',
       description: t.threadDescription,
       handler: invocation => handleThreadCommand(
         invocation,
@@ -303,7 +303,7 @@ export function registerLarkCommands(
         sessionController,
       ),
     })
-  }, 'dsh-feishu: /model /new /thread /detach /help /approve /deny /approvals /status /stream /reasoning commands')
+  }, 'dsh-feishu: /model /new /session /detach /help /approve /deny /approvals /status /stream /reasoning commands')
 }
 
 export async function handleModelCommand(
@@ -466,7 +466,7 @@ async function handleNewCommand(
 }
 
 /**
- * Handle `/thread`. With no argument, list every persisted session so the
+ * Handle `/session`. With no argument, list every persisted session so the
  * user can pick one by index; with a numeric argument, switch the chat to
  * that session. Listing never mutates state, so it is always safe to call.
  */
@@ -518,7 +518,7 @@ async function handleThreadCommand(
 }
 
 /**
- * Handle `/detach`. Force-releases one session (by `/thread` list index) so
+ * Handle `/detach`. Force-releases one session (by `/session` list index) so
  * any dialog can switch onto it; the previous owner is reset to a brand-new
  * session (same effect as `/new` in that dialog).
  */
@@ -550,7 +550,7 @@ async function handleDetachCommand(
  * part of DSH itself.
  */
 const FEISHU_OWNED_COMMANDS = new Set<string>([
-  'model', 'new', 'thread', 'detach', 'help', 'approve', 'deny', 'approvals',
+  'model', 'new', 'session', 'detach', 'help', 'approve', 'deny', 'approvals',
   'status', 'stream', 'reasoning', 'busy', 'steer', 'queue', 'permission', 'stop',
 ])
 export { FEISHU_OWNED_COMMANDS }
@@ -634,7 +634,7 @@ export function renderFeishuCommandsOnly(t: CommandTranslations): string {
     { name: 'reasoning', description: t.reasoningDescription, hint: '[off|low|high|max]' },
     { name: 'stream', description: t.streamDescription },
     { name: 'new', description: t.newDescription },
-    { name: 'thread', description: t.threadDescription, hint: '[N]' },
+    { name: 'session', description: t.threadDescription, hint: '[N]' },
     { name: 'detach', description: t.detachDescription, hint: '<N>' },
     { name: 'busy', description: '设置 agent 运行中收到消息时的 Enter 行为（Queue / Steer，持久化）', hint: '[queue|steer]' },
     { name: 'steer', description: '把一条消息注入当前运行中的 turn（运行中插话）', hint: '<内容>' },

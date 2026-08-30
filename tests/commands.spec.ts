@@ -18,7 +18,7 @@ const translations: CommandTranslations = {
   newUsage: 'Usage: /new <workspace> <preset> [model]',
   newSessionReady: sessionId => `ready ${sessionId}`,
   threadDescription: 'thread desc',
-  threadUsage: 'Usage: /thread [N]',
+  threadUsage: 'Usage: /session [N]',
   threadListHeader: 'sessions:',
   threadListEmpty: 'empty',
   threadListEntry: (index, id, title, lastActive) => `${index}. ${title} - ${lastActive} (${id})`,
@@ -205,10 +205,10 @@ function fakeCommands(descriptors: ReadonlyArray<{ name: string; description: st
 }
 
 describe('registerLarkCommands', () => {
-  it('registers the /model, /new, /thread, and /help commands on the registry', () => {
+  it('registers the /model, /new, /session, and /help commands on the registry', () => {
     const fake = fakeContext()
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning, fakeSessionController() as never)
-    expect(fake.registered.map(item => item.name)).toEqual(['model', 'new', 'thread', 'detach', 'help', 'approve', 'deny', 'approvals', 'status', 'stream', 'reasoning'])
+    expect(fake.registered.map(item => item.name)).toEqual(['model', 'new', 'session', 'detach', 'help', 'approve', 'deny', 'approvals', 'status', 'stream', 'reasoning'])
     fake.dispose()
   })
 })
@@ -334,7 +334,7 @@ describe('/new command', () => {
   })
 })
 
-describe('/thread command', () => {
+describe('/session command', () => {
   it('lists persisted sessions when invoked without an argument', async () => {
     vi.useFakeTimers()
     try {
@@ -347,13 +347,13 @@ describe('/thread command', () => {
       ])
       const { bridge, chatMessageFor } = fakeBridge({ listSessions })
       registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning, fakeSessionController() as never)
-      const handler = fake.registered.find(item => item.name === 'thread')!.handler
+      const handler = fake.registered.find(item => item.name === 'session')!.handler
       const result = await handler(fakeInvocation(''))
       expect(listSessions).toHaveBeenCalled()
       const text = (result as { text: string }).text
       expect(text).toContain('1. First chat - 30m ago (session-A)')
       expect(text).toContain('2. Second chat - 3h ago (session-B)')
-      expect(text).toContain('Usage: /thread [N]')
+      expect(text).toContain('Usage: /session [N]')
     } finally {
       vi.useRealTimers()
     }
@@ -370,7 +370,7 @@ describe('/thread command', () => {
       ])
       const { bridge, chatMessageFor } = fakeBridge({ listSessions })
       registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning, fakeSessionController() as never)
-      const handler = fake.registered.find(item => item.name === 'thread')!.handler
+      const handler = fake.registered.find(item => item.name === 'session')!.handler
       const result = await handler(fakeInvocation(''))
       expect((result as { text: string }).text).toContain('1. (idle:session-A) - just now (session-A)')
     } finally {
@@ -392,7 +392,7 @@ describe('/thread command', () => {
       ])
       const { bridge, chatMessageFor } = fakeBridge({ listSessions })
       registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning, fakeSessionController() as never)
-      const handler = fake.registered.find(item => item.name === 'thread')!.handler
+      const handler = fake.registered.find(item => item.name === 'session')!.handler
       const result = await handler(fakeInvocation(''))
       const text = (result as { text: string }).text
       expect(text).toContain('m - 5m ago')
@@ -408,7 +408,7 @@ describe('/thread command', () => {
     const fake = fakeContext()
     const { bridge, chatMessageFor } = fakeBridge({ listSessions: vi.fn(async () => []) })
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning, fakeSessionController() as never)
-    const handler = fake.registered.find(item => item.name === 'thread')!.handler
+    const handler = fake.registered.find(item => item.name === 'session')!.handler
     const result = await handler(fakeInvocation(''))
     expect(result).toEqual({ kind: 'success', text: 'empty' })
   })
@@ -422,7 +422,7 @@ describe('/thread command', () => {
     const switchToSession = vi.fn(() => 'ok' as const)
     const { bridge, chatMessageFor } = fakeBridge({ listSessions: vi.fn(async () => sessions), switchToSession })
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning, fakeSessionController() as never)
-    const handler = fake.registered.find(item => item.name === 'thread')!.handler
+    const handler = fake.registered.find(item => item.name === 'session')!.handler
     const result = await handler(fakeInvocation('2'))
     expect(switchToSession).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_1' }), 'session-B')
     expect(result).toEqual({ kind: 'success', text: 'switched 2 session-B' })
@@ -436,7 +436,7 @@ describe('/thread command', () => {
       switchToSession,
     })
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning, fakeSessionController() as never)
-    const handler = fake.registered.find(item => item.name === 'thread')!.handler
+    const handler = fake.registered.find(item => item.name === 'session')!.handler
     const result = await handler(fakeInvocation('1'))
     expect(switchToSession).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_1' }), 'session-A')
     expect(result).toEqual({ kind: 'error', text: 'archived' })
@@ -450,13 +450,13 @@ describe('/thread command', () => {
       switchToSession,
     })
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning, fakeSessionController() as never)
-    const handler = fake.registered.find(item => item.name === 'thread')!.handler
+    const handler = fake.registered.find(item => item.name === 'session')!.handler
     const result = await handler(fakeInvocation('1'))
     expect(switchToSession).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_1' }), 'session-A')
     expect(result).toEqual({ kind: 'error', text: 'occupied by topic:oc_9:t_1' })
   })
 
-  it('marks owned sessions in the /thread listing', async () => {
+  it('marks owned sessions in the /session listing', async () => {
     const fake = fakeContext()
     const now = Date.now()
     const { bridge, chatMessageFor } = fakeBridge({
@@ -466,7 +466,7 @@ describe('/thread command', () => {
       ]),
     })
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning, fakeSessionController() as never)
-    const handler = fake.registered.find(item => item.name === 'thread')!.handler
+    const handler = fake.registered.find(item => item.name === 'session')!.handler
     const result = await handler(fakeInvocation(''))
     expect(result).toEqual({
       kind: 'success',
@@ -474,7 +474,7 @@ describe('/thread command', () => {
         'sessions:',
         '1. mine - just now (session-A)',
         '2. theirs - just now - LOCK topic:oc_9:t_1 (session-B)',
-        'Usage: /thread [N]',
+        'Usage: /session [N]',
       ].join('\n'),
     })
   })
@@ -487,7 +487,7 @@ describe('/thread command', () => {
       switchToSession,
     })
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning, fakeSessionController() as never)
-    const handler = fake.registered.find(item => item.name === 'thread')!.handler
+    const handler = fake.registered.find(item => item.name === 'session')!.handler
     const result = await handler(fakeInvocation('9'))
     expect(result).toMatchObject({ kind: 'error' })
     expect(switchToSession).not.toHaveBeenCalled()
@@ -501,7 +501,7 @@ describe('/thread command', () => {
       switchToSession,
     })
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), bridge, chatMessageFor, translations, fakeCommands(), stubApprovalControl, stubShowReasoning, fakeSessionController() as never)
-    const handler = fake.registered.find(item => item.name === 'thread')!.handler
+    const handler = fake.registered.find(item => item.name === 'session')!.handler
     const result = await handler(fakeInvocation('abc'))
     expect(result).toMatchObject({ kind: 'error' })
     expect(switchToSession).not.toHaveBeenCalled()

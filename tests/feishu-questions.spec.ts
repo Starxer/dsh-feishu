@@ -17,6 +17,7 @@ interface Harness {
   /** Resolved answers captured from listener return values. */
   answered: Array<{ sessionId: string; answer: AskUserQuestionAnswer }>
   sentCards: Array<{ to: string; card: { schema?: string; header?: { title?: { content?: string } }; body?: { elements?: unknown[] }; elements?: unknown[] } }>
+  updatedCards: Array<{ messageId?: string; card: { body?: { elements?: Array<{ tag?: string; content?: string }> } } }>
   cardActionHandler: ((evt: unknown) => void | Promise<void>) | undefined
   resolveChatCalls: string[]
 }
@@ -74,8 +75,11 @@ function buildChannel(harness: Harness): ChannelHandle {
       if (input.card !== undefined) {
         harness.sentCards.push({ to, card: input.card as Harness['sentCards'][0]['card'] })
       }
+      return { messageId: 'om_question_card' }
     }),
-    updateCard: vi.fn(async () => {}),
+    updateCard: vi.fn(async (messageId: string, card: any) => {
+      harness.updatedCards.push({ messageId, card })
+    }),
     onCardAction: (handler: (evt: unknown) => void | Promise<void>) => {
       harness.cardActionHandler = handler
       const unsub = () => { harness.cardActionHandler = undefined }
@@ -103,7 +107,7 @@ const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 
 describe('startFeishuQuestions', () => {
   it('renders an interactive card and resolves when the user clicks an option', async () => {
-    const harness: Harness = { answered: [], sentCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
+    const harness: Harness = { answered: [], sentCards: [], updatedCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
     const ctxHandle = buildCtx()
     const { channel, cleanup } = buildChannel(harness)
     const bridgeHolder = buildBridgeHolder(
@@ -134,7 +138,7 @@ describe('startFeishuQuestions', () => {
   })
 
   it('renders one card per question and accumulates answers sequentially', async () => {
-    const harness: Harness = { answered: [], sentCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
+    const harness: Harness = { answered: [], sentCards: [], updatedCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
     const ctxHandle = buildCtx()
     const { channel, cleanup } = buildChannel(harness)
     const bridgeHolder = buildBridgeHolder(
@@ -173,7 +177,7 @@ describe('startFeishuQuestions', () => {
   })
 
   it('resolves custom answer from form_value', async () => {
-    const harness: Harness = { answered: [], sentCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
+    const harness: Harness = { answered: [], sentCards: [], updatedCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
     const ctxHandle = buildCtx()
     const { channel, cleanup } = buildChannel(harness)
     const bridgeHolder = buildBridgeHolder(
@@ -207,7 +211,7 @@ describe('startFeishuQuestions', () => {
   })
 
   it('ignores custom submit with empty input', async () => {
-    const harness: Harness = { answered: [], sentCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
+    const harness: Harness = { answered: [], sentCards: [], updatedCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
     const ctxHandle = buildCtx()
     const { channel, cleanup } = buildChannel(harness)
     const bridgeHolder = buildBridgeHolder(
@@ -245,7 +249,7 @@ describe('startFeishuQuestions', () => {
   })
 
   it('ignores clicks that do not match any pending question', async () => {
-    const harness: Harness = { answered: [], sentCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
+    const harness: Harness = { answered: [], sentCards: [], updatedCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
     const ctxHandle = buildCtx()
     const { channel, cleanup } = buildChannel(harness)
     const bridgeHolder = buildBridgeHolder(
@@ -268,7 +272,7 @@ describe('startFeishuQuestions', () => {
   })
 
   it('skips rendering when the question targets a non-Feishu session', async () => {
-    const harness: Harness = { answered: [], sentCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
+    const harness: Harness = { answered: [], sentCards: [], updatedCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
     const ctxHandle = buildCtx()
     const { channel, cleanup } = buildChannel(harness)
     const bridgeHolder = buildBridgeHolder(
@@ -289,7 +293,7 @@ describe('startFeishuQuestions', () => {
   })
 
   it('clears the cardAction handler on dispose', async () => {
-    const harness: Harness = { answered: [], sentCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
+    const harness: Harness = { answered: [], sentCards: [], updatedCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
     const ctxHandle = buildCtx()
     const { channel, cleanup } = buildChannel(harness)
     const bridgeHolder = buildBridgeHolder(
@@ -302,6 +306,46 @@ describe('startFeishuQuestions', () => {
     stop()
     expect(harness.cardActionHandler).toBeUndefined()
     cleanup()
+  })
+
+  it('keeps the question detail in the settled card after a selection', async () => {
+    const detailQuestion: AskUserQuestionItem = {
+      id: 'd1',
+      question: 'Pick one',
+      header: 'Choice',
+      detail: 'Here is the supporting description.',
+      options: [{ label: 'Yes' }, { label: 'No' }],
+    }
+    const harness: Harness = { answered: [], sentCards: [], updatedCards: [], cardActionHandler: undefined, resolveChatCalls: [] }
+    const ctxHandle = buildCtx()
+    const { channel, cleanup } = buildChannel(harness)
+    const bridgeHolder = buildBridgeHolder(
+      () => ({ chatId: 'oc_chat', chatType: 'p2p' as const }),
+      harness,
+    )
+    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger })
+    try {
+      const answerPromise = ctxHandle.trigger('oc_session', [detailQuestion], { session: { id: 'oc_session' } })
+      await new Promise(resolve => setImmediate(resolve))
+      await harness.cardActionHandler!({
+        action: {
+          tag: 'button',
+          value: JSON.stringify({ pendingId: extractPendingId(harness.sentCards[0]!.card), questionId: 'd1', selected: ['Yes'] }),
+        },
+      })
+      await answerPromise
+      expect(harness.updatedCards).toHaveLength(1)
+      const body = harness.updatedCards[0]!.card.body
+      const md = (body?.elements ?? [])
+        .filter((el: any) => el.tag === 'markdown')
+        .map((el: any) => el.content)
+        .join('\n')
+      expect(md).toContain('Here is the supporting description.')
+      expect(md).toContain('✅ **Yes**')
+    } finally {
+      stop()
+      cleanup()
+    }
   })
 })
 

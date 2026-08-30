@@ -2,7 +2,44 @@
 
 ## Unreleased
 
+### 工具调用卡片：args 用代码块防溢出 + 结果兜底展示（`src/feishu-streaming.ts`）
+
+- **args 内联代码块破坏格式/溢出**：原来 `> args: \`${args}\`` 用内联代码，args 含换行/反引号或超长单行时会把卡片 markdown 破坏、内容横向溢出。改为在工具名下方用**独立的 fenced 代码块**渲染 args（` ``` `）——自动换行/滚动，且 `sanitizeCodeblock` 折叠连续反引号、剔除控制字符，避免破坏 fence。
+- **工具调用结果不展示**：`renderResultPreview` 里多个分支（terminal / web / search / read / diff / generic）匹配到 `resultView.card` 后**提前 `return`**；若该视图缺关键字段（如 terminal 视图无 `output`），会返回空元素且**不再回退到原始结果**。新增 `finish()` 兜底：任一匹配分支产出空、且有原始结果内容时，改为渲染原始结果的代码块，保证结果始终可见。
+- 测试：新增 `renderStepCard` 两项（terminal 视图无 output 时回退原始结果；args 含反引号时落在代码块内）。
+
 本仓库基于 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark) HEAD（`ee639df`）独立维护，**不再跟踪 upstream 同步**。所有改动仅修改本仓库文件，**未对 DSH 源码（`DSH 源码/packages/*`、`vendor/*`）做任何改动**。上游 LICENSE（MIT, Copyright (c) 2026 sugarforever）保留以满足 MIT modified-work 声明。
+
+### `/session` 综合会话管理面板 + `/session list` 表格 + `/help` 卡片（`src/feishu-session.ts` / `src/index.ts`）
+
+- **`/session`（无参）→ 交互式管理卡片**：下拉选择会话（按名称）+ 操作按钮【🔀 切换 / 🔓 detach / 🗄️ 归档 / 🍴 fork / ✏️ 改名】+ 「📋 列表」/「🔄 刷新」。复用 `select_static` + form 提交 + `form_value` 读选中会话 id（同 `feishu-model-select.ts` 模式），走共享 `cardChannel.onCardAction`（跨重连自动重绑）。
+  - **切换**（飞书插件能力，`bridge.attachSession` 强制接管）：会话被别的对话占用 → 先弹「接管 / 取消」确认卡；空闲 → 直接 attach。
+  - **detach**（飞书插件能力，`bridge.detachSession`）、**归档**（DSH `workspaceRegistry.archiveSession`）、**fork**（DSH `sessionController.fork`）——均先弹「确认 / 取消」卡。
+  - **改名走独立卡片**：点「✏️ 改名」弹出专门的改名卡（文本输入新标题 + 确认按钮），提交后执行 `sessionController.rename` 并回结果卡——不再在面板底部放输入框。
+  - 结果用绿色结果卡回报；`/detach` 命令撤销（并入面板）。
+- **`/session list` → 表格卡片**（会话名 / 短 id / 占用锁 / 最近活跃），原「列 session + 按下标切换」的文本列表被此卡片取代；面板内「📋 列表」按钮复用该表格卡。
+- **`/session N`**：保留，按下标快速切换，走同 detach+attach 语义（`bridge.attachSession`）。
+- **`/help` → 卡片**：原为文本消息（飞书文本不渲染 markdown），改为把分组帮助内容包进卡片 markdown。
+- 归属：切换与 detach 是飞书插件（chat→session 所有权），rename/fork/archive 委派 DSH 既有能力（`sessionController`/`workspaceRegistry`；缺失时给「本部署未启用」提示）。
+
+### `/thread` 命令改名为 `/session`（`src/commands.ts` / `src/index.ts` / `tests/*`）
+
+- **变更**：用户侧命令名 `thread` → `session`（列表会话 / 按 index 切换本 chat 到某个 session）。对应注册名、`executeSlashCommand` 直接分发、`FEISHU_OWNED_COMMANDS`、即帮助渲染的静态元数据一并改为 `session`；内部标识（`threadDescription`/`threadUsage`/`threadList*`/`handleThread*` 等）仍保留 `thread` 前缀以免大范围 churn。
+- **用户文案**：`Usage: /thread [N]` → `Usage: /session [N]`；列表头 `reply with \`/thread N\`` → `\`/session N\``。`/help`、即列表、`/detach`（引用列表 index）随之更新。
+- **无冲突**：DSH 原生命令只有 `goal`/`feedback`/`compact`，无 `session`/`thread`，改名安全。
+- 测试：`commands.spec` 的注册名断言、`item.name === 'session'`、`/session` 文案更新。
+
+### 问题选择卡片：结算后保留问题描述（`src/feishu-questions.ts`）
+
+- **症状**：`ask_user_question` 卡片选择选项（或自定义/跳过）后原地更新，更新后的结算卡片**只显示选项、丢了问题描述**。
+- **根因**：`renderSettledQuestionCard` 只重渲 header + `question` + 选项，遗漏了原问题卡片会展示的 `AskUserQuestionItem.detail`（随问题一并展示的支持性描述）。
+- **修复**：结算卡片在 `question` 之后补上 `detail`（非空才渲染），与 `renderQuestionCard` 对齐。新增回归测试断言结算卡片 markdown 同时含 detail 与 `✅ **<选项>**`。
+
+### Turn Complete 卡片展示 busy 模式（只读）+ 找回中间步骤卡片的工具调用摘要（`src/channel.ts` / `src/feishu-streaming.ts` / `src/index.ts`）
+
+- **Turn Complete footer 只读 busy**：绿色 Turn Complete 卡片底部 footer 区新增一行 `**Enter while busy:** \`queue\` Queue 📥`（或 `steer` … `🎯`），与 `/status` 一致。`ReplyCardMeta` 新增 `busyMode`，由 `index.ts` 的 `replyCardMeta` 生产者注入 `bridge.busyMode(coords)`。**只读、不放按钮**（按用户澄清）。
+- **找回工具调用摘要**：中间步骤卡片（per-step 卡）的工具名上方此前应有的一段「说明要做什么的简短文字」丢失了。经查旧 commit（`046e226`/`f89221b`），旧实现是订阅旧 apiproxy **mux 信封**读 `<frame>.view`（`for==='call'` → `presentCall` 的 `callView`；`for==='result'` → `resultView`）。迁移到 DSH `0.1.2-alpha.1` seam（`8e75f02`）后 mux 信封改为直接 `ctx.on('session/event')`——**`resultView` 半块幸存**（现走 `tool/result` 的 `event.data.meta`），**`callView` 半块丢失**：`presentCall` 在当下 DSH 只被定义、从未被发射（`agent-loop`/`session`/`api/*` 均无发射点），故无法直接复活 `frame.view` 钩子。
+- **对齐当下 Web UI**：Web UI 已不再依赖 `presentCall`，改为**从调用 `arguments` 推导摘要**（`packages/client/ui-tool/.../tool-call-model.ts` 的 `classifyTool`+`deriveSummary`）。本插件在 `feishu-streaming.ts` 本地复刻这一纯逻辑为 `deriveToolSummary(toolName, argsRaw)`：按工具名分类（bash/pwsh→bash、read/web_fetch→read、web_search/grep/glob→search、write/edit、run_code→code、cordis_* 等），再按 variant 提取 `description`/`command`/`query`/`path` 等、`search` 多 `queries[]` 取各 query 首行 join、未知工具取第一个字符串字段并回退 args 首行、`others` 且非专属标题时前缀 `工具名 · `。`renderStepCard` 的摘要槽位优先级改为 `callView.description ?? callView.title ?? deriveToolSummary(...)`（保留 `callView`/`resultView` 路径，若上游将来恢复 view 则自动生效）。
 
 ### 免会话命令修复：重启后不再要求「先发一条消息」＋真正免会话命令直接可用（`src/index.ts` / `src/commands.ts` / `src/harness.ts`）
 

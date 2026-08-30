@@ -339,6 +339,9 @@ function renderSettledQuestionCard(
     mdParts.push(`**${question.header}**`)
   }
   mdParts.push(question.question)
+  if (question.detail !== undefined && question.detail !== '') {
+    mdParts.push(question.detail)
+  }
   mdParts.push('')
   if (options.length > 0) {
     // Check if the answer is a custom text (prefixed with ✏️) or skip (prefixed with ⏭️).

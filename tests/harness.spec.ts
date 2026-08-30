@@ -334,7 +334,7 @@ describe('HarnessConversationService', () => {
     // Topic A runs /new, binding session-new to topic key thread:a:t1
     const topicA = { chatId: 'a', chatType: 'p2p' as const, threadId: 't1' }
     const newId = service.startNewSession(topicA, 's1')
-    // The main chat of the same group cannot /thread onto it
+    // The main chat of the same group cannot /session onto it
     const main = { chatId: 'a', chatType: 'p2p' as const }
     expect(service.sessionOwnerKey(newId)).toBe('thread:a:t1')
     expect(service.switchToSession(main, newId)).toBe('occupied')

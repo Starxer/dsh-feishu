@@ -60,7 +60,7 @@ export interface HarnessDependencies {
   workspaceRegistry: {
     list(): WorkspaceLike[]
     resolveByPath(path: string): Promise<WorkspaceLike | undefined>
-    /** Session ids hidden from listing surfaces (e.g. `/thread`); matches the
+    /** Session ids hidden from listing surfaces (e.g. `/session`); matches the
      *  workspace webui archive set so users see the same list in both places. */
     readonly archivedSessionIds: readonly string[]
   }
@@ -92,7 +92,7 @@ export interface ChatCreationOptions {
 export class HarnessConversationService {
   private readonly handles = new Map<string, Promise<AgentHandleLike>>()
   /**
-   * Per-chat session override. `/new` and `/thread` redirect the chat's next
+   * Per-chat session override. `/new` and `/session` redirect the chat's next
    * messages to a session that is not the deterministic hash of the chat
    * coordinates, so the user can start a fresh conversation or pick an old one
    * without spinning a new chat in Feishu.
@@ -111,7 +111,7 @@ export class HarnessConversationService {
    * `chatToSession` it derives session ownership: a session is owned by the
    * chat key that maps to it explicitly, or — when that key has no explicit
    * override — by the chat key whose deterministic hash equals the session id.
-   * `/thread` refuses to redirect a chat onto a session owned by another chat
+   * `/session` refuses to redirect a chat onto a session owned by another chat
    * so two dialog surfaces (main chat + topics) never share one session.
    */
   private readonly seenChatKeys = new Set<string>()
@@ -416,13 +416,13 @@ export class HarnessConversationService {
   }
 
   /**
-   * Resolve the session id for one chat, honoring any `/new` or `/thread`
+   * Resolve the session id for one chat, honoring any `/new` or `/session`
    * override before falling back to the deterministic hash. Centralizing the
    * lookup keeps `createAgent` / `setCurrentSelection` consistent.
    */
   /** Record a chat key and persist it on first sight, so default-derived
    *  session ownership survives restarts even when the chat never ran
-   *  `/new` or `/thread`. */
+   *  `/new` or `/session`. */
   private recordChatKey(key: string): void {
     if (this.seenChatKeys.has(key)) return
     this.seenChatKeys.add(key)
@@ -440,11 +440,11 @@ export class HarnessConversationService {
    * session is not owned by any chat this bridge knows about. Ownership has
    * two sources:
    *
-   * 1. An explicit `/new` or `/thread` override in `chatToSession`.
+   * 1. An explicit `/new` or `/session` override in `chatToSession`.
    * 2. A chat key with no override whose deterministic hash equals the
    *    session id — i.e. the session the chat lands on by default. This is
    *    the subtle case: a topic that never ran `/new` still owns its
-   *    default-derived session, so the main chat cannot `/thread` onto it and
+   *    default-derived session, so the main chat cannot `/session` onto it and
    *    silently share it.
    *
    * Explicit overrides win over default derivation, so a chat that ran
@@ -473,7 +473,7 @@ export class HarnessConversationService {
   }
 
   /**
-   * Force-release one session so any dialog can `/thread` onto it. The
+   * Force-release one session so any dialog can `/session` onto it. The
    * previous owner (if any) is reset to a brand-new session — the same
    * effect as running `/new` in that dialog — so it can never immediately
    * re-own the released session (including the default-derived case, where
@@ -522,7 +522,7 @@ export class HarnessConversationService {
   /**
    * Whether this chat needs the first-message onboarding card (attach an
    * existing session or create a new one) instead of auto-creating a session.
-   * A chat needs onboarding when it has no explicit `/new`/`/thread`/attach
+   * A chat needs onboarding when it has no explicit `/new`/`/session`/attach
    * override AND its default-derived session has no persisted history yet —
    * i.e. the dialog (or a fresh install) has never run a real conversation.
    */
@@ -541,7 +541,7 @@ export class HarnessConversationService {
 
   /**
    * Reverse-lookup: given a session id, return the chat coordinates that own
-   * it (honoring any active `/new` or `/thread` override). Used by the
+   * it (honoring any active `/new` or `/session` override). Used by the
    * Feishu questions listener, which receives session-keyed `question/requested`
    * frames from the apiproxy mux stream and needs to know which chat to render
    * the option card in. Returns `undefined` when the session is owned by no
@@ -611,7 +611,7 @@ export class HarnessConversationService {
    * Redirect the chat to an existing persisted session so the next regular
    * message resumes it. The session id must already exist in
    * `sessionPersistence` and must not be in the workspace archive set;
-   * archived sessions are hidden from `/thread` so switching to one would
+   * archived sessions are hidden from `/session` so switching to one would
    * silently strand the next message on a session the user can no longer see.
    *
    * Refuses to redirect onto a session owned by a DIFFERENT chat key so two
@@ -923,7 +923,7 @@ export class HarnessConversationService {
   private async createAgent(key: string): Promise<AgentHandleLike> {
     // The chat key is `chat:<chatId>` or `thread:<chatId>:<threadId>`; build a
     // minimal ConversationMessage so `resolveSessionId` can honor the chat→session
-    // override populated by `/new` or `/thread`.
+    // override populated by `/new` or `/session`.
     const creation = this.chatToCreation.get(key)
     const sessionId = this.resolveSessionId(this.messageFromKey(key))
     const liveAgent = this.deps.agents.get(sessionId as never)
