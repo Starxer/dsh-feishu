@@ -17,6 +17,7 @@
 
 import type { ConversationMessage } from './conversation.ts'
 import type { BusyMode } from './harness.ts'
+import { decodeCardValue } from './card-action.ts'
 
 /** Union of selectable busy behaviors (also the persisted values). */
 export const BUSY_MODES: readonly BusyMode[] = ['queue', 'steer']
@@ -92,16 +93,14 @@ export function startFeishuBusy(deps: FeishuBusyDeps): FeishuBusyHandle {
     if (messageId === undefined) return
     const chat = byCard.get(messageId)
     if (chat === undefined) return
-    let parsed: { p?: unknown; mode?: unknown }
-    try {
-      parsed = JSON.parse(String(evt.action?.value ?? ''))
-    } catch {
-      return
-    }
+    // `action.value` is double-encoded (see card-action.ts); unwrap it.
+    const parsed = decodeCardValue(evt.action?.value)
+    if (parsed === undefined) return
     if (parsed.p !== 'busy') return
-    if (parsed.mode !== 'queue' && parsed.mode !== 'steer') return
-    setMode(chat, parsed.mode)
-    await channel.updateCard(messageId, renderBusyCard(parsed.mode)).catch((error: unknown) => {
+    const mode = parsed.mode
+    if (mode !== 'queue' && mode !== 'steer') return
+    setMode(chat, mode)
+    await channel.updateCard(messageId, renderBusyCard(mode)).catch((error: unknown) => {
       logger.warn(`dsh-feishu: busy card update failed: ${error instanceof Error ? error.message : String(error)}`)
     })
   }

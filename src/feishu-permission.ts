@@ -17,6 +17,7 @@
  */
 
 import type { ConversationMessage } from './conversation.ts'
+import { decodeCardValue } from './card-action.ts'
 
 /** DSH file-sandbox / permission preset vocabulary (mirrors `dsh-sandbox-policy`). */
 export const SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const
@@ -106,12 +107,9 @@ export function startFeishuPermission(deps: FeishuPermissionDeps): FeishuPermiss
     if (messageId === undefined) return
     const rec = byCard.get(messageId)
     if (rec === undefined) return
-    let parsed: { p?: unknown; mode?: unknown }
-    try {
-      parsed = JSON.parse(String(evt.action?.value ?? ''))
-    } catch {
-      return
-    }
+    // `action.value` is double-encoded (see card-action.ts); unwrap it.
+    const parsed = decodeCardValue(evt.action?.value)
+    if (parsed === undefined) return
     if (parsed.p !== 'permission' || typeof parsed.mode !== 'string') return
     if (!(SANDBOX_MODES as readonly string[]).includes(parsed.mode)) return
     const session = sessionGetter(rec.sessionId)

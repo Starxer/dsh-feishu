@@ -4,6 +4,12 @@
 
 本仓库基于 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark) HEAD（`ee639df`）独立维护，**不再跟踪 upstream 同步**。所有改动仅修改本仓库文件，**未对 DSH 源码（`DSH 源码/packages/*`、`vendor/*`）做任何改动**。上游 LICENSE（MIT, Copyright (c) 2026 sugarforever）保留以满足 MIT modified-work 声明。
 
+### `action.value` 双编码修复：`/permission`、`/busy` 卡片点选无反应（`src/card-action.ts` / `src/feishu-permission.ts` / `src/feishu-busy.ts`）
+
+- **症状**：`/permission` 与 `/busy` 的交互式选择卡片，点击按钮**没有任何反应**（卡片不刷新、模式不切换）。
+- **根因**：飞书按钮 `action.value` 是**双重编码**的——真实 payload 先 `JSON.stringify`，再作为 JSON 字符串包一层（实测 `value` 形如 `"{\"p\":\"busy\",\"mode\":\"steer\"}"`）。busy/permission 只 `JSON.parse` 一次得到的是字符串，`parsed.p !== 'busy'` 恒成立 → 处理器直接返回。web 端的 model-select 处理器用**多层 parse 循环**已处理此情况，故它正常工作。
+- **修复**：新增 `src/card-action.ts` 的 `decodeCardValue(value)`——解包为对象（多层 `JSON.parse`，深度上限 4），在 `feishu-busy.ts` 与 `feishu-permission.ts` 的 `onCardAction` 中统一使用。`decodeCardValue` 导出以便单测（含双编码、更深嵌套、非 JSON 等用例）。
+
 ### `/busy` 交互式选择卡片 + `/queue` 命令（`src/feishu-busy.ts` / `src/index.ts` / `src/harness.ts`）
 
 - **`/busy` 卡片**：`/busy` 无参原本只回文本列出 Queue/Steer 选项。新增 `feishu-busy.ts`（仿 `feishu-permission.ts`），复用共享 `cardChannel.onCardAction` 多订阅者 + 跨重连自动重绑。无参改为发送 **交互式卡片**（header "Enter while busy"，turquoise）：body 展示当前模式（`✓` + `disabled`），下方两个按钮 `Queue · 当前轮结束后作为新轮运行（默认）` / `Steer · 注入当前运行轮立即响应`。点击按钮 → `bridge.setBusyMode(chat, mode)` 持久化 → `updateCard` 原地刷新重新标记。`/busy queue|steer` 文本快捷路径保留。`renderBusyCard` 导出以便单测。
