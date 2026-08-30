@@ -1110,12 +1110,15 @@ async function executeSlashCommand(
   // /queue <text> is the conjugate of /steer: it forces a message onto the
   // QUEUE path even when the chat is in steer mode, so it runs as a new turn
   // after the current one instead of being injected into the running turn.
-  // Immediate feedback (the queued message's own output streams through the
-  // per-step cards when it runs); a /stop during the wait drops it.
+  // When the chat is ALREADY in queue mode this is redundant (a plain message
+  // queues anyway), so short-circuit with a hint instead of submitting.
   if (parsed.name === 'queue') {
     const text = parsed.rawInput.trim()
     if (text === '') {
       return { kind: 'error', text: '⚠️ 用法：/queue <内容> —— 在 steer 模式下也强制把一条消息排队为新轮（/steer 的共轭）。' }
+    }
+    if (bridge.busyMode(chatMessage) === 'queue') {
+      return { kind: 'error', text: '⚠️ 本聊天已在 queue 模式：直接发送消息即会排队为新轮，无需 /queue。\n\n若想注入当前运行轮，用 `/steer <内容>` 或改用 `/busy steer`。' }
     }
     // Submit in the background so the command can acknowledge immediately; the
     // queue path waits for the current turn then runs it as a new turn. A
@@ -1132,7 +1135,9 @@ async function executeSlashCommand(
   }
   // /steer <text> injects a message into the RUNNING agent turn (DSH next-step
   // inbox) instead of queueing it as a new turn — the Feishu equivalent of the
-  // WebUI's steer gesture while busy. The bridge does not wait for idle, so we
+  // WebUI's steer gesture while busy. When the chat is ALREADY in steer mode
+  // this is redundant (a plain message injects anyway), so short-circuit with a
+  // hint instead of submitting. The bridge does not wait for idle, so we
   // acknowledge immediately with a confirmation text (the steered content
   // itself still renders through the per-step streaming cards as the turn
   // continues) — otherwise the injection would be silent with no feedback.
@@ -1140,6 +1145,9 @@ async function executeSlashCommand(
     const text = parsed.rawInput.trim()
     if (text === '') {
       return { kind: 'error', text: '⚠️ 用法：/steer <内容> —— 在 agent 运行中把一条消息注入当前 turn。' }
+    }
+    if (bridge.busyMode(chatMessage) === 'steer') {
+      return { kind: 'error', text: '⚠️ 本聊天已在 steer 模式：直接发送消息即会注入当前运行轮，无需 /steer。\n\n若想排队为新轮，用 `/queue <内容>` 或改用 `/busy queue`。' }
     }
     try {
       await bridge.steer({ ...chatMessage, content: text })
