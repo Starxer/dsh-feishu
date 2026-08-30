@@ -1025,27 +1025,41 @@ async function executeSlashCommand(
     ]
     return { kind: 'success', text: lines.join('\n') }
   }
-  // /stop cancels the running agent — mirrors the WebUI stop button. It reaches
-  // the live agent directly (rather than `sessionController.cancel`, which
-  // hardcodes `keepInbox: true`) so it can also drop the pending inbox.
+  // /stop cancels the running agent — mirrors the WebUI stop button. The
+  // bridge both bumps the per-chat stop generation (so a message queued behind
+  // the running turn is DROPPED instead of auto-restarting) and cancels the
+  // live agent with `keepInbox:false` (aborting the turn and clearing the inbox).
   if (parsed.name === 'stop') {
-    if (sessionController === undefined) {
-      return { kind: 'error', text: '⚠️ Cannot stop: sessionController is not available.' }
-    }
-    // Resolve the session id for this chat without creating an agent.
-    const sessionId = bridge.resolveSessionIdFor(chatMessage)
-    const agent = agents?.get(sessionId)
-    if (agent === undefined) {
+    if (!bridge.stopSession(chatMessage)) {
       return { kind: 'error', text: '⚠️ 该 session 当前没有运行中的 agent，无需停止。' }
     }
-    // Cancel with `keepInbox: false` so the pending inbox (a Feishu message
-    // queued while the previous turn was still running) is DROPPED as well —
-    // matching the WebUI stop button, which terminates all runs instead of
-    // letting a queued message immediately spawn a new loop. The session
-    // controller's own `cancel` hardcodes `keepInbox: true`, which is exactly
-    // the "abort turn but restart from the queue" behaviour we are replacing.
-    agent.cancel({ kind: 'user' }, { keepInbox: false })
     return { kind: 'success', text: '⏹️ Agent 已停止，排队中的消息已丢弃。当前 turn 的工具执行将尽快终止。' }
+  }
+  // /busy [queue|steer] sets the per-chat behavior for messages sent while the
+  // agent is running: queue (wait for the turn, then run as a new turn) or
+  // steer (inject into the running turn). Persisted across restarts; the
+  // one-off `/steer <text>` remains for a temporary injection.
+  if (parsed.name === 'busy') {
+    const raw = parsed.rawInput.trim()
+    if (raw === '') {
+      const current = bridge.busyMode(chatMessage)
+      const icon = current === 'steer' ? '🎯' : '📥'
+      return { kind: 'success', text: [
+        `**当前 busy 消息行为：** \`${current}\` ${icon}`,
+        '',
+        '- `queue`：agent 运行中发消息 → 排队，当前轮结束后开新轮（默认）',
+        '- `steer`：agent 运行中发消息 → 注入当前 turn 立即响应',
+        '',
+        '**切换：** `/busy queue` 或 `/busy steer`（持久化）',
+        '_一次性注入用 `/steer <内容>`_',
+      ].join('\n') }
+    }
+    if (raw !== 'queue' && raw !== 'steer') {
+      return { kind: 'error', text: '⚠️ 未知 busy 模式。可选：queue | steer' }
+    }
+    bridge.setBusyMode(chatMessage, raw)
+    const desc = raw === 'steer' ? '运行中注入当前 turn' : '排队，当前轮结束后开新轮'
+    return { kind: 'success', text: `✅ 已把本聊天的 busy 消息行为切为 \`${raw}\`（${desc}）。已持久化。` }
   }
   // /steer <text> injects a message into the RUNNING agent turn (DSH next-step
   // inbox) instead of queueing it as a new turn — the Feishu equivalent of the

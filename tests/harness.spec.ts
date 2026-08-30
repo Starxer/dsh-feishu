@@ -22,7 +22,13 @@ function fixture() {
         events.push({ seq: seq++, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: `answer:${echoed}` }] } } })
         events.push({ seq: seq++, type: 'turn/end', data: { reason: { kind: 'completed' } } })
       }),
-      steer: vi.fn(() => undefined),
+      steer: vi.fn((message: any) => {
+        events.push({ seq: seq++, type: 'turn/start', data: {} })
+        const echoed = String(message.content[0]?.text ?? '').replace(/^\[Feishu\] /, '')
+        events.push({ seq: seq++, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: `answer:${echoed}` }] } } })
+        events.push({ seq: seq++, type: 'turn/end', data: { reason: { kind: 'completed' } } })
+      }),
+      cancel: vi.fn(() => undefined),
       status: 'idle' as const,
     }
     agents.set(String(sessionId), agent)
@@ -114,6 +120,62 @@ describe('HarnessConversationService', () => {
     await expect(service.steer({ chatId: 'oc_1', chatType: 'p2p', content: 'x' })).rejects.toThrow(/没有运行中的 turn/)
   })
 
+  it('persists a per-chat busy mode and reads it back (default queue)', () => {
+    const f = fixture()
+    const statePath = join(tmpdir(), `dsh-feishu-busy-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu', statePath })
+    expect(service.busyMode({ chatId: 'oc_1', chatType: 'p2p' })).toBe('queue')
+    service.setBusyMode({ chatId: 'oc_1', chatType: 'p2p' }, 'steer')
+    expect(service.busyMode({ chatId: 'oc_1', chatType: 'p2p' })).toBe('steer')
+    expect(service.busyMode({ chatId: 'oc_2', chatType: 'p2p' })).toBe('queue')
+    // Reload from disk: the choice survives a restart.
+    const service2 = new HarnessConversationService(dependencies(f), { domain: 'feishu', statePath })
+    expect(service2.busyMode({ chatId: 'oc_1', chatType: 'p2p' })).toBe('steer')
+    expect(service2.busyMode({ chatId: 'oc_2', chatType: 'p2p' })).toBe('queue')
+  })
+
+  it('steer-mode reply injects into a running turn instead of queueing', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu' })
+    service.setBusyMode({ chatId: 'oc_1', chatType: 'p2p' }, 'steer')
+    await service.reply({ chatId: 'oc_1', chatType: 'p2p', content: 'warmup' })
+    const agent = [...f.agents.values()][0] as any
+    agent.followup.mockClear()
+    agent.steer.mockClear()
+    agent.status = 'running'
+    const out = await service.reply({ chatId: 'oc_1', chatType: 'p2p', content: 'inject' })
+    expect(agent.steer).toHaveBeenCalledTimes(1)
+    expect(agent.followup).not.toHaveBeenCalled()
+    expect(out).toBe('answer:inject')
+  })
+
+  it('queue-mode reply drops (TurnDroppedError) when the session is stopped while waiting', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu' })
+    await service.reply({ chatId: 'oc_1', chatType: 'p2p', content: 'warmup' })
+    const agent = [...f.agents.values()][0] as any
+    // Simulate a `/stop` racing in during the queued message's idle wait.
+    let stopped = false
+    agent.whenIdle = vi.fn(async () => {
+      if (!stopped) {
+        stopped = true
+        service.stopSession({ chatId: 'oc_1', chatType: 'p2p' })
+      }
+    })
+    await expect(service.reply({ chatId: 'oc_1', chatType: 'p2p', content: 'queued' }))
+      .rejects.toThrow(/session stopped while it was queued/)
+  })
+
+  it('stopSession cancels the live agent with keepInbox:false', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu' })
+    await service.reply({ chatId: 'oc_1', chatType: 'p2p', content: 'warmup' })
+    const agent = [...f.agents.values()][0] as any
+    agent.cancel.mockClear()
+    expect(service.stopSession({ chatId: 'oc_1', chatType: 'p2p' })).toBe(true)
+    expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: false })
+  })
+
   // NOTE: /model selection mutation now goes through the session controller's
   // `selectModel` host API; the plugin no longer maintains a per-chat `selections`
   // map or installs `installModelSelection` against the agent ctx. That logic
@@ -166,7 +228,7 @@ describe('HarnessConversationService', () => {
   })
 
   it('rejects a turn that commits no successful assistant answer', async () => {
-    const create = vi.fn(async ({ sessionId }: any) => ({ agent: { session: { id: sessionId, seq: 0, events: [{ seq: 0, type: 'turn/end', data: { reason: { kind: 'error' } } }] }, whenIdle: async () => undefined, followup() {}, steer() {}, status: 'idle' as const }, dispose: async () => undefined }))
+    const create = vi.fn(async ({ sessionId }: any) => ({ agent: { session: { id: sessionId, seq: 0, events: [{ seq: 0, type: 'turn/end', data: { reason: { kind: 'error' } } }] }, whenIdle: async () => undefined, followup() {}, steer() {}, cancel() {}, status: 'idle' as const }, dispose: async () => undefined }))
     const service = new HarnessConversationService({ agents: { create, resume: vi.fn(), get: () => undefined }, sessions: { flush: async () => true }, sessionPersistence: { list: async () => [] }, selection: () => ({ provider: 'p', model: 'm' }), agentPresets: { resolve: async () => ({ id: 'default' }), mount: async () => undefined }, workspaceRegistry: { list: () => [], resolveByPath: async () => undefined, archivedSessionIds: [] } }, { domain: 'feishu', workspace: '/work' })
     await expect(service.reply({ chatId: 'a', chatType: 'p2p', content: 'one' })).rejects.toThrow(/successful assistant response/)
   })

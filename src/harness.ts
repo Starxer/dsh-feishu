@@ -13,8 +13,22 @@ interface AgentLike {
   whenIdle(): Promise<void>
   followup(message: ReturnType<typeof createUserMessage>): void
   steer(message: ReturnType<typeof createUserMessage>): void
+  cancel(cause: { kind: 'user' }, opts?: { keepInbox?: boolean }): void
   status: 'idle' | 'running'
 }
+
+/** Thrown by the bridge when a queued message is dropped because the session
+ *  was stopped (`/stop`) while it waited for the current turn to end. The
+ *  channel treats it as a silent drop rather than a failure. */
+export class TurnDroppedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'TurnDroppedError'
+  }
+}
+
+/** Busy behavior for a message sent while the agent is running. */
+export type BusyMode = 'queue' | 'steer'
 
 interface AgentHandleLike { agent: AgentLike; dispose(): Promise<void> }
 
@@ -102,6 +116,17 @@ export class HarnessConversationService {
    */
   private readonly seenChatKeys = new Set<string>()
   /**
+   * Per-chat busy behavior: how a message sent while the agent is running is
+   * handled — `queue` (default; waits for the current turn then runs as a new
+   * turn) or `steer` (injects into the running turn). Persisted like
+   * `chatToSession` so the choice survives restarts.
+   */
+  private readonly chatToBusyMode = new Map<string, BusyMode>()
+  /** Per-chat stop generation. `/stop` bumps it; a queued `reply` that was
+   *  waiting for idle detects the bump and drops instead of submitting. This
+   *  is what makes `/stop` actually discard a message queued while running. */
+  private readonly generations = new Map<string, number>()
+  /**
    * Per-chat creation options (workspace / preset / model) captured by the
    * `/new` card flow or the `/new <workspace> <preset> [model]` text command.
    * `createAgent` reads them when it spins up the session agent so a session
@@ -129,7 +154,7 @@ export class HarnessConversationService {
       const raw = readFileSync(path, 'utf-8')
       const data = JSON.parse(raw) as
         | Record<string, string>                 // legacy: { chatKey: sessionId }
-        | { chatToSession?: Record<string, string>; seenChatKeys?: string[] }
+        | { chatToSession?: Record<string, string>; seenChatKeys?: string[]; busyMode?: Record<string, string> }
       // Legacy format (pre-ownership): a flat record keyed by chat key.
       const legacy = Array.isArray(data) ? undefined
         : (data as Record<string, string>).chatToSession === undefined && !Array.isArray((data as any).seenChatKeys)
@@ -140,9 +165,12 @@ export class HarnessConversationService {
         for (const k of Object.keys(legacy)) this.seenChatKeys.add(k)
         return
       }
-      const parsed = data as { chatToSession?: Record<string, string>; seenChatKeys?: string[] }
+      const parsed = data as { chatToSession?: Record<string, string>; seenChatKeys?: string[]; busyMode?: Record<string, string> }
       for (const [k, v] of Object.entries(parsed.chatToSession ?? {})) this.chatToSession.set(k, v)
       for (const k of parsed.seenChatKeys ?? []) this.seenChatKeys.add(k)
+      for (const [k, v] of Object.entries(parsed.busyMode ?? {})) {
+        if (v === 'queue' || v === 'steer') this.chatToBusyMode.set(k, v)
+      }
     } catch (error: unknown) {
       // ENOENT is expected on first run; log other errors
       if ((error as { code?: string }).code !== 'ENOENT') {
@@ -160,6 +188,7 @@ export class HarnessConversationService {
       writeFileSync(path, JSON.stringify({
         chatToSession: Object.fromEntries(this.chatToSession),
         seenChatKeys: [...this.seenChatKeys],
+        busyMode: Object.fromEntries(this.chatToBusyMode),
       }), 'utf-8')
     } catch (error: unknown) {
       console.error('dsh-feishu: saveSessionMap failed:', error instanceof Error ? error.message : String(error))
@@ -175,8 +204,9 @@ export class HarnessConversationService {
     }
     const handle = await this.getOrCreate(key)
     const agent = handle.agent
-    await agent.whenIdle()
-    const firstSeq = agent.session.seq
+    const gen = this.generationOf(key)
+    const busyMode = this.busyModeFor(key)
+    const running = agent.status === 'running'
     const text = message.content
     const imageBlocks = message.imageBlocks ?? []
     const hasText = text.length > 0
@@ -196,6 +226,28 @@ export class HarnessConversationService {
     if (hasText) content.push({ type: 'text', text: `${tag}${text}` })
     else content.push({ type: 'text', text: tag })
     for (const attachment of imageBlocks) content.push({ type: 'image', attachment })
+
+    // Steer mode + running: inject into the live turn immediately (no wait),
+    // then wait for the running turn (including the steered step) to finish.
+    if (busyMode === 'steer' && running) {
+      const firstSeq = agent.session.seq
+      agent.steer(createUserMessage({ content, source: { kind: 'user' } }))
+      await agent.whenIdle()
+      await this.deps.sessions.flush(agent.session)
+      const result = summarizeTurn(agent.session.events, firstSeq)
+      if (!result.ok) throw new Error('Harness turn did not produce a successful assistant response')
+      return result.text
+    }
+
+    // Queue path (default): wait for the current turn to end, then followup as
+    // a new turn. A `/stop` during the wait bumps the generation, so drop the
+    // message instead of submitting it — this is what actually discards a
+    // message queued while the agent was running.
+    await agent.whenIdle()
+    if (this.generationOf(key) !== gen) {
+      throw new TurnDroppedError('message dropped: session stopped while it was queued')
+    }
+    const firstSeq = agent.session.seq
     agent.followup(createUserMessage({
       content,
       source: { kind: 'user' },
@@ -205,6 +257,41 @@ export class HarnessConversationService {
     const result = summarizeTurn(agent.session.events, firstSeq)
     if (!result.ok) throw new Error('Harness turn did not produce a successful assistant response')
     return result.text
+  }
+
+  /** Per-chat busy mode for a message sent while the agent is running. */
+  busyMode(message: ConversationMessage): BusyMode {
+    return this.busyModeFor(conversationKey(message))
+  }
+
+  /** Set (and persist) the per-chat busy mode. */
+  setBusyMode(message: ConversationMessage, mode: BusyMode): void {
+    this.chatToBusyMode.set(conversationKey(message), mode)
+    this.saveSessionMap()
+  }
+
+  /**
+   * Stop one chat's agent run and drop any message still queued behind it.
+   * Bumps the per-chat generation (so a waiting {@link reply} drops instead of
+   * submitting) and cancels the live agent with `keepInbox:false`.
+   * @returns whether a live agent was found and cancelled.
+   */
+  stopSession(message: ConversationMessage): boolean {
+    const key = conversationKey(message)
+    this.generations.set(key, this.generationOf(key) + 1)
+    const sessionId = this.resolveSessionId(message)
+    const agent = this.deps.agents.get(sessionId as never) as unknown as AgentLike | undefined
+    if (agent === undefined) return false
+    agent.cancel({ kind: 'user' }, { keepInbox: false })
+    return true
+  }
+
+  private generationOf(key: string): number {
+    return this.generations.get(key) ?? 0
+  }
+
+  private busyModeFor(key: string): BusyMode {
+    return this.chatToBusyMode.get(key) ?? 'queue'
   }
 
   /**

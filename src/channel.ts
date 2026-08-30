@@ -7,6 +7,7 @@ import type { LarkChannel, LarkChannelOptions, NormalizedMessage, ResourceDescri
 import type { AttachmentStore, ImageAttachmentRef, SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
 import type { RuntimeConfig } from './config.ts'
 import type { HarnessConversationService, InboundMessage } from './harness.ts'
+import { TurnDroppedError } from './harness.ts'
 import type { TurnStats } from './feishu-streaming.ts'
 import { errorText } from './error-text.ts'
 
@@ -382,6 +383,12 @@ export async function startChannel(
             })
           }
         }).catch((error: unknown) => {
+          if (error instanceof TurnDroppedError) {
+            // Message intentionally dropped because the session was stopped
+            // while it waited for the current turn — no error card needed.
+            logError(`dsh-feishu: message dropped (session stopped): ${error.message}`)
+            return
+          }
           logError(`dsh-feishu: message handling failed: ${error instanceof Error ? error.message : String(error)}`)
           void channel.send(chatId, { text: `处理这条消息时出错：${errorText(error, config.errorMessage)}` }, {
             replyTo: replyToId,

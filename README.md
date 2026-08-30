@@ -19,7 +19,7 @@
 | `ask_user_question` 卡片 | 问题卡片（选项/自定义输入/跳过），一次多问时**顺序迭代**、整批返回答案 |
 | 图片 / 文件接收 | 用户发送的图片经 attachment store 落盘，文件下载到 `~/.dsh/feishu-inbox/` 供 agent 读取 |
 | agent 主动发文件 | `feishu_send_file` 模型工具：agent 可把工作区文件推送到当前飞书聊天（≤30MB） |
-| 运行中注入 steer | `/steer <内容>`：agent 运行中把一条消息注入 **当前 turn**（DSH next-step inbox），不必排队成新轮 |
+| 运行中注入 steer | `/steer <内容>` 一次性注入当前 turn；`/busy steer` 可把"运行中发消息"默认设为注入（持久化） |
 | 权限模式选择 | `/permission`：查看/切换会话权限（沙箱）模式，名称与显示名对齐 WebUI（Read Only / Workspace Write / Full access），**交互式卡片**点选切换 |
 | 报错带具体原因 | 出错回报带具体原因与错误码（`errorText`），不再只回统一道歉文案 |
 | WebSocket 长连接 | 无需公网服务器，支持飞书中国版和国际版 Lark |
@@ -51,13 +51,14 @@ npx @deepseek-ai/dsh plugin --profile web add @starxer/dsh-feishu
 | `/thread [N]` | 列出/切换会话 |
 | `/status` | 展示会话状态（token/TTFT/吞吐量/缓存命中率/权限模式等） |
 | `/reasoning [off\|low\|high\|max]` | 设置推理强度 |
-| `/stop` | 中止当前轮次（并尝试丢弃排队消息） |
+| `/stop` | 中止当前轮次并丢弃排队消息（不再进入下一 turn） |
 | `/steer <内容>` | agent 运行中，把一条消息注入当前 turn |
+| `/busy [queue\|steer]` | 设置运行中发消息的行为：排队（默认）或注入当前 turn，**持久化** |
 | `/permission [模式]` | 查看/切换会话权限（沙箱）模式；无参发交互式选择卡片 |
 | `/approve` `/deny` `/approvals` | 处理工具审批 |
 | `/help` | 列出所有可用命令 |
 
-> **已知限制：`/stop` 丢弃排队消息未完全生效。** agent 运行中你从飞书发新消息时，该消息是**在等待当前 turn 结束**（`bridge.reply` 先 `await whenIdle()` 再 followup），而不是先进 agent inbox。因此 `/stop` 的 `keepInbox:false` 清空的是（当时为空的）收件箱；当前 turn 中止后，等待中的消息仍会被 followup 提交、开启新的 turn。根因与讨论见 [CHANGELOG.md](CHANGELOG.md) 与 [AGENTS.md](AGENTS.md)。
+> **运行中发消息的行为（`/busy`）**：`queue`（默认，等待当前轮结束后作为新轮运行）或 `steer`（注入当前 turn 立即响应，persist）。一次性注入用 `/steer <内容>`。`/stop` 会中止当前轮并**丢弃排队/等待中的消息**（不再自动进入下一 turn）。
 
 ## 配置
 
