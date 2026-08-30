@@ -27,12 +27,12 @@ describe('renderFooterCard (Turn Complete)', () => {
   it('shows the busy mode (queue) in the footer', () => {
     const card = renderFooterCard({ busyMode: 'queue' }, turnStats) as any
     expect(card.header.title.content).toBe('Turn Complete')
-    expect(markdownOf(card)).toContain('**Enter while busy:** `queue` Queue 📥')
+    expect(markdownOf(card)).toContain('**Enter while busy:** 📥 Queue')
   })
 
   it('shows the busy mode (steer) in the footer', () => {
     const card = renderFooterCard({ busyMode: 'steer' }, turnStats) as any
-    expect(markdownOf(card)).toContain('**Enter while busy:** `steer` Steer 🎯')
+    expect(markdownOf(card)).toContain('**Enter while busy:** 🎯 Steer')
   })
 
   it('omits the busy line when busyMode is not provided', () => {

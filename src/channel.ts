@@ -614,7 +614,7 @@ export function renderFooterCard(
   if (meta?.busyMode !== undefined) {
     const label = meta.busyMode === 'steer' ? 'Steer' : 'Queue'
     const icon = meta.busyMode === 'steer' ? '🎯' : '📥'
-    metaParts.push(`**Enter while busy:** \`${meta.busyMode}\` ${label} ${icon}`)
+    metaParts.push(`**Enter while busy:** ${icon} ${label}`)
   }
 
   // If nothing to show, return undefined.

@@ -52,26 +52,55 @@
 | — | 选项卡片反馈 | ✅ 选择后 recall 旧卡 + 发新卡（青绿色头部，显示所有选项，已选高亮） |
 | — | 双重编码 JSON | ✅ Feishu `action.value` 双重编码 → 二次 `JSON.parse`（questions + approvals） |
 | — | Turn Complete 时间修复 | ✅ LLM 时间（assistant/message 累加）与工具时间（tool/result 累加）分开统计 |
+| — | `/thread` 改名 `/session` | ✅ 命令实际操作 DSH session（`listSessions`/`switchToSession`），与飞书原生"话题"混淆、与 WebUI「会话」心智不一致；已重命名（`commands.ts`/`index.ts`/`tests`/文案/`FEISHU_OWNED_COMMANDS`），**不保留 `/thread` 别名** |
+| — | `/session` 管理面板 | ✅ `feishu-session.ts`：下拉选会话 + 切换（占用先确认）/detach/归档/fork/改名（独立卡片，`sessionController.rename`）/列表/刷新；`/session list` 表格卡；`/session N` 快速切换 |
+| — | `/help` 卡片化 + 分组 | ✅ 飞书文本不渲染 markdown → 卡片；分「🔹 dsh-feishu 插件 / 💠 DSH 内置」两组，被拦截命令（busy/steer/queue/permission/stop）补进 Feishu 组 |
+| — | 工具调用摘要找回 | ✅ `deriveToolSummary`（`feishu-streaming.ts`）按 Web UI `classifyTool`+`deriveSummary` 从 tool/call 的 arguments 本地推导（bash/search/read/write/code/未知）；因 DSH 0.1.2-alpha.1 不再发射 `presentCall`，`callView` 路径已死 |
+| — | 工具 args fenced 代码块 | ✅ args 用独立 `` ``` `` 代码块渲染（`sanitizeCodeblock` 折反引号/剔控制字符），避免破坏卡 markdown/横向溢出 |
+| — | 工具结果兜底展示 | ✅ `renderResultPreview` 各分支无输出时 `finish()` 兜底渲染原始结果内容，保证结果始终可见 |
+| — | 免会话命令重启可用 | ✅ `resolveAgentOrResume`（harness）冷会话懒恢复 + 真正免会话命令（`/model`/`/reasoning`/`/approvals`/`/approve`/`/deny`/`/help`）在 `resolveAgent` 兜底前直接拦截 |
+| — | 问题结算卡保留描述 | ✅ `renderSettledQuestionCard` 补上 `detail` |
+| — | Turn Complete 展示 busy 模式 | ✅ footer 只读显示 `**Enter while busy:**`（Queue/Steer），与 `/status` 一致 |
+| — | `/busy` 交互选择卡 + `/queue` | ✅ `feishu-busy.ts`、`/queue`（`forceQueue`），模式匹配短接 |
+| — | `action.value` 双解码 | ✅ `decodeCardValue`（多深度 JSON.parse，cap 4），busy/permission/model-select/session 共用 |
+| — | `/model` 一站式 | ✅ `ctx.sessionController.selectModel`（agent scoped ref + WebUI + 持久化），不再用插件 `selections: Map`/`installModelSelection` |
 
-## 待实现
+## 下一轮待办（2026-08-30 定，未动工）
+
+> 用户最后明确：**先更新 TODO 文件，暂不动手改代码**。以下 5 项为下一轮实现计划。
 
 | # | 功能 | 优先级 | 说明 |
 |---|---|---|---|
-| 16 | 权限系统接入 | **中** | 新增 `/permission` `/sandbox`，对齐 WebUI 权限设定 |
-| 18 | 思考内容可折叠 | **中** | reasoning 代码块支持折叠（飞书 Card JSON 2.0 `collapsible` 组件） |
-| 2 | `/new` 带参数 | **中** | `/new --workspace <path> --preset <id>` |
-| 3 | 工作区候选补全 | **中** | 输入前缀列出匹配目录供选 |
-| 9 | 流式输出 → CardKit | **低** | 解决 5 QPS 瓶颈，需调研 CardKit API |
-| 7 | 多 thread 话题导航 | **低** | 飞书话题映射 DSH session，底层已通 |
-| 8 | 文档与版本一致性 | **低** | README 过期、版本号不一致 |
-| — | `/thread` 改名为 `/session` | **中** | 命令实际操作 DSH session（`listSessions`/`switchToSession`），叫 `thread` 与飞书原生"话题"混淆、与 WebUI「会话」心智不一致。**不保留 `/thread` 别名**。待改文件清单见下方 [## `/thread` → `/session` 改名清单](#thread--session-改名清单) |
-| — | 飞书 SDK 卡片回调补丁追踪 | **低** | 检查 `@larksuiteoapi/node-sdk` 是否有新版本修复 `MessageType.CARD` 被过滤的问题；确认补丁是修复 SDK 本身还是 DSH 的消息处理链路（见「已知问题」Node.js SDK MessageType.CARD 被过滤） |
+| 1 | subagent 只读列表面板 | **中** | 订阅 `ctx.subagents.listChildren` / `listDescendants`，列名称/状态/depth，并在会话面板/命令加入口。**只读列表**（用户澄清） |
+| 2 | `/steer` 与 `/queue` idle 兼容 | **中** | agent 空闲时自动**回退为发新消息**（不再报错），回执注明「空闲→已作为新消息」；running 时行为不变（`/queue` 同）。读 `bridge.isAgentRunning` + `resolveAgentOrResume` 判断。**2026-08-30 核查**：`/steer` 仍未解决 —— 空闲时 `bridge.steer` 抛「当前没有运行中的 turn 可注入」，无明显空闲回退；`/queue` 空闲时实际已走新轮路径（`forceQueue` 正常），仅 `busyMode==='queue'` 的冗余短接会返回提示。**待办焦点 = `/steer` 空闲回退** |
+| 3 | `locale` 设置 + `/lang` | **中** | 新增插件 `locale` 字段（默认 zh），`/lang [zh\|en]` 切换并持久化，`/lang` 无参显示当前。**语言源 = 插件设置字段，默认跟随 DSH 语言**（用户澄清） |
+| 4 | 插件文案 i18n（zh/en) | **中** | 命令响应层优先（`larkCommandTranslations`/`CommandTranslations`/`/help`），再扩展关键卡片（streaming/session/busy/permission/questions/todos） |
+| 5 | 测试 + typecheck + build + restart + 文档 | **中** | 上述改动收尾：补 spec、`npm run typecheck`/`test`/`build`、`systemctl --user restart dsh`、AGENTS/CHANGELOG 更新 |
 
 ---
 
-## `/thread` → `/session` 改名清单
+## 待实现
 
-> 命令实际操作的是 DSH session（`bridge.listSessions()` / `bridge.switchToSession()`），`thread` 命名与飞书原生"话题"混淆，且与 WebUI「会话」心智不一致。**不保留 `/thread` 别名**，`/help` 列表中只出现 `/session`。
+> ⚠️ 状态已刷新（2026-08-30）：`#16 权限系统接入`、`/thread→/session` 改名均已**完成**，从本表移除。
+
+| # | 功能 | 优先级 | 说明 |
+|---|---|---|---|
+| 18 | 思考内容**可折叠** | **中** | reasoning 代码块支持折叠（飞书 Card JSON 2.0 `collapsible` 组件）。**2026-08-30 核实**：3000 字符截断**已做**（`feishu-streaming.ts` reasoning/text 均 `slice(0,3000)`），仅 `collapsible` 未实现 |
+| 3 | 工作区候选补全 | **中** | 输入前缀列出匹配目录供选。**2026-08-30 核实**：插件源码无补全/建议逻辑，未实现 |
+| 9 | 流式输出 → CardKit | **低** | 解决 5 QPS 瓶颈。**2026-08-30 核实**：卡片**已用** `cardkit.v1.card.create/update`（V2）建/改卡，但**未用** `streaming_mode` 单卡持续流式；per-step 仍各发一卡。待办收窄为「单卡流式更新」 |
+| 8 | 文档与版本一致性 | **低** | 2026-08-30 核实：package.json `0.1.0`，README 明显过期未同步，仍待办 |
+| — | 飞书 SDK 卡片回调补丁追踪 | **低** | 2026-08-30 核实：**可关闭** —— 无 postinstall/patch，SDK `1.73.0` 原版；card 帧被过滤已**证伪**（「已知问题」同段已标注）。仅为未来 SDK 变更留档 |
+
+> ✅ 已从本表移除（2026-08-30 确认完成）：
+> - `/new` 带参数（`--workspace`/`--preset`）—— 已实现
+> - 多 session 话题导航 —— 已做（会话映射持久化 + 话题映射）；**不再做并行可见性**（用户明确）
+> - `#16` 权限系统接入、`/thread→/session` 改名、SDK 补丁追踪（证伪关闭）
+
+---
+
+## `/thread` → `/session` 改名清单 —— ✅ 已完成（2026-08-30）
+
+> 命令实际操作的是 DSH session（`bridge.listSessions()` / `bridge.switchToSession()`），`thread` 命名与飞书原生"话题"混淆，且与 WebUI「会话」心智不一致。**不保留 `/thread` 别名**，`/help` 列表中只出现 `/session`。下方清单为提出时的改动范围，历史存档。
 >
 > ⚠️ 只改**命令相关**的 thread 引用；`threadId` / `replyInThread` / `thread_id`（飞书话题消息坐标）与命令无关，**不要动**。
 
@@ -103,7 +132,7 @@
 - 选项卡片（feishu-questions.ts）— 选择后 recall + resend
 - 审批卡片（feishu-approvals.ts）— 使用 updateCard（仅 body 变化，header 橙→绿 需要 recall）
 
-**待优化**：审批卡片的 header 颜色变化目前依赖 updateCard，实际上不会生效。需要改为 recall + resend。
+**待优化**：审批卡片的 header 颜色变化目前依赖 updateCard，实际上不会生效。需要改为 recall + resend。**2026-08-30 核实**：`feishu-approvals.ts` 结算卡仍走 `channel.updateCard`（=patch），未按 `已知问题` 说明改 recall+resend，故橙→绿 header 变化至今仍未生效 —— 仍待优化。
 
 ### ~~Node.js SDK `MessageType.CARD` 被过滤~~（已证伪，补丁已移除）
 
@@ -123,7 +152,7 @@
 
 ## 问题追踪（2025-08-27）
 
-### ❌ WebUI 改模型后 status 命令显示不更新
+### ✅ WebUI 改模型后 status 命令显示不更新 —— 已解决（2026-08-30）
 
 **现象**：
 - WebUI 里切换模型后，`/status` 命令显示的模型名仍是旧模型
@@ -136,9 +165,11 @@
 
 **修复方向**：`/status` 命令需要优先从 `sessionController.selectModel` 的结果或 `selectionFor(agent).current` 读取当前实际模型，而不是只读 bridge 的 selection ref。
 
+**解决**：`/model` 已改为 `ctx.sessionController.selectModel(...)` 一站式（写 agent scoped ref + WebUI + 持久化），插件不再维护独立的 `selections: Map`/`installModelSelection`；`/status` 改为读 `selectionFor(agent).current`（scoped ref）。飞书与 WebUI 收敛到同一处缓存，不再各读各的。**已确认解决**。
+
 ---
 
-### ❌ MiniMax M3 关闭思考后重新打开不思考
+### 🔍 MiniMax M3 关闭思考后重新打开不思考 —— 待检查（2026-08-30 确认未解决）
 
 **现象**：新建 session，把 M3 模型的思考强度关掉后进行一轮对话，再重新打开思考强度，模型不再进行思考（不输出 reasoning 内容）。
 
@@ -152,6 +183,8 @@
 **根因分析**：关闭思考时 `selection` 被设为无 `reasoningEffort`，且这个状态被 sessionController 的 `selectionFor(agent).current`（读 requestHeader）持久化了。重新打开思考时，新的 `reasoningEffort` 虽然被设置，但 sessionController 的外层 `agent/request` listener 用 requestHeader 的旧 config（无 effort）覆盖，导致请求仍不带 thinking 参数。
 
 **修复方向**：检查 `installModelSelection` 的 `agent/request` listener 在 `selection.assembled.reasoningEffort === undefined` 时删除继承的 effort 是否合理；考虑保留继承的 effort 而不是删除。
+
+**状态**：⚠️ **尚未检查**（2026-08-30 用户确认仍未排查）。**2026-08-30 静态核实补充**：插件侧 `installModelSelection` / `agent/request` listener 在新架构（`sessionController.selectModel` 一站式）中**已删除**，旧 TODO 的「检查插件 installModelSelection 的 agent/request listener」路径已不通。若问题仍在，则归属 **DSH 侧 `ApiSessionAgentController`**（外层 `agent/request` 用 requestHeader 旧 config 覆盖新 effort），需在真实运行中复现确认，非插件可修。
 
 ---
 
@@ -200,12 +233,11 @@
   - 删除 `needsPlainTextFallback()`、`logReplyDiagnostic()`、`buildFooterText()` 三个废弃函数
   - 回复流程简化：始终发卡片，不再有 markdown 消息降级路径
 
-## #16 权限系统接入
+## #16 权限系统接入 —— ✅ 已实现（2026-08-30）
 
 - **DSH 权限**：3 种 sandbox 模式（read-only / workspace-write / danger-full-access）+ permission presets
 - **Session 事件**：`sandbox/mode`、`permission/preset`，持久化在 session log
-- **飞书接入**：`/permission` 列出 presets + 切换；`/sandbox` 直接切模式
-- **待调研**：`permissionPresets` service API、`setSandboxMode` API、与 WebUI `/permission` 命令是否冲突
+- **飞书接入**：`/permission [模式]`（`feishu-permission.ts`）交互式选择卡 + 带参直接切换；`/sandbox` 保留为隐藏别名；命名/显示名对齐 WebUI `ui-permission-presets`（Read Only / Workspace Write / Full access）；`/status` 显示 Permission。复用 `ctx.get('sandboxPolicy')` 服务 + 会话日志 log-only `sandbox/mode` 事件
 
 ## #18 思考内容展示
 

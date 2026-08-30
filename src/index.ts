@@ -775,8 +775,8 @@ function renderStatusCard(meta: {
   if (busyMode !== undefined) {
     // WebUI names this "Enter behavior while busy"; options Queue / Steer.
     const label = busyMode === 'steer' ? 'Steer' : 'Queue'
-    const icon = busyMode === 'steer' ? ' 🎯' : ' 📥'
-    fields.push(`**Enter while busy:** \`${busyMode}\` ${label}${icon}`)
+    const icon = busyMode === 'steer' ? '🎯' : '📥'
+    fields.push(`**Enter while busy:** ${icon} ${label}`)
   }
   fields.push(`**Agent:** ${agentRunning ? '🔄 Running' : '⏸️ Idle'}`)
   if (meta.turns > 0 || meta.steps > 0) {
@@ -1126,6 +1126,19 @@ async function executeSlashCommand(
     if (text === '') {
       return { kind: 'error', text: '⚠️ 用法：/queue <内容> —— 在 steer 模式下也强制把一条消息排队为新轮（/steer 的共轭）。' }
     }
+    // Idle fallback: nothing is running, so "queue behind a live turn" is moot —
+    // just send the content as a new message (the Feishu default) instead of
+    // erroring, and say so explicitly.
+    if (!bridge.isAgentRunning(chatMessage)) {
+      void bridge.reply({ ...chatMessage, content: text }).catch((error: unknown) => {
+        if (error instanceof TurnDroppedError) return
+        console.error('dsh-feishu: /queue idle-fallback reply failed:', error instanceof Error ? error.message : String(error))
+      })
+      return {
+        kind: 'success',
+        text: `💬 Agent 当前空闲，已把内容作为新消息发送：\`${text}\``,
+      }
+    }
     if (bridge.busyMode(chatMessage) === 'queue') {
       return { kind: 'error', text: '⚠️ 本聊天已在 queue 模式：直接发送消息即会排队为新轮，无需 /queue。\n\n若想注入当前运行轮，用 `/steer <内容>` 或改用 `/busy steer`。' }
     }
@@ -1154,6 +1167,20 @@ async function executeSlashCommand(
     const text = parsed.rawInput.trim()
     if (text === '') {
       return { kind: 'error', text: '⚠️ 用法：/steer <内容> —— 在 agent 运行中把一条消息注入当前 turn。' }
+    }
+    // Idle fallback: nothing is running (no agent or agent not in a turn), so an
+    // injection cannot apply. Instead of erroring, send the content as a new
+    // message (the Feishu default) and say so explicitly. The reply() call never
+    // steers when not running, so this is always a fresh turn.
+    if (!bridge.isAgentRunning(chatMessage)) {
+      void bridge.reply({ ...chatMessage, content: text }).catch((error: unknown) => {
+        if (error instanceof TurnDroppedError) return
+        console.error('dsh-feishu: /steer idle-fallback reply failed:', error instanceof Error ? error.message : String(error))
+      })
+      return {
+        kind: 'success',
+        text: `💬 Agent 当前空闲，已把内容作为新消息发送：\`${text}\`\n\n若要在 agent 运行中插话，请等本轮结束后用它再发一条普通消息即可（或改用 \`/busy steer\` 常开插话）。`,
+      }
     }
     if (bridge.busyMode(chatMessage) === 'steer') {
       return { kind: 'error', text: '⚠️ 本聊天已在 steer 模式：直接发送消息即会注入当前运行轮，无需 /steer。\n\n若想排队为新轮，用 `/queue <内容>` 或改用 `/busy queue`。' }
