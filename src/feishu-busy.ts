@@ -17,17 +17,13 @@
 
 import type { ConversationMessage } from './conversation.ts'
 import type { BusyMode } from './harness.ts'
+import type { Translations } from './i18n.ts'
 import { decodeCardValue } from './card-action.ts'
 
 /** Union of selectable busy behaviors (also the persisted values). */
 export const BUSY_MODES: readonly BusyMode[] = ['queue', 'steer']
 
-const BUSY_LABEL: Record<BusyMode, string> = { queue: 'Queue', steer: 'Steer' }
 const BUSY_ICON: Record<BusyMode, string> = { queue: '📥', steer: '🎯' }
-const BUSY_DESC: Record<BusyMode, string> = {
-  queue: '当前轮结束后作为新轮运行（默认）',
-  steer: '注入当前运行轮立即响应',
-}
 
 /** Narrow card-action event surface the picker consumes. */
 export interface BusyCardEvent {
@@ -50,6 +46,8 @@ export interface FeishuBusyDeps {
   /** Persist a new per-chat busy mode. */
   setMode: (chat: ConversationMessage, mode: BusyMode) => void
   logger: { warn(message: string): unknown; error(message: string): unknown }
+  /** Return the strings for the ACTIVE locale, read at render time. */
+  getTranslations: () => Translations
 }
 
 export interface FeishuBusyHandle {
@@ -60,16 +58,20 @@ export interface FeishuBusyHandle {
 }
 
 /** Render the busy picker card with the active mode marked. */
-export function renderBusyCard(current: BusyMode): object {
+export function renderBusyCard(current: BusyMode, t: Translations): object {
+  const label = current === 'steer' ? t.busySteerWord : t.busyQueueWord
+  const icon = BUSY_ICON[current]
   const elements: object[] = [
-    { tag: 'markdown', content: `**运行中（busy）的 Enter 行为：** \`${current}\` ${BUSY_LABEL[current]} ${BUSY_ICON[current]}` },
-    { tag: 'markdown', content: '_点击下方按钮切换本聊天在 agent 运行中收到消息时的处理方式（对齐 WebUI「Enter behavior while busy」）。已持久化，重启后保留。_' },
+    { tag: 'markdown', content: `**${t.busyCurrentLabel}** \`${current}\` ${label} ${icon}` },
+    { tag: 'markdown', content: t.busyHint },
   ]
   for (const mode of BUSY_MODES) {
     const active = mode === current
+    const modeLabel = mode === 'steer' ? t.busySteerWord : t.busyQueueWord
+    const modeDesc = mode === 'steer' ? t.busySteerDesc : t.busyQueueDesc
     elements.push({
       tag: 'button',
-      text: { tag: 'plain_text', content: `${active ? '✓ ' : ''}${BUSY_LABEL[mode]} · ${BUSY_DESC[mode]}` },
+      text: { tag: 'plain_text', content: `${active ? '✓ ' : ''}${modeLabel} · ${modeDesc}` },
       type: mode === 'steer' ? 'primary' : 'default',
       value: JSON.stringify({ p: 'busy', mode }),
       ...(active ? { disabled: true } : {}),
@@ -85,7 +87,7 @@ export function renderBusyCard(current: BusyMode): object {
 
 /** Start the busy picker: send cards on demand and handle button clicks. */
 export function startFeishuBusy(deps: FeishuBusyDeps): FeishuBusyHandle {
-  const { channel, getMode, setMode, logger } = deps
+  const { channel, getMode, setMode, logger, getTranslations } = deps
   const byCard = new Map<string, ConversationMessage>()
 
   const onCardAction = async (evt: BusyCardEvent): Promise<void> => {
@@ -100,7 +102,7 @@ export function startFeishuBusy(deps: FeishuBusyDeps): FeishuBusyHandle {
     const mode = parsed.mode
     if (mode !== 'queue' && mode !== 'steer') return
     setMode(chat, mode)
-    await channel.updateCard(messageId, renderBusyCard(mode)).catch((error: unknown) => {
+    await channel.updateCard(messageId, renderBusyCard(mode, getTranslations())).catch((error: unknown) => {
       logger.warn(`dsh-feishu: busy card update failed: ${error instanceof Error ? error.message : String(error)}`)
     })
   }
@@ -111,7 +113,7 @@ export function startFeishuBusy(deps: FeishuBusyDeps): FeishuBusyHandle {
     const opts = chat.threadId !== undefined
       ? { replyInThread: true, ...(chat.rootId !== undefined ? { replyTo: chat.rootId } : {}) }
       : {}
-    const result = await channel.send(chat.chatId, { card: renderBusyCard(current) }, opts)
+    const result = await channel.send(chat.chatId, { card: renderBusyCard(current, getTranslations()) }, opts)
     const messageId = result.messageId
     if (messageId !== undefined) byCard.set(messageId, chat)
     return messageId

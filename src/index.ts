@@ -25,12 +25,14 @@ import { createSettingsApi } from './settings-api.ts'
 import { renderTerminalQr } from './provision.ts'
 import { ProvisionManager } from './provision-manager.ts'
 import { registerLarkCommands, formatRelativeTime, handleHelpCommand, handleModelCommand, handleReasoningCommand, handleApprovalCommand, handleListApprovalsCommand, renderFeishuCommandsOnly, type ApprovalControl, type CommandTranslations } from './commands.ts'
+import { commandTranslationsFor } from './commands-i18n.ts'
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { handleProvisionRequest, handleSettingsRequest, PROVISION_PATH, SETTINGS_PATH } from './web.ts'
 import { startFeishuApprovals, type PendingApprovalView } from './feishu-approvals.ts'
 import { startFeishuTodos } from './feishu-todos.ts'
 import { startFeishuStreaming } from './feishu-streaming.ts'
 import type { TurnStats } from './feishu-streaming.ts'
+import { resolveLocale, translationsFor, type LocaleId, type Translations } from './i18n.ts'
 
 export const name = 'lark-channel'
 export const inject = [
@@ -103,6 +105,27 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   const currentSettings = (): SettingsConfig => resolveSettingsConfig(settingsScope.get())
   const currentRevision = () => settings.describe({ redactSecrets: true }).find(item => item.ns === namespace)?.revision ?? 0
   let apiUpdateDepth = 0
+
+  // Active plugin language. The plugin `locale` field wins; `auto` (default)
+  // follows the DSH browser-language preference (the host `locale` namespace
+  // registered by `@deepseek-ai/dsh-client-locale`). When DSH does not expose
+  // a preference, fall back to `zh`.
+  const currentLocale = (): { id: LocaleId; plugin: 'zh' | 'en' | 'auto'; dsh: string | undefined } => {
+    const plugin = currentSettings().locale ?? 'auto'
+    let dsh: string | undefined
+    try {
+      const localeNs = settings.get('locale' as Parameters<typeof settings.get>[0]) as { preference?: string } | undefined
+      dsh = localeNs?.preference
+    } catch {
+      dsh = undefined
+    }
+    return { id: resolveLocale(plugin, dsh), plugin, dsh }
+  }
+  // Keep the module-level command translations in sync with the resolved
+  // locale. Called at apply time and whenever `/lang` changes the plugin's
+  // `locale` field.
+  const refreshLocale = (): void => setActiveCommandTranslations(currentLocale().id)
+  refreshLocale()
 
   // The bridge is recreated every time the Lark channel reconciles; hold it
   // in a single-cell so the `/model` command always reaches the bridge that
@@ -325,7 +348,8 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         }, sessionController, agents, sandboxPolicy, permissionHandle, llm, defaultModel, cardChannel,
         busyHandle,
         modelSelectHandle !== undefined ? { cardByMessage: modelSelectHandle.cardByMessage, sequenceByCard: modelSelectHandle.sequenceByCard } : undefined,
-        onboardingHandle, workspaceRegistry, agentPresets, approvalControl, showReasoningControl, sessionHandle),
+        onboardingHandle, workspaceRegistry, agentPresets, approvalControl, showReasoningControl, sessionHandle,
+        { current: currentLocale, set: setPluginLocale }),
         attachments,
         async (coords) => {
           const meta = await bridge.getSessionMeta(coords as ConversationMessage)
@@ -369,6 +393,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
             await onboardingHandle?.sendOnboardingCard(coords, threadLabel)
           },
         },
+      () => translationsFor(currentLocale().id),
       )
     },
   })
@@ -394,6 +419,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     sandbox: sandboxPolicy,
     sessionGetter: (id: string) => (agents as any)?.get?.(id)?.session,
     logger: ctx.logger('dsh-feishu'),
+    getTranslations: () => translationsFor(currentLocale().id),
   })
   // Interactive `/busy` picker card. Independent of the questions/approvals
   // seams; only needs the live card channel + the bridge's per-chat busy mode.
@@ -402,6 +428,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     getMode: chat => bridgeHolder.current?.busyMode(chat) ?? 'queue',
     setMode: (chat, mode) => bridgeHolder.current?.setBusyMode(chat, mode),
     logger: ctx.logger('dsh-feishu'),
+    getTranslations: () => translationsFor(currentLocale().id),
   })
   // Interactive `/session` management panel (switch / detach / rename /
   // archive / fork). Independent of the questions/approvals seams; only needs
@@ -412,6 +439,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     sessionController,
     workspaceRegistry,
     logger: ctx.logger('dsh-feishu'),
+    getTranslations: () => translationsFor(currentLocale().id),
   })
   if (sessionController !== undefined && userQuestions !== undefined && approval !== undefined) {
     stopQuestions = startFeishuQuestions({
@@ -419,6 +447,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       channel: cardChannel,
       bridgeHolder,
       logger: ctx.logger('dsh-feishu'),
+      getTranslations: () => translationsFor(currentLocale().id),
     })
     stopTodos = startFeishuTodos({
       ctx,
@@ -432,6 +461,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       bridgeHolder,
       logger: ctx.logger('dsh-feishu'),
       showReasoning: () => currentSettings().showReasoning,
+      getTranslations: () => translationsFor(currentLocale().id),
     })
     stopStreaming = streamingResult.stop
     consumeReasoning = streamingResult.consumeReasoning
@@ -445,6 +475,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       channel: cardChannel,
       logger: ctx.logger('dsh-feishu'),
       topicFor: chatId => onboardingHandle?.topicFor(chatId) ?? {},
+      getTranslations: () => translationsFor(currentLocale().id),
       onNewSessionConfirm: async (chatMessage, selection, messageId) => {
         // The `/new` card flow's model step confirmed — create the session
         // with the workspace/preset captured by the onboarding flow and the
@@ -468,6 +499,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       workspaceRegistry,
       agentPresets,
       agentDefaultModel: defaultModel,
+      getTranslations: () => translationsFor(currentLocale().id),
       config: {
         workspace: currentSettings().workspace,
         agentPreset: currentSettings().agentPreset,
@@ -480,7 +512,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         const bridge = bridgeHolder.current
         if (bridge === undefined || modelSelectHandle === undefined) return
         const current = defaultModel.currentSelection()
-        const card = renderProviderSelectCard(llm.listProviders(), current, 'new-session')
+        const card = renderProviderSelectCard(llm.listProviders(), current, 'new-session', translationsFor(currentLocale().id))
         const cardId = await cardChannel.createCardInstance(card)
         const topic = onboardingHandle?.topicFor(chatMessage.chatId) ?? {}
         const opts = topic.threadId !== undefined && topic.rootId !== undefined
@@ -527,7 +559,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       }
       return last
     },
-    larkCommandTranslations,
+    activeCommandTranslations,
     commands,
     approvalControl,
     showReasoningControl,
@@ -589,6 +621,16 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     },
   })
 
+  // Persist the plugin's `locale` field (used by `/lang`). Passing `'auto'`
+  // unsets the field so the plugin again follows the DSH preference.
+  const setPluginLocale = (value: 'zh' | 'en' | 'auto'): Promise<void> => {
+    const expected = currentRevision()
+    const ops = value === 'auto'
+      ? [{ op: 'unset' as const, path: ['locale'] }]
+      : [{ op: 'set' as const, path: ['locale'], value }]
+    return settings.mutate(namespace, ops, expected).then(() => refreshLocale())
+  }
+
   settingsScope.watch(() => apiUpdateDepth > 0 ? undefined : runtime.reconcile())
   // Credentials-change event was renamed `credentials/updated` →
   // `credentials/reference-updated` in a newer Harness. Register under BOTH
@@ -642,116 +684,13 @@ function formatDuration(ms: number): string {
   return `${m}m${s}s`
 }
 
-const larkCommandTranslations: CommandTranslations = {
-  modelDescription: 'Show, list, or switch the active model',
-  modelCurrentHeader: 'Current model:',
-  modelUsage: 'Usage: /model [list|<provider>/<model>[:reasoning]]',
-  modelListHeader: 'Available models:',
-  modelListEmpty: 'No registered providers are available.',
-  modelSwitched: (provider, model) => `Switched default model to \`${provider}/${model}\`.`,
-  modelUnknown: route => `Unknown model route "${route}".`,
-  modelPersisted: 'The change is persisted; the next message in this chat will use it.',
-  modelLiveApplied: 'The change applies to this chat immediately on the next message.',
-  newDescription: 'Create a new session in this chat (card flow, or /new <workspace> <preset> [model])',
-  newUsage: 'Usage: /new <workspace> <agentPreset> [provider/model[:reasoning]] — or run `/new` with no arguments for the card flow.',
-  newSessionReady: sessionId => `Started a new conversation. Next message uses session \`${sessionId}\`.`,
-  threadDescription: 'List persisted sessions or switch the chat to one by index',
-  threadUsage: 'Usage: /session [N]',
-  threadListHeader: 'Available sessions (reply with `/session N` to switch):',
-  threadListEmpty: 'No persisted sessions yet.',
-  threadListEntry: (index, id, title, lastActive) => `${index}. ${title} — ${lastActive} (\`${id}\`)`,
-  threadListEntryOwned: (index, id, title, lastActive, ownerLabel) => `${index}. ${title} — ${lastActive} — 🔒 ${ownerLabel} 正在使用 (\`${id}\`)`,
-  threadSwitched: (index, id) => `Switched to session #${index} (\`${id}\`).`,
-  threadInvalidIndex: 'Invalid session index.',
-  threadArchived: 'That session is archived — unarchive it from the workspace webui first.',
-  threadOccupied: ownerLabel => `That session is already in use by ${ownerLabel}. Pick a free session, or run \`/detach\` on it to force-release it.`,
-  threadIdle: id => `(idle: ${id.slice(-12)})`,
-  detachDescription: 'Force-release a session so any dialog can switch to it',
-  detachUsage: 'Usage: /detach <N>',
-  detachInvalidIndex: 'Invalid session index.',
-  detachFree: 'That session is already free — no dialog owns it.',
-  detachReleased: (index, id, ownerLabel) => `🔓 Released session #${index} (\`${id}\`). ${ownerLabel} was reset to a brand-new session and can no longer hold it.`,
-  threadLastActiveJustNow: 'just now',
-  threadLastActiveMinutesAgo: n => `${n}m ago`,
-  threadLastActiveHoursAgo: n => `${n}h ago`,
-  threadLastActiveDaysAgo: n => `${n}d ago`,
-  threadLastActiveUnknown: 'unknown',
-  helpDescription: 'List every slash command available in this chat',
-  helpFeishuHeader: '**🔹 chatterbox4dsh 插件：**',
-  helpNativeHeader: '**💠 DSH 内置：**',
-  helpUsage: 'Send `/<name> [arguments]` to run a command. Optional input hints appear in `[brackets]`.',
-  helpEntry: (name, description, hint) => hint === undefined
-    ? `• \`/${name}\` — ${description}`
-    : `• \`/${name}\` — ${description} \`[${hint}]\``,
-  helpEmpty: 'No slash commands are available right now.',
-  approveDescription: 'Approve the most recent (or `<shortCode>`) pending approval in this chat',
-  approveApproveHint: '[shortCode]',
-  approveApprovedNoPending: 'No pending approvals on this session — nothing to approve.',
-  approveApproved: (shortCode, toolName) => `✅ Approved \`${toolName}\` (\`${shortCode}\`). The agent continues.`,
-  approveUnknownShort: shortCode => `No pending approval with id \`${shortCode}\` on this session.`,
-  denyDescription: 'Reject the most recent (or `<shortCode>`) pending approval in this chat',
-  denyHint: '[shortCode]',
-  denyDenied: (shortCode, toolName) => `❌ Rejected \`${toolName}\` (\`${shortCode}\`). The agent stops.`,
-  approveDenyUsage: 'Usage: `/approve` or `/approve <shortCode>` (and `/deny` likewise). Run `/approvals` to see the short codes.',
-  approvalsDescription: 'List every pending approval for this chat with its short code',
-  approvalsEmpty: 'No pending approvals on this session.',
-  approvalsHeader: 'Pending approvals (newest first):',
-  approvalsEntry: (index, shortCode, toolName, age) => `${index}. \`${shortCode}\` — \`${toolName}\` — ${age}`,
-  approvalsAgeJustNow: 'just now',
-  approvalsAgeSeconds: n => `${n}s ago`,
-  approvalsAgeMinutes: n => `${n}m ago`,
-  approvalsAgeHours: n => `${n}h ago`,
-  statusDescription: 'Show current session status (workspace, preset, model, stats)',
-  statusOutput: (meta) => {
-    const lines = [
-      '**Session Status**',
-      `• Session: \`${meta.sessionId}\``,
-    ]
-    if (meta.title !== '') lines.push(`• Title: ${meta.title}`)
-    lines.push(
-      `• Workspace: \`${meta.workspace || '(default)'}\``,
-      `• Preset: \`${meta.agentPreset || '(default)'}\``,
-      `• Model: \`${meta.model}\``,
-    )
-    if (meta.turns > 0 || meta.steps > 0) {
-      const parts: string[] = [`${meta.turns} turns`, `${meta.steps} steps`]
-      if (meta.toolCalls > 0) parts.push(`${meta.toolCalls} tool calls`)
-      lines.push(`• Activity: ${parts.join(' · ')}`)
-      if (meta.inputTokens > 0 || meta.outputTokens > 0) {
-        lines.push(`• Tokens: ${formatTokenCount(meta.inputTokens)} in · ${formatTokenCount(meta.outputTokens)} out`)
-      }
-      if (meta.cacheHitRate > 0) {
-        lines.push(`• Cache hit: ${meta.cacheHitRate}%`)
-      }
-      if (meta.llmDurationMs > 0 || meta.toolDurationMs > 0) {
-        const durParts: string[] = []
-        if (meta.llmDurationMs > 0) durParts.push(`LLM ${formatDuration(meta.llmDurationMs)}`)
-        if (meta.toolDurationMs > 0) durParts.push(`Tools ${formatDuration(meta.toolDurationMs)}`)
-        lines.push(`• Duration: ${durParts.join(' · ')}`)
-      }
-      if (meta.ttftAvgMs > 0) {
-        lines.push(`• TTFT avg: ${formatDuration(meta.ttftAvgMs)}`)
-      }
-      if (meta.tokensPerSecond > 0) {
-        lines.push(`• Throughput: ${meta.tokensPerSecond} tok/s`)
-      }
-    }
-    if (meta.contextWindow > 0) {
-      const pct = Math.min(100, Math.round(meta.lastInputTokens / meta.contextWindow * 100))
-      lines.push(`• Context: ${formatTokenCount(meta.lastInputTokens)} / ${formatTokenCount(meta.contextWindow)} (${pct}%)`)
-    }
-    return lines.join('\n')
-  },
-  streamDescription: 'Toggle intermediate assistant messages during agent turns',
-  stopDescription: 'Stop the currently running agent in this chat (like the WebUI stop button)',
-  reasoningDescription: 'Show or change the model reasoning effort (thinking intensity)',
-  reasoningUsage: 'Usage: /reasoning [off|low|high|max] [show on|off]',
-  reasoningCurrent: (effort: string) => `🧠 Current reasoning effort: **${effort}**`,
-  reasoningCurrentDefault: '(provider default)',
-  reasoningSwitched: (effort: string) => `🧠 Reasoning effort switched to **${effort}**. Persisted across restarts.`,
-  reasoningLevels: 'Available levels: `off` · `low` · `high` · `max`\nUse `/reasoning show on|off` to toggle reasoning content display.',
-  reasoningUnknown: (level: string) => `Unknown reasoning level "${level}".`,
-  reasoningShowToggled: (enabled: boolean) => `🧠 Reasoning content display: **${enabled ? 'on' : 'off'}**. Persisted across restarts.`,
+// Active command-layer translations. Kept in sync with the resolved locale by
+// the apply closure (see `setActiveCommandTranslations`); module-level command
+// handlers read this single cell so they render in the user's language without
+// threading a `t` through every call site.
+let activeCommandTranslations: CommandTranslations = commandTranslationsFor('zh')
+function setActiveCommandTranslations(locale: 'zh' | 'en'): void {
+  activeCommandTranslations = commandTranslationsFor(locale)
 }
 
 /** Render the /status result as a Feishu interactive card. */
@@ -759,26 +698,26 @@ function renderStatusCard(meta: {
   sessionId: string; workspace: string; agentPreset: string; model: string; reasoningEffort: string; title: string
   turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number
   contextWindow: number; lastInputTokens: number
-}, agentRunning: boolean, sandboxMode?: string, busyMode?: string): object {
+}, agentRunning: boolean, sandboxMode?: string, busyMode?: string, t: Translations = translationsFor('zh')): object {
   const fields: string[] = []
-  fields.push(`**Session:** \`${meta.sessionId}\``)
-  if (meta.title !== '') fields.push(`**Title:** ${meta.title}`)
-  fields.push(`**Workspace:** \`${meta.workspace || '(default)'}\``)
-  fields.push(`**Preset:** \`${meta.agentPreset || '(default)'}\``)
-  fields.push(`**Model:** \`${meta.model}\``)
-  if (meta.reasoningEffort !== '') fields.push(`**Reasoning:** \`${meta.reasoningEffort}\``)
+  fields.push(`**${t.statusSessionLabel}:** \`${meta.sessionId}\``)
+  if (meta.title !== '') fields.push(`**${t.statusTitleLabel}:** ${meta.title}`)
+  fields.push(`**${t.statusWorkspaceLabel}:** \`${meta.workspace || '(default)'}\``)
+  fields.push(`**${t.statusPresetLabel}:** \`${meta.agentPreset || '(default)'}\``)
+  fields.push(`**${t.statusModelLabel}:** \`${meta.model}\``)
+  if (meta.reasoningEffort !== '') fields.push(`**${t.statusReasoningLabel}:** \`${meta.reasoningEffort}\``)
   if (sandboxMode !== undefined) {
     const label = PERMISSION_LABELS[sandboxMode] ?? sandboxMode
     const icon = sandboxMode === 'workspace-write' ? ' ✍️' : sandboxMode === 'danger-full-access' ? ' 🔓' : sandboxMode === 'read-only' ? ' 📖' : ''
-    fields.push(`**Permission:** \`${sandboxMode}\` ${label}${icon}`)
+    fields.push(`**${t.statusPermissionLabel}:** \`${sandboxMode}\` ${label}${icon}`)
   }
   if (busyMode !== undefined) {
     // WebUI names this "Enter behavior while busy"; options Queue / Steer.
     const label = busyMode === 'steer' ? 'Steer' : 'Queue'
     const icon = busyMode === 'steer' ? '🎯' : '📥'
-    fields.push(`**Enter while busy:** ${icon} ${label}`)
+    fields.push(`**${t.statusBusyLabel}:** ${icon} ${label}`)
   }
-  fields.push(`**Agent:** ${agentRunning ? '🔄 Running' : '⏸️ Idle'}`)
+  fields.push(`**${t.statusAgentLabel}:** ${agentRunning ? t.statusAgentRunning : t.statusAgentIdle}`)
   if (meta.turns > 0 || meta.steps > 0) {
     const parts: string[] = [`${meta.turns} turns`, `${meta.steps} steps`]
     if (meta.toolCalls > 0) parts.push(`${meta.toolCalls} tool calls`)
@@ -793,7 +732,7 @@ function renderStatusCard(meta: {
   }
   if (agentRunning) {
     fields.push('')
-    fields.push('> ⚠️ Agent 正在运行中，以上信息可能并非最新。请在 Agent 运行结束后再次发送 `/status` 获取准确信息。')
+    fields.push(t.statusRunWarning)
   }
   return {
     schema: '2.0',
@@ -811,7 +750,7 @@ async function handleDetachDirect(
   rawInput: string,
   bridge: HarnessConversationService,
 ): Promise<{ kind: 'success' | 'error'; text: string }> {
-  const t = larkCommandTranslations
+  const t = activeCommandTranslations
   const index = Number.parseInt(rawInput.trim(), 10)
   if (!Number.isInteger(index) || index < 1) {
     return { kind: 'error', text: `${t.detachInvalidIndex}\n${t.detachUsage}` }
@@ -915,6 +854,10 @@ async function executeSlashCommand(
   approvals?: ApprovalControl,
   showReasoning?: { get: () => boolean; toggle: () => void },
   sessionCard?: FeishuSessionHandle,
+  localeControl?: {
+    current: () => { id: LocaleId; plugin: 'zh' | 'en' | 'auto'; dsh: string | undefined }
+    set: (value: 'zh' | 'en' | 'auto') => Promise<void>
+  },
 ): Promise<
   | { kind: 'success' | 'error'; text: string; card?: object }
   | { kind: 'consumed' }
@@ -944,7 +887,34 @@ async function executeSlashCommand(
     const session = agents?.get(sessionId)?.session as any
     const sandboxMode = sandboxPolicy?.resolve?.({ session })?.mode
     const busyMode = bridge.busyMode(chatMessage)
-    return { kind: 'success', text: '', card: renderStatusCard(meta, agentRunning, sandboxMode, busyMode) }
+    return { kind: 'success', text: '', card: renderStatusCard(meta, agentRunning, sandboxMode, busyMode, translationsFor(localeControl?.current().id ?? 'zh')) }
+  }
+  if (parsed.name === 'lang') {
+    const arg = parsed.rawInput.trim().toLowerCase()
+    const current = localeControl?.current() ?? { id: 'zh' as LocaleId, plugin: 'auto' as const, dsh: undefined }
+    const LANG_STRS: Record<string, string> = { zh: '中文', en: 'English', auto: 'auto' }
+    const describe = (): string => {
+      const label = LANG_STRS[current.id] ?? current.id
+      const source = current.plugin === 'auto'
+        ? (current.dsh === undefined
+            ? '跟随 DSH 优先 / 默认中文'
+            : `跟随 DSH（\`${current.dsh}\`）`)
+        : `由插件锁定（\`${current.plugin}\`）`
+      return `当前语言：**${label}**（${source}）`
+    }
+    if (arg === '' || arg === 'show') {
+      return { kind: 'success', text: describe() }
+    }
+    if (arg === 'zh' || arg === 'en') {
+      await localeControl?.set(arg)
+      const after = localeControl?.current()
+      return { kind: 'success', text: after === undefined ? '已切换。' : `已切换为 **${LANG_STRS[after.id]}**。${describe()}` }
+    }
+    if (arg === 'auto') {
+      await localeControl?.set('auto')
+      return { kind: 'success', text: `已切换为跟随 DSH 语言。${describe()}` }
+    }
+    return { kind: 'error', text: `用法：\`/lang [zh|en|auto]\`\n- \`zh\` 中文 · \`en\` English · \`auto\` 跟随 DSH\n当前：**${LANG_STRS[current.id] ?? current.id}**` }
   }
   if (parsed.name === 'new') {
     const args = parsed.rawInput.trim().split(/\s+/).filter(s => s !== '')
@@ -959,11 +929,11 @@ async function executeSlashCommand(
     }
     // Text form: /new <workspace> <agentPreset> [provider/model[:reasoning]]
     if (args.length < 2) {
-      return { kind: 'error', text: larkCommandTranslations.newUsage }
+      return { kind: 'error', text: activeCommandTranslations.newUsage }
     }
     const [workspaceArg, presetArg, modelArg] = args
     if (workspaceArg === undefined || presetArg === undefined) {
-      return { kind: 'error', text: larkCommandTranslations.newUsage }
+      return { kind: 'error', text: activeCommandTranslations.newUsage }
     }
     // Validate workspace exists
     if (workspaceRegistry === undefined) {
@@ -1005,7 +975,7 @@ async function executeSlashCommand(
       ...(modelOptions.reasoningEffort !== undefined ? { reasoningEffort: modelOptions.reasoningEffort } : {}),
     }
     if (options.agentPreset === undefined) {
-      return { kind: 'error', text: larkCommandTranslations.newUsage }
+      return { kind: 'error', text: activeCommandTranslations.newUsage }
     }
     if (cardChannel === undefined) {
       return { kind: 'error', text: '⚠️ 卡片通道不可用。' }
@@ -1028,23 +998,23 @@ async function executeSlashCommand(
     }
     if (input === 'list') {
       const sessions = await bridge.listSessions()
-      return { kind: 'success', text: '', card: renderSessionListCard(sessions) }
+      return { kind: 'success', text: '', card: renderSessionListCard(sessions, translationsFor(localeControl?.current().id ?? 'zh')) }
     }
     const index = Number.parseInt(input, 10)
     if (!Number.isInteger(index) || index < 1) {
-      return { kind: 'error', text: `${larkCommandTranslations.threadInvalidIndex}\n${larkCommandTranslations.threadUsage}` }
+      return { kind: 'error', text: `${activeCommandTranslations.threadInvalidIndex}\n${activeCommandTranslations.threadUsage}` }
     }
     const sessions = await bridge.listSessions()
     const entry = sessions[index - 1]
     if (entry === undefined) {
-      return { kind: 'error', text: `${larkCommandTranslations.threadInvalidIndex}\n${larkCommandTranslations.threadUsage}` }
+      return { kind: 'error', text: `${activeCommandTranslations.threadInvalidIndex}\n${activeCommandTranslations.threadUsage}` }
     }
     // Quick switch with the same detach+attach semantics as the panel.
     const outcome = bridge.attachSession(chatMessage, entry.id)
     if (outcome === 'archived') {
-      return { kind: 'error', text: larkCommandTranslations.threadArchived }
+      return { kind: 'error', text: activeCommandTranslations.threadArchived }
     }
-    return { kind: 'success', text: larkCommandTranslations.threadSwitched(index, entry.id) }
+    return { kind: 'success', text: activeCommandTranslations.threadSwitched(index, entry.id) }
   }
   if (parsed.name === 'detach') {
     return await handleDetachDirect(parsed.rawInput.trim(), bridge)
@@ -1268,7 +1238,7 @@ async function executeSlashCommand(
         provider: current.provider,
         model: current.model,
         ...(current.reasoningEffort !== undefined ? { reasoningEffort: String(current.reasoningEffort) } : {}),
-      }) }
+      }, undefined, translationsFor(localeControl?.current().id ?? 'zh')) }
     }
     // V2 flow: create card instance + send by card_id reference.
     const current = agentDefaultModel.currentSelection()
@@ -1277,7 +1247,7 @@ async function executeSlashCommand(
       provider: current.provider,
       model: current.model,
       ...(current.reasoningEffort !== undefined ? { reasoningEffort: String(current.reasoningEffort) } : {}),
-    })
+    }, undefined, translationsFor(localeControl?.current().id ?? 'zh'))
     try {
       await sendModelCardV2(cardChannel, chatMessage, card, modelSelectMaps.cardByMessage, modelSelectMaps.sequenceByCard)
       // V2 card was sent directly via cardkit. Signal "consumed" so channel.ts
@@ -1305,16 +1275,16 @@ async function executeSlashCommand(
   const toEcho = (r: CommandResult) =>
     ({ kind: r.kind, text: r.text ?? `Command /${parsed.name} produced no output.` } as const) as unknown as { kind: 'success' | 'error'; text: string; card?: object }
   if (parsed.name === 'model' && parsed.rawInput.trim() !== '' && llm !== undefined && agentDefaultModel !== undefined) {
-    return toEcho(await handleModelCommand(freeInvocation(parsed.rawInput), llm, agentDefaultModel, bridge, freeChatMessageFor, larkCommandTranslations, (sessionController ?? {}) as never))
+    return toEcho(await handleModelCommand(freeInvocation(parsed.rawInput), llm, agentDefaultModel, bridge, freeChatMessageFor, activeCommandTranslations, (sessionController ?? {}) as never))
   }
   if (parsed.name === 'reasoning' && agentDefaultModel !== undefined) {
-    return toEcho(await handleReasoningCommand(freeInvocation(parsed.rawInput), agentDefaultModel, bridge, freeChatMessageFor, larkCommandTranslations, showReasoning ?? { get: () => false, toggle: () => {} }, (sessionController ?? {}) as never))
+    return toEcho(await handleReasoningCommand(freeInvocation(parsed.rawInput), agentDefaultModel, bridge, freeChatMessageFor, activeCommandTranslations, showReasoning ?? { get: () => false, toggle: () => {} }, (sessionController ?? {}) as never))
   }
   if (parsed.name === 'approvals' && approvals !== undefined) {
-    return toEcho(await handleListApprovalsCommand(freeInvocation(parsed.rawInput), approvals, larkCommandTranslations))
+    return toEcho(await handleListApprovalsCommand(freeInvocation(parsed.rawInput), approvals, activeCommandTranslations))
   }
   if ((parsed.name === 'approve' || parsed.name === 'deny') && approvals !== undefined) {
-    return toEcho(await handleApprovalCommand(freeInvocation(parsed.rawInput), approvals, parsed.name === 'approve' ? 'allowed-once' : 'rejected', larkCommandTranslations))
+    return toEcho(await handleApprovalCommand(freeInvocation(parsed.rawInput), approvals, parsed.name === 'approve' ? 'allowed-once' : 'rejected', activeCommandTranslations))
   }
   if (parsed.name === 'help') {
     // Prefer the full scoped command list when a session/agent exists (a
@@ -1324,8 +1294,8 @@ async function executeSlashCommand(
     // not.
     const scoped = await bridge.resolveAgentOrResume(chatMessage)
     const helpText = scoped !== undefined
-      ? ((await handleHelpCommand(freeInvocation(parsed.rawInput, scoped), commands, larkCommandTranslations))?.text ?? '')
-      : renderFeishuCommandsOnly(larkCommandTranslations)
+      ? ((await handleHelpCommand(freeInvocation(parsed.rawInput, scoped), commands, activeCommandTranslations))?.text ?? '')
+      : renderFeishuCommandsOnly(activeCommandTranslations)
     return { kind: 'success', text: '', card: renderSessionResultCard('🧭 帮助', [helpText]) }
   }
   // Stash the chat coordinates so the registered handler can find them

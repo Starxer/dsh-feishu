@@ -567,6 +567,7 @@ const FEISHU_INTERCEPTED_COMMANDS: Array<{ name: string; description: string; hi
   { name: 'steer', description: '把一条消息注入当前运行中的 turn（运行中插话，/queue 的共轭）', hint: '<内容>' },
   { name: 'queue', description: '把一条消息排队为新一轮运行（/steer 的共轭）', hint: '<内容>' },
   { name: 'permission', description: '切换本会话的权限（沙箱）模式', hint: '[read-only|workspace-write|danger-full-access]' },
+  { name: 'lang', description: '切换语言（中文 / English，或跟随 DSH）', hint: '[zh|en|auto]' },
 ]
 export { FEISHU_INTERCEPTED_COMMANDS }
 

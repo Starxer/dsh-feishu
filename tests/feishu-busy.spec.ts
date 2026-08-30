@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { renderBusyCard, startFeishuBusy, BUSY_MODES } from '../src/feishu-busy.ts'
 import type { BusyMode } from '../src/harness.ts'
+import { translationsFor } from '../src/i18n.ts'
+
+const t = translationsFor('zh')
 
 function buttonsOf(card: any): any[] {
   return card.body.elements.filter((el: any) => el.tag === 'button')
@@ -12,9 +15,9 @@ function textOf(button: any): string {
 
 describe('renderBusyCard', () => {
   it('shows the current mode and marks the active button disabled', () => {
-    const card = renderBusyCard('steer') as any
+    const card = renderBusyCard('steer', t) as any
     const markdown = card.body.elements.filter((el: any) => el.tag === 'markdown').map((el: any) => el.content).join('\n')
-    expect(markdown).toContain('**运行中（busy）的 Enter 行为：** `steer` Steer')
+    expect(markdown).toContain('**运行中（busy）的 Enter 行为** `steer` Steer')
     expect(card.header.title.content).toBe('Enter while busy')
     const buttons = buttonsOf(card)
     expect(buttons).toHaveLength(2)
@@ -24,7 +27,7 @@ describe('renderBusyCard', () => {
   })
 
   it('marks the queue option by default value', () => {
-    const card = renderBusyCard('queue') as any
+    const card = renderBusyCard('queue', t) as any
     const active = buttonsOf(card).find((b: any) => textOf(b).startsWith('✓ '))
     expect(textOf(active)).toContain('Queue')
     expect(active.disabled).toBe(true)
@@ -43,6 +46,7 @@ describe('startFeishuBusy', () => {
       getMode,
       setMode,
       logger: { warn: vi.fn(), error: vi.fn() },
+      getTranslations: () => t,
     } as any)
 
     const mid = await handle.open({ chatId: 'oc_1', chatType: 'p2p' })
@@ -70,6 +74,7 @@ describe('startFeishuBusy', () => {
       getMode: () => 'queue' as BusyMode,
       setMode,
       logger: { warn: vi.fn(), error: vi.fn() },
+      getTranslations: () => t,
     } as any)
     // Unrelated card (no p:'busy') must not switch.
     await actionHandler!({ messageId: 'om_card', action: { value: JSON.stringify({ p: 'other', mode: 'steer' }) } })

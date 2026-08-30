@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { startFeishuOnboarding, type FeishuOnboardingDeps } from '../src/feishu-onboarding.ts'
+import { translationsFor } from '../src/i18n.ts'
+
+const t = translationsFor('zh')
 
 interface FakeChannel {
   send: ReturnType<typeof vi.fn>
@@ -57,6 +60,7 @@ function deps(channel: FakeChannel, bridgeHolder: { current: any }): FeishuOnboa
     agentDefaultModel: { currentSelection: () => ({ provider: 'openai', model: 'gpt-4o' }) },
     config: { workspace: '/ws-1', agentPreset: 'default', provider: 'openai', model: 'gpt-4o' },
     onModelStep: vi.fn(async () => undefined),
+    getTranslations: () => t,
   }
 }
 
@@ -113,7 +117,7 @@ describe('feishu-onboarding', () => {
     await fire(handlers, { chatId: 'oc_1', messageId: 'm-ref', action: { value: JSON.stringify({ kind: 'pick-workspace', value: '/ws-2' }) } })
     expect(channel.updateCardInstance).toHaveBeenCalled()
     card = channel.updateCardInstance.mock.calls.at(-1)![1] as any
-    expect(JSON.stringify(card)).toContain('选择 Agent 模板')
+    expect(JSON.stringify(card)).toContain('选择 Agent 预设')
     // pick preset → model step
     await fire(handlers, { chatId: 'oc_1', messageId: 'm-ref', action: { value: JSON.stringify({ kind: 'pick-preset', value: 'researcher' }) } })
     expect(onModelStep).toHaveBeenCalledWith(
@@ -140,7 +144,7 @@ describe('feishu-onboarding', () => {
     expect(create).toHaveBeenCalledWith(expect.stringMatching(/\/projects\/my-app$/))
     expect(channel.createCardInstance).toHaveBeenCalled()
     const card = channel.createCardInstance.mock.calls.at(-1)![0] as any
-    expect(JSON.stringify(card)).toContain('选择 Agent 模板')
+    expect(JSON.stringify(card)).toContain('选择 Agent 预设')
     handle.dispose()
   })
 

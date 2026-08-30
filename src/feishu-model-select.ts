@@ -14,6 +14,7 @@ import type { AgentDefaultModelConfig } from '@deepseek-ai/dsh-agent-default-mod
 import type { LlmProviderInfo, LlmModelInfo } from '@deepseek-ai/dsh-llm'
 import type { HarnessConversationService } from './harness.ts'
 import type { ConversationMessage } from './conversation.ts'
+import type { Translations } from './i18n.ts'
 
 /** Minimal logger surface. */
 interface PluginLogger {
@@ -94,13 +95,15 @@ export type ModelCardFlow = 'new-session' | undefined
 // Card rendering — two-step dropdown flow
 // ---------------------------------------------------------------------------
 
-const REASONING_EFFORT_OPTIONS = [
-  { label: 'default（不指定）', value: 'default' },
-  { label: 'off（关闭思考）', value: 'off' },
-  { label: 'low（轻度思考）', value: 'low' },
-  { label: 'high（深度思考）', value: 'high' },
-  { label: 'max（最大思考）', value: 'max' },
-]
+function reasoningEffortOptions(t: Translations): Array<{ label: string; value: string }> {
+  return [
+    { label: t.modelEffortDefault, value: 'default' },
+    { label: t.modelEffortOff, value: 'off' },
+    { label: t.modelEffortLow, value: 'low' },
+    { label: t.modelEffortHigh, value: 'high' },
+    { label: t.modelEffortMax, value: 'max' },
+  ]
+}
 
 function buildProviderOptions(providers: readonly LlmProviderInfo[]): object[] {
   return providers.map(p => ({
@@ -121,7 +124,8 @@ function buildModelOptions(models: readonly LlmModelInfo[]): object[] {
 export function renderProviderSelectCard(
   providers: readonly LlmProviderInfo[],
   current: ModelSelection,
-  flow?: ModelCardFlow,
+  flow: ModelCardFlow | undefined,
+  t: Translations,
 ): object {
   const effort = current.reasoningEffort !== undefined && current.reasoningEffort !== ''
     ? current.reasoningEffort
@@ -131,23 +135,23 @@ export function renderProviderSelectCard(
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: flow === 'new-session' ? '🤖 模型选择（新建会话）' : '🤖 模型选择' },
+      title: { tag: 'plain_text', content: flow === 'new-session' ? t.modelSelectNewSessionTitle : t.modelSelectTitle(false) },
       template: 'blue',
     },
     body: {
       elements: [
         {
           tag: 'markdown',
-          content: `**当前模型**　\`${current.provider}/${current.model}\`\n🧭 思考强度：\`${effort}\``,
+          content: t.modelSelectCurrent(current.provider, current.model, effort),
         },
         { tag: 'hr' },
         {
           tag: 'markdown',
-          content: '**选择 Provider**',
+          content: t.modelSelectProviderHeader,
         },
         {
           tag: 'select_static',
-          placeholder: { tag: 'plain_text', content: '选择 Provider...' },
+          placeholder: { tag: 'plain_text', content: t.modelSelectProviderPlaceholder },
           options: buildProviderOptions(providers),
           value: current.provider,
           behaviors: [{
@@ -170,9 +174,10 @@ export function renderModelSelectCard(
   models: readonly LlmModelInfo[],
   selectedProvider: string,
   selectedModel: string,
-  currentEffort?: string,
-  supportsReasoning = true,
-  flow?: ModelCardFlow,
+  currentEffort: string | undefined,
+  supportsReasoning: boolean,
+  flow: ModelCardFlow | undefined,
+  t: Translations,
 ): object {
   const modelOptions = buildModelOptions(models)
 
@@ -183,7 +188,7 @@ export function renderModelSelectCard(
 
   // Reasoning effort dropdown options
   const effortValue = currentEffort !== undefined && currentEffort !== '' ? currentEffort : 'default'
-  const effortOptions = REASONING_EFFORT_OPTIONS.map(o => ({
+  const effortOptions = reasoningEffortOptions(t).map(o => ({
     text: { tag: 'plain_text', content: o.label },
     value: o.value,
   }))
@@ -192,12 +197,12 @@ export function renderModelSelectCard(
   const formElements: object[] = [
     {
       tag: 'markdown',
-      content: '**选择模型**',
+      content: t.modelSelectModelHeader,
     },
     {
       tag: 'select_static',
       name: 'model',
-      placeholder: { tag: 'plain_text', content: modelOptions.length > 0 ? '选择模型...' : '该 Provider 下暂无可用模型' },
+      placeholder: { tag: 'plain_text', content: t.modelSelectModelPlaceholder(modelOptions.length === 0) },
       options: modelOptions,
       value: selectedModel,
     },
@@ -206,12 +211,12 @@ export function renderModelSelectCard(
   if (supportsReasoning) {
     formElements.push({
       tag: 'markdown',
-      content: '**思考强度**',
+      content: t.modelSelectEffortHeader,
     })
     formElements.push({
       tag: 'select_static',
       name: 'reasoning_effort',
-      placeholder: { tag: 'plain_text', content: '选择思考强度...' },
+      placeholder: { tag: 'plain_text', content: t.modelSelectEffortPlaceholder },
       options: effortOptions,
       value: effortValue,
     })
@@ -219,7 +224,7 @@ export function renderModelSelectCard(
 
   formElements.push({
     tag: 'button',
-    text: { tag: 'plain_text', content: flow === 'new-session' ? '✅ 确认并创建会话' : '✅ 确认切换' },
+    text: { tag: 'plain_text', content: t.modelSelectConfirm(flow === 'new-session') },
     type: 'primary',
     name: 'confirm',
     form_action_type: 'submit',
@@ -232,7 +237,7 @@ export function renderModelSelectCard(
   const elements: object[] = [
     {
       tag: 'markdown',
-      content: `**Provider**　\`${providerLabel}\``,
+      content: t.modelSelectProviderLabel(providerLabel),
     },
     { tag: 'hr' },
     {
@@ -243,7 +248,7 @@ export function renderModelSelectCard(
     // Back button — outside the form so it triggers a regular callback.
     {
       tag: 'button',
-      text: { tag: 'plain_text', content: '← 返回选择 Provider' },
+      text: { tag: 'plain_text', content: t.modelSelectBack },
       type: 'default',
       behaviors: [{
         type: 'callback',
@@ -256,7 +261,7 @@ export function renderModelSelectCard(
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: '🤖 模型选择' },
+      title: { tag: 'plain_text', content: t.modelSelectTitle(false) },
       template: 'blue',
     },
     body: { elements },
@@ -264,27 +269,27 @@ export function renderModelSelectCard(
 }
 
 /** Confirmation card after a successful switch. */
-function renderSwitchedCard(provider: string, model: string, name?: string, reasoningEffort?: string): object {
+function renderSwitchedCard(provider: string, model: string, name: string | undefined, reasoningEffort: string | undefined, t: Translations): object {
   const label = name !== undefined && name !== '' && name !== model
     ? `${name} (\`${provider}/${model}\`)`
     : `\`${provider}/${model}\``
   const effortLine = reasoningEffort !== undefined && reasoningEffort !== ''
-    ? `\n🧠 思考强度：\`${reasoningEffort}\``
+    ? `\n${t.modelSelectEffortLine(reasoningEffort)}`
     : ''
   return {
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: '🤖 模型选择' },
+      title: { tag: 'plain_text', content: t.modelSelectTitle(false) },
       template: 'green',
     },
     body: {
       elements: [
         {
           tag: 'markdown',
-          content: '✅ **已切换**\n\n' +
+          content: `${t.modelSelectSwitchedHeader}\n\n` +
             `🔹 ${label}${effortLine}\n\n` +
-            '下一轮对话将使用新模型。',
+            t.modelSelectSwitchedNext,
         },
       ],
     },
@@ -407,6 +412,8 @@ export function startFeishuModelSelect(deps: {
   sessionController: SessionControllerLike
   channel: ModelSelectChannel
   logger: PluginLogger
+  /** Return the strings for the ACTIVE locale, read at render time. */
+  getTranslations: () => Translations
   /** When set, confirm actions carrying the `new-session` flow marker are
    *  forwarded here instead of applying the model switch. Used by the
    *  `/new` card flow, which reuses the provider/model cards but commits the
@@ -418,7 +425,7 @@ export function startFeishuModelSelect(deps: {
    *  would target the main chat key instead of the topic key. */
   topicFor?: (chatId: string) => { rootId?: string; threadId?: string }
 }): { dispose: () => void; cardByMessage: Map<string, string>; sequenceByCard: Map<string, number> } {
-  const { llm, agentDefaultModel, bridgeHolder, sessionController, channel, logger, onNewSessionConfirm, topicFor } = deps
+  const { llm, agentDefaultModel, bridgeHolder, sessionController, channel, logger, getTranslations, onNewSessionConfirm, topicFor } = deps
 
   const processing = new Map<string, true>()
   const actionQueue = new Map<string, QueuedAction[]>()
@@ -490,7 +497,7 @@ export function startFeishuModelSelect(deps: {
     }
 
     const providers = llm.listProviders()
-    const card = renderModelSelectCard(providers, models, provider, current.model, current.reasoningEffort, supportsReasoning, flow)
+    const card = renderModelSelectCard(providers, models, provider, current.model, current.reasoningEffort, supportsReasoning, flow, getTranslations())
     await updateCardInstanceOnMessage(messageId, chatMessage, card)
   }
 
@@ -504,7 +511,7 @@ export function startFeishuModelSelect(deps: {
     if (bridge === undefined) return
     const current = agentDefaultModel.currentSelection()
     const providers = llm.listProviders()
-    const card = renderProviderSelectCard(providers, current, flow)
+    const card = renderProviderSelectCard(providers, current, flow, getTranslations())
     await updateCardInstanceOnMessage(messageId, chatMessage, card)
   }
 
@@ -576,17 +583,15 @@ export function startFeishuModelSelect(deps: {
       const card = {
         schema: '2.0',
         config: { wide_screen_mode: true },
-        header: { title: { tag: 'plain_text', content: '🤖 模型选择' }, template: 'red' },
-        body: { elements: [{ tag: 'markdown', content: `⚠️ **切换失败**
-
-${msg}` }] },
+        header: { title: { tag: 'plain_text', content: getTranslations().modelSelectTitle(false) }, template: 'red' },
+        body: { elements: [{ tag: 'markdown', content: `${getTranslations().modelSelectFailHeader}\n\n${msg}` }] },
       }
       await updateCardInstanceOnMessage(messageId, chatMessage, card)
       return
     }
 
     // Step 3: Show success card.
-    const card = renderSwitchedCard(provider, model, modelName, effectiveReasoningEffort)
+    const card = renderSwitchedCard(provider, model, modelName, effectiveReasoningEffort, getTranslations())
     await updateCardInstanceOnMessage(messageId, chatMessage, card)
   }
 
@@ -640,7 +645,7 @@ ${msg}` }] },
               if (bridge === undefined) break
               const current = agentDefaultModel.currentSelection()
               const providers = llm.listProviders()
-              const card = renderProviderSelectCard(providers, current, item.flow)
+              const card = renderProviderSelectCard(providers, current, item.flow, getTranslations())
               await updateCardInstanceOnMessage(item.messageId, item.chatMessage, card)
               break
             }

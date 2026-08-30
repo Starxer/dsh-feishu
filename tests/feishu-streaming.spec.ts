@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { deriveToolSummary, renderStepCard } from '../src/feishu-streaming.ts'
+import { translationsFor } from '../src/i18n.ts'
+
+const t = translationsFor('zh')
 
 function codeBlocksOf(card: any): string[] {
   return card.body.elements
@@ -11,7 +14,7 @@ function codeBlocksOf(card: any): string[] {
 describe('renderStepCard tool result/args rendering', () => {
   it('falls back to the raw result when a matched card view has no content', () => {
     // bash terminal view without `output` → must still show the raw result.
-    const card = renderStepCard(undefined, undefined, [{
+    const card = renderStepCard(t, undefined, undefined, [{
       toolName: 'bash', callId: 'c1', arguments: '{"command":"ls"}', startedAt: 0,
       result: { isError: false, content: 'out.txt\nin.txt', elapsed: 12 },
       resultView: { card: 'terminal' },
@@ -21,7 +24,7 @@ describe('renderStepCard tool result/args rendering', () => {
   })
 
   it('renders args in a fenced code block, tolerating backticks', () => {
-    const card = renderStepCard(undefined, undefined, [{
+    const card = renderStepCard(t, undefined, undefined, [{
       toolName: 'bash', callId: 'c1', arguments: '{"command":"echo `x`"}', startedAt: 0,
       result: { isError: false, content: 'ok', elapsed: 5 },
       resultView: { card: 'terminal', output: 'ok' },

@@ -1,4 +1,5 @@
 import z from '@deepseek-ai/schemastery'
+import type { PluginLocale } from './i18n.ts'
 
 export type DomainName = 'feishu' | 'lark'
 export type DirectMessageMode = 'open' | 'allowlist' | 'disabled'
@@ -30,6 +31,8 @@ export interface Config {
   showIntermediateMessages?: boolean
   /** Show model reasoning/thinking content in tool call cards and final reply. */
   showReasoning?: boolean
+  /** Plugin language; `auto` (default) follows the DSH browser-language preference. */
+  locale?: PluginLocale
 }
 
 export interface SettingsConfig extends Required<Pick<Config,
@@ -40,6 +43,8 @@ export interface SettingsConfig extends Required<Pick<Config,
   model?: string
   workspace?: string
   agentPreset?: string
+  /** Plugin language; `auto` follows the DSH browser-language preference. */
+  locale?: PluginLocale
 }
 
 export interface RuntimeConfig extends Omit<SettingsConfig, 'appSecretRef'> {
@@ -64,6 +69,7 @@ export const ConfigSchema: z<Config> = z.object({
   reactEmoji: z.string().default(DEFAULT_REACTION_EMOJI).description('Emoji reaction added to each inbound message; empty string disables it'),
   showIntermediateMessages: z.boolean().default(true).description('Show intermediate assistant messages during agent turns (not just tool calls and final reply)'),
   showReasoning: z.boolean().default(true).description('Show model reasoning/thinking content in tool call cards and final reply'),
+  locale: z.union(['auto', 'zh', 'en']).default('auto').description('Plugin language; auto follows the DSH browser-language preference'),
 })
 
 export function resolveSettingsConfig(config: Config): SettingsConfig {
@@ -88,6 +94,7 @@ export function resolveSettingsConfig(config: Config): SettingsConfig {
     ...(config.model === undefined ? {} : { model: config.model }),
     ...(config.workspace === undefined ? {} : { workspace: config.workspace }),
     ...(config.agentPreset === undefined ? {} : { agentPreset: config.agentPreset }),
+    ...(config.locale === undefined ? {} : { locale: config.locale }),
   }
 }
 

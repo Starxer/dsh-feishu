@@ -8,6 +8,7 @@ import type { AttachmentStore, ImageAttachmentRef, SaveImageAttachment } from '@
 import type { RuntimeConfig } from './config.ts'
 import type { HarnessConversationService, InboundMessage } from './harness.ts'
 import type { BusyMode } from './harness.ts'
+import { translationsFor, type Translations } from './i18n.ts'
 import { TurnDroppedError } from './harness.ts'
 import type { TurnStats } from './feishu-streaming.ts'
 import { errorText } from './error-text.ts'
@@ -209,6 +210,7 @@ export async function startChannel(
     needsOnboarding(msg: NormalizedMessage): Promise<boolean>
     sendOnboardingCard(msg: NormalizedMessage): Promise<void>
   },
+  getTranslations?: () => Translations,
 ): Promise<{ stop: () => Promise<void>; channel: LarkChannel }> {
   const logError = (message: string) => {
     logger.error(message)
@@ -370,7 +372,7 @@ export async function startChannel(
             // Streaming already sent a step card with the text content.
             // Wait for the final step card update to complete, then send the footer.
             const turnStats = await flushed?.(sessionId)
-            const footerCard = renderFooterCard(meta, turnStats)
+            const footerCard = renderFooterCard(getTranslations?.() ?? translationsFor('zh'), meta, turnStats)
             if (footerCard !== undefined) {
               await channel.send(chatId, { card: footerCard }, {
                 replyTo: replyToId,
@@ -543,6 +545,7 @@ function renderReplyCard(text: string, meta?: ReplyCardMeta, reasoning?: string)
  * Returns undefined when there's nothing to show.
  */
 export function renderFooterCard(
+  t: Translations,
   meta?: ReplyCardMeta,
   turnStats?: TurnStats,
 ): object | undefined {
@@ -614,7 +617,7 @@ export function renderFooterCard(
   if (meta?.busyMode !== undefined) {
     const label = meta.busyMode === 'steer' ? 'Steer' : 'Queue'
     const icon = meta.busyMode === 'steer' ? '🎯' : '📥'
-    metaParts.push(`**Enter while busy:** ${icon} ${label}`)
+    metaParts.push(`**${t.enterWhileBusy}:** ${icon} ${label}`)
   }
 
   // If nothing to show, return undefined.
@@ -634,7 +637,7 @@ export function renderFooterCard(
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: 'Turn Complete' },
+      title: { tag: 'plain_text', content: t.turnCompleteTitle },
       template: 'green',
     },
     body: { elements },

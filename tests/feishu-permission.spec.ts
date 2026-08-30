@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { renderPermissionCard, startFeishuPermission, PERMISSION_LABELS, SANDBOX_MODES } from '../src/feishu-permission.ts'
+import { translationsFor } from '../src/i18n.ts'
+
+const t = translationsFor('en')
 
 function buttonsOf(card: any): any[] {
   return card.body.elements.filter((el: any) => el.tag === 'button')
@@ -7,9 +10,9 @@ function buttonsOf(card: any): any[] {
 
 describe('renderPermissionCard', () => {
   it('shows the current mode and marks the active button disabled', () => {
-    const card = renderPermissionCard('workspace-write') as any
+    const card = renderPermissionCard('workspace-write', t) as any
     const markdown = card.body.elements.filter((el: any) => el.tag === 'markdown').map((el: any) => el.content).join('\n')
-    expect(markdown).toContain('**当前权限模式：** `workspace-write` Workspace Write')
+    expect(markdown).toContain('**Current permission mode:** `workspace-write` Workspace Write')
     const buttons = buttonsOf(card)
     expect(buttons).toHaveLength(3)
     const active = buttons.find((b: any) => textOf(b).startsWith('✓ '))
@@ -18,7 +21,7 @@ describe('renderPermissionCard', () => {
   })
 
   it('renders Full access as danger and Read Only as default', () => {
-    const card = renderPermissionCard('read-only') as any
+    const card = renderPermissionCard('read-only', t) as any
     const buttons = buttonsOf(card)
     const full = buttons.find((b: any) => textOf(b).includes('Full access'))
     const readOnly = buttons.find((b: any) => textOf(b).includes('Read Only'))
@@ -41,6 +44,7 @@ describe('startFeishuPermission', () => {
       sandbox,
       sessionGetter: () => session,
       logger: { warn: vi.fn(), error: vi.fn() },
+      getTranslations: () => t,
     } as any)
 
     const mid = await handle.open({ chatId: 'oc_1', chatType: 'p2p' }, 'session-1')
@@ -69,6 +73,7 @@ describe('startFeishuPermission', () => {
       sandbox: { resolve: () => ({ mode: 'workspace-write' }) },
       sessionGetter: () => session,
       logger: { warn: vi.fn(), error: vi.fn() },
+      getTranslations: () => t,
     } as any)
     // Unrelated card (no p:'permission') must not switch.
     await actionHandler!({ messageId: 'om_card', action: { value: JSON.stringify({ p: 'other', mode: 'x' }) } })

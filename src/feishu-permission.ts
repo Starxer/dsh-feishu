@@ -17,6 +17,7 @@
  */
 
 import type { ConversationMessage } from './conversation.ts'
+import type { Translations } from './i18n.ts'
 import { decodeCardValue } from './card-action.ts'
 
 /** DSH file-sandbox / permission preset vocabulary (mirrors `dsh-sandbox-policy`). */
@@ -33,6 +34,16 @@ const MODE_ICON: Record<string, string> = {
   'read-only': '📖',
   'workspace-write': '✍️',
   'danger-full-access': '🔓',
+}
+
+/** Locale-aware label for a sandbox mode (falls back to the mode id). */
+function permissionLabel(mode: string, t: Translations): string {
+  switch (mode) {
+    case 'read-only': return t.permissionReadOnly
+    case 'workspace-write': return t.permissionWorkspaceWrite
+    case 'danger-full-access': return t.permissionFullAccess
+    default: return mode
+  }
 }
 
 /** Narrow card-action event surface the picker consumes. */
@@ -64,6 +75,8 @@ export interface FeishuPermissionDeps {
   sandbox: PermissionSandbox | undefined
   sessionGetter: (id: string) => PermissionSession | undefined
   logger: { warn(message: string): unknown; error(message: string): unknown }
+  /** Return the strings for the ACTIVE locale, read at render time. */
+  getTranslations: () => Translations
 }
 
 export interface FeishuPermissionHandle {
@@ -74,16 +87,16 @@ export interface FeishuPermissionHandle {
 }
 
 /** Render the permission picker card with the active mode marked. */
-export function renderPermissionCard(current: string): object {
+export function renderPermissionCard(current: string, t: Translations): object {
   const elements: object[] = [
-    { tag: 'markdown', content: `**当前权限模式：** \`${current}\` ${PERMISSION_LABELS[current] ?? current} ${MODE_ICON[current] ?? ''}` },
-    { tag: 'markdown', content: '_点击下方按钮切换本会话的权限（沙箱）模式。切换写入会话日志，下一次受限调用（bash / 文件系统）即生效。_' },
+    { tag: 'markdown', content: `${t.permissionCurrent(current)} ${permissionLabel(current, t)} ${MODE_ICON[current] ?? ''}` },
+    { tag: 'markdown', content: t.permissionHint },
   ]
   for (const mode of SANDBOX_MODES) {
     const active = mode === current
     elements.push({
       tag: 'button',
-      text: { tag: 'plain_text', content: `${active ? '✓ ' : ''}${PERMISSION_LABELS[mode] ?? mode}` },
+      text: { tag: 'plain_text', content: `${active ? '✓ ' : ''}${permissionLabel(mode, t)}` },
       type: mode === 'danger-full-access' ? 'danger' : mode === 'workspace-write' ? 'primary' : 'default',
       value: JSON.stringify({ p: 'permission', mode }),
       ...(active ? { disabled: true } : {}),
@@ -99,7 +112,7 @@ export function renderPermissionCard(current: string): object {
 
 /** Start the permission picker: send cards on demand and handle button clicks. */
 export function startFeishuPermission(deps: FeishuPermissionDeps): FeishuPermissionHandle {
-  const { channel, sandbox, sessionGetter, logger } = deps
+  const { channel, sandbox, sessionGetter, logger, getTranslations } = deps
   const byCard = new Map<string, { sessionId: string }>()
 
   const onCardAction = async (evt: PermissionCardEvent): Promise<void> => {
@@ -117,7 +130,7 @@ export function startFeishuPermission(deps: FeishuPermissionDeps): FeishuPermiss
     // setSandboxMode(session, mode) — append the log-only switch event.
     session.append('sandbox/mode', { mode: parsed.mode })
     const current = sandbox?.resolve?.({ session })?.mode ?? parsed.mode
-    await channel.updateCard(messageId, renderPermissionCard(current)).catch((error: unknown) => {
+    await channel.updateCard(messageId, renderPermissionCard(current, getTranslations())).catch((error: unknown) => {
       logger.warn(`dsh-feishu: permission card update failed: ${error instanceof Error ? error.message : String(error)}`)
     })
   }
@@ -125,12 +138,12 @@ export function startFeishuPermission(deps: FeishuPermissionDeps): FeishuPermiss
 
   const open = async (chat: ConversationMessage, sessionId: string): Promise<string | undefined> => {
     const session = sessionGetter(sessionId)
-    if (session === undefined) throw new Error('当前 chat 还没有会话，请先发一条消息再执行 /permission')
+    if (session === undefined) throw new Error(getTranslations().permissionNoSession)
     const current = sandbox?.resolve?.({ session })?.mode ?? ''
     const opts = chat.threadId !== undefined
       ? { replyInThread: true, ...(chat.rootId !== undefined ? { replyTo: chat.rootId } : {}) }
       : {}
-    const result = await channel.send(chat.chatId, { card: renderPermissionCard(current) }, opts)
+    const result = await channel.send(chat.chatId, { card: renderPermissionCard(current, getTranslations()) }, opts)
     const messageId = (result as { messageId?: string })?.messageId
     if (messageId !== undefined) byCard.set(messageId, { sessionId })
     return messageId

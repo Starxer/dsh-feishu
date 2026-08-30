@@ -18,6 +18,7 @@
 
 import type { HarnessConversationService, ChatCreationOptions } from './harness.ts'
 import type { ConversationMessage } from './conversation.ts'
+import type { Translations } from './i18n.ts'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -92,6 +93,8 @@ export interface FeishuOnboardingDeps {
   agentPresets: AgentPresetsLike
   agentDefaultModel: AgentDefaultModelLike
   config: OnboardingConfig
+  /** Return the strings for the ACTIVE locale, read at render time. */
+  getTranslations: () => Translations
   /** Advance the `/new` flow to the model step. The caller renders the
    *  model-select provider card (reusing feishu-model-select with flow
    *  `new-session`); the model-select handle's onNewSessionConfirm callback
@@ -186,10 +189,11 @@ function renderOnboardingCard(
   sessions: Array<{ id: string; title: string; ownedBy?: string }>,
   describeChatKey: (key: string) => string,
   threadLabel: string,
+  t: Translations,
 ): object {
   const sessionOptions = sessions.map((session, index) => {
-    const title = session.title === '' ? `会话 ${index + 1} (${session.id.slice(-12)})` : session.title.replace(/\s+/g, ' ').slice(0, 40)
-    const lock = session.ownedBy === undefined ? '' : ` 🔒 ${describeChatKey(session.ownedBy)} 正在使用`
+    const title = session.title === '' ? t.onboardingSessionFallback(index + 1, session.id.slice(-12)) : session.title.replace(/\s+/g, ' ').slice(0, 40)
+    const lock = session.ownedBy === undefined ? '' : t.onboardingInUse(describeChatKey(session.ownedBy))
     return {
       text: { tag: 'plain_text', content: `📎 ${title}${lock}` },
       value: session.id,
@@ -199,21 +203,21 @@ function renderOnboardingCard(
   if (sessions.length === 0) {
     formElements.push({
       tag: 'markdown',
-      content: '当前没有任何历史会话，请点击下方按钮新建一个会话。',
+      content: t.onboardingNoSessions,
     })
   } else {
     formElements.push(
-      { tag: 'markdown', content: '**📚 选择已有会话**' },
+      { tag: 'markdown', content: t.onboardingPickExisting },
       {
         tag: 'select_static',
         name: 'session',
-        placeholder: { tag: 'plain_text', content: '选择会话...' },
+        placeholder: { tag: 'plain_text', content: t.onboardingSelectPlaceholder },
         options: sessionOptions,
         value: sessions[0]!.id,
       },
       {
         tag: 'button',
-        text: { tag: 'plain_text', content: '📎 绑定到该会话' },
+        text: { tag: 'plain_text', content: t.onboardingAttachButton },
         type: 'primary',
         name: 'attach',
         form_action_type: 'submit',
@@ -224,7 +228,7 @@ function renderOnboardingCard(
   formElements.push({ tag: 'hr' })
   formElements.push({
     tag: 'button',
-    text: { tag: 'plain_text', content: '✨ 新建会话' },
+    text: { tag: 'plain_text', content: t.onboardingNewButton },
     type: 'primary',
     behaviors: [{ type: 'callback', value: { kind: 'new' } }],
   })
@@ -232,14 +236,14 @@ function renderOnboardingCard(
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: '🚀 选择会话' },
+      title: { tag: 'plain_text', content: t.onboardingAttachTitle },
       template: 'turquoise',
     },
     body: {
       elements: [
         {
           tag: 'markdown',
-          content: `**👋 开始使用**\n\n${threadLabel} 还没有绑定任何会话。从下方选择一个已有会话继续，或新建一个会话。`,
+          content: t.onboardingIntro(threadLabel),
         },
         { tag: 'hr' },
         { tag: 'form', name: 'onboarding_attach_form', elements: formElements },
@@ -250,13 +254,13 @@ function renderOnboardingCard(
 
 /** Workspace picker card (step 1 of /new): choose an existing workspace or
  *  create a new one by absolute path or a `~`-relative path. */
-function renderWorkspacePicker(workspaces: readonly WorkspaceLike[], currentWorkspace: string | undefined): object {
+function renderWorkspacePicker(workspaces: readonly WorkspaceLike[], currentWorkspace: string | undefined, t: Translations): object {
   const elements: object[] = [
-    { tag: 'markdown', content: '**📁 选择工作区**\n\n新建会话将在这个工作区中运行。' },
+    { tag: 'markdown', content: t.onboardingWorkspaceHeader },
     { tag: 'hr' },
   ]
   if (workspaces.length === 0) {
-    elements.push({ tag: 'markdown', content: '还没有工作区，请在下方输入路径新建一个。' })
+    elements.push({ tag: 'markdown', content: t.onboardingNoWorkspaces })
   }
   for (const ws of workspaces) {
     const label = ws.name !== undefined && ws.name !== '' ? ws.name : ws.path
@@ -271,7 +275,7 @@ function renderWorkspacePicker(workspaces: readonly WorkspaceLike[], currentWork
   elements.push({ tag: 'hr' })
   elements.push({
     tag: 'markdown',
-    content: '**🆕 新建工作区**\n\n输入绝对路径，或 `~` 开头的家目录相对路径。',
+    content: t.onboardingNewWorkspaceHeader,
   })
   elements.push({
     tag: 'form',
@@ -280,12 +284,12 @@ function renderWorkspacePicker(workspaces: readonly WorkspaceLike[], currentWork
       {
         tag: 'input',
         name: 'workspace_path',
-        placeholder: { tag: 'plain_text', content: '如 /home/user/projects/my-app 或 ~/projects/my-app' },
+        placeholder: { tag: 'plain_text', content: t.onboardingWorkspacePlaceholder },
         value: { tag: 'plain_text', content: '' },
       },
       {
         tag: 'button',
-        text: { tag: 'plain_text', content: '✅ 确认新建工作区' },
+        text: { tag: 'plain_text', content: t.onboardingCreateWorkspaceButton },
         type: 'primary',
         name: 'create_ws',
         form_action_type: 'submit',
@@ -295,7 +299,7 @@ function renderWorkspacePicker(workspaces: readonly WorkspaceLike[], currentWork
   })
   elements.push({
     tag: 'button',
-    text: { tag: 'plain_text', content: '← 取消' },
+    text: { tag: 'plain_text', content: `← ${t.cancel}` },
     type: 'default',
     behaviors: [{ type: 'callback', value: { kind: 'cancel' } }],
   })
@@ -303,7 +307,7 @@ function renderWorkspacePicker(workspaces: readonly WorkspaceLike[], currentWork
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: '🆕 新建会话' },
+      title: { tag: 'plain_text', content: t.onboardingNewTitle },
       template: 'blue',
     },
     body: { elements },
@@ -311,13 +315,13 @@ function renderWorkspacePicker(workspaces: readonly WorkspaceLike[], currentWork
 }
 
 /** Agent preset picker card (step 2 of /new). */
-function renderPresetPicker(presets: readonly { id: string; name?: string }[], currentPreset: string | undefined): object {
+function renderPresetPicker(presets: readonly { id: string; name?: string }[], currentPreset: string | undefined, t: Translations): object {
   const elements: object[] = [
-    { tag: 'markdown', content: '**🧩 选择 Agent 模板**\n\n模板决定这个会话拥有哪些能力。' },
+    { tag: 'markdown', content: t.onboardingPresetHeader },
     { tag: 'hr' },
   ]
   if (presets.length === 0) {
-    elements.push({ tag: 'markdown', content: '没有可用模板，将使用默认模板。' })
+    elements.push({ tag: 'markdown', content: t.onboardingNoPresets })
   }
   for (const preset of presets) {
     const label = preset.name !== undefined && preset.name !== '' ? preset.name : preset.id
@@ -331,7 +335,7 @@ function renderPresetPicker(presets: readonly { id: string; name?: string }[], c
   }
   elements.push({
     tag: 'button',
-    text: { tag: 'plain_text', content: '← 取消' },
+    text: { tag: 'plain_text', content: `← ${t.cancel}` },
     type: 'default',
     behaviors: [{ type: 'callback', value: { kind: 'cancel' } }],
   })
@@ -339,7 +343,7 @@ function renderPresetPicker(presets: readonly { id: string; name?: string }[], c
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: '🆕 新建会话' },
+      title: { tag: 'plain_text', content: t.onboardingNewTitle },
       template: 'blue',
     },
     body: { elements },
@@ -347,35 +351,35 @@ function renderPresetPicker(presets: readonly { id: string; name?: string }[], c
 }
 
 /** Session-created success card. */
-function renderCreatedCard(sessionId: string, summary: string): object {
+function renderCreatedCard(sessionId: string, summary: string, t: Translations): object {
   return {
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: '✅ 会话已创建' },
+      title: { tag: 'plain_text', content: t.onboardingCreatedTitle },
       template: 'green',
     },
     body: {
       elements: [
-        { tag: 'markdown', content: `**Session** \`${sessionId}\`\n\n${summary}\n\n现在可以发送消息开始对话了。` },
+        { tag: 'markdown', content: t.onboardingCreatedBody(sessionId, summary) },
       ],
     },
   }
 }
 
 /** Attach success card. */
-function renderAttachedCard(sessionId: string, ownerLabel: string | undefined): object {
-  const takeover = ownerLabel === undefined ? '' : `\n\n🔓 已从 ${ownerLabel} 接管该会话（原占用者已被重置为新会话）。`
+function renderAttachedCard(sessionId: string, ownerLabel: string | undefined, t: Translations): object {
+  const takeover = ownerLabel === undefined ? '' : t.onboardingTakeover(ownerLabel)
   return {
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: '📎 会话已绑定' },
+      title: { tag: 'plain_text', content: t.onboardingAttachedTitle },
       template: 'green',
     },
     body: {
       elements: [
-        { tag: 'markdown', content: `已绑定到会话 \`${sessionId}\`。${takeover}\n\n现在可以发送消息继续对话了。` },
+        { tag: 'markdown', content: t.onboardingAttachedBody(sessionId, takeover) },
       ],
     },
   }
@@ -402,7 +406,7 @@ export interface FeishuOnboardingHandle {
 }
 
 export function startFeishuOnboarding(deps: FeishuOnboardingDeps): FeishuOnboardingHandle {
-  const { bridgeHolder, channel, logger, workspaceRegistry, agentPresets, agentDefaultModel, config, onModelStep } = deps
+  const { bridgeHolder, channel, logger, workspaceRegistry, agentPresets, agentDefaultModel, config, getTranslations, onModelStep } = deps
 
   const cardByMessage = new Map<string, string>()
   const sequenceByCard = new Map<string, number>()
@@ -477,7 +481,7 @@ export function startFeishuOnboarding(deps: FeishuOnboardingDeps): FeishuOnboard
 
   /** Build the workspace picker with the default = deployment config. */
   async function buildWorkspacePicker(_chatMessage: ConversationMessage): Promise<object> {
-    return renderWorkspacePicker(workspaceRegistry.list(), config.workspace)
+    return renderWorkspacePicker(workspaceRegistry.list(), config.workspace, getTranslations())
   }
 
   async function handleAttach(action: QueuedAction): Promise<void> {
@@ -489,15 +493,15 @@ export function startFeishuOnboarding(deps: FeishuOnboardingDeps): FeishuOnboard
       const card = {
         schema: '2.0',
         config: { wide_screen_mode: true },
-        header: { title: { tag: 'plain_text', content: '📎 绑定会话' }, template: 'red' },
-        body: { elements: [{ tag: 'markdown', content: '⚠️ 该会话已被归档，无法绑定。' }] },
+        header: { title: { tag: 'plain_text', content: getTranslations().onboardingAttachArchivedTitle }, template: 'red' },
+        body: { elements: [{ tag: 'markdown', content: getTranslations().onboardingAttachArchivedBody }] },
       }
       await sendCard(action.chatMessage, card, action.messageId)
       return
     }
     const ownerKey = bridge.sessionOwnerKey(sessionId)
     const ownerLabel = ownerKey === undefined ? undefined : bridge.describeChatKey(ownerKey)
-    const card = renderAttachedCard(sessionId, ownerLabel)
+    const card = renderAttachedCard(sessionId, ownerLabel, getTranslations())
     await sendCard(action.chatMessage, card, action.messageId)
   }
 
@@ -513,7 +517,7 @@ export function startFeishuOnboarding(deps: FeishuOnboardingDeps): FeishuOnboard
     newFlow.set(chatKey, flowState)
     const presets = await agentPresets.list()
     const defaultPreset = flowState.agentPreset ?? agentPresets.defaultId
-    const card = renderPresetPicker(presets, defaultPreset)
+    const card = renderPresetPicker(presets, defaultPreset, getTranslations())
     await sendCard(action.chatMessage, card, action.messageId)
   }
 
@@ -547,8 +551,8 @@ export function startFeishuOnboarding(deps: FeishuOnboardingDeps): FeishuOnboard
       const card = {
         schema: '2.0',
         config: { wide_screen_mode: true },
-        header: { title: { tag: 'plain_text', content: '📁 新建工作区' }, template: 'red' },
-        body: { elements: [{ tag: 'markdown', content: `⚠️ **创建工作区失败**\n\n\`${path}\`\n\n${msg}` }] },
+        header: { title: { tag: 'plain_text', content: getTranslations().onboardingCreateWorkspaceFailTitle }, template: 'red' },
+        body: { elements: [{ tag: 'markdown', content: getTranslations().onboardingCreateWorkspaceFailBody(path, msg) }] },
       }
       await sendCard(action.chatMessage, card, action.messageId)
       return
@@ -558,7 +562,7 @@ export function startFeishuOnboarding(deps: FeishuOnboardingDeps): FeishuOnboard
     flowState.workspace = path
     newFlow.set(chatKey, flowState)
     const presets = await agentPresets.list()
-    const card = renderPresetPicker(presets, flowState.agentPreset ?? agentPresets.defaultId)
+    const card = renderPresetPicker(presets, flowState.agentPreset ?? agentPresets.defaultId, getTranslations())
     await sendCard(action.chatMessage, card, action.messageId)
   }
 
@@ -567,8 +571,8 @@ export function startFeishuOnboarding(deps: FeishuOnboardingDeps): FeishuOnboard
     const card = {
       schema: '2.0',
       config: { wide_screen_mode: true },
-      header: { title: { tag: 'plain_text', content: '🚀 新建会话' }, template: 'grey' },
-      body: { elements: [{ tag: 'markdown', content: '已取消新建会话。' }] },
+      header: { title: { tag: 'plain_text', content: getTranslations().onboardingCancelTitle }, template: 'grey' },
+      body: { elements: [{ tag: 'markdown', content: getTranslations().onboardingCancelledBody }] },
     }
     await sendCard(action.chatMessage, card, action.messageId)
   }
@@ -636,7 +640,7 @@ export function startFeishuOnboarding(deps: FeishuOnboardingDeps): FeishuOnboard
       if (bridge === undefined) return
       recordTopic(chatMessage)
       const sessions = await bridge.listSessions()
-      const card = renderOnboardingCard(sessions, key => bridge.describeChatKey(key), threadLabel)
+      const card = renderOnboardingCard(sessions, key => bridge.describeChatKey(key), threadLabel, getTranslations())
       await sendCard(chatMessage, card, undefined)
     },
     startNewFlow: async (chatMessage: ConversationMessage): Promise<void> => {

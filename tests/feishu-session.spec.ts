@@ -3,6 +3,9 @@ import {
   renderSessionPanelCard, renderSessionListCard, renderSessionConfirmCard,
   startFeishuSession, type SessionEntry,
 } from '../src/feishu-session.ts'
+import { translationsFor } from '../src/i18n.ts'
+
+const t = translationsFor('zh')
 
 const SESSIONS: SessionEntry[] = [
   { id: 's1', updatedAt: Date.now(), title: 'Fix the bug', ownedBy: 'chat:a' },
@@ -39,7 +42,7 @@ function buildChannel(harness: any) {
 
 describe('renderSessionPanelCard', () => {
   it('renders a session dropdown and all five op buttons', () => {
-    const card = renderSessionPanelCard(SESSIONS, 'chat:z') as any
+    const card = renderSessionPanelCard(SESSIONS, 'chat:z', t) as any
     expect(markdownOf(card)).toContain('共 3 个会话')
     expect(markdownOf(card)).toContain('1 个被占用')
     const forms = card.body.elements.filter((el: any) => el.tag === 'form')
@@ -49,18 +52,18 @@ describe('renderSessionPanelCard', () => {
     expect(selects[0].options).toHaveLength(3)
     const opButtons = forms[0].elements.filter((el: any) => el.tag === 'button')
     const labels = opButtons.map((b: any) => b.text?.content)
-    expect(labels).toEqual(expect.arrayContaining(['🔀 切换', '🔓 detach', '🗄️ 归档', '🍴 fork', '✏️ 改名']))
+    expect(labels).toEqual(expect.arrayContaining(['🔀 切换', '🔓 Detach', '🗄️ 归档', '🍴 派生', '✏️ 改名']))
   })
 
   it('renders an empty state when there are no sessions', () => {
-    const card = renderSessionPanelCard([], 'chat:a') as any
+    const card = renderSessionPanelCard([], 'chat:a', t) as any
     expect(markdownOf(card)).toContain('共 0 个会话')
   })
 })
 
 describe('renderSessionListCard', () => {
   it('renders a markdown table of sessions', () => {
-    const card = renderSessionListCard(SESSIONS) as any
+    const card = renderSessionListCard(SESSIONS, t) as any
     const md = markdownOf(card)
     expect(md).toContain('| 会话 | ID | 占用 | 最近活跃 |')
     expect(md).toContain('Fix the bug')
@@ -73,7 +76,7 @@ describe('renderSessionConfirmCard', () => {
     const card = renderSessionConfirmCard({
       token: 't1', chat: { chatId: 'oc_x', chatType: 'p2p' }, op: 'rename',
       sessionId: 's1', sessionLabel: 'Fix the bug',
-    }) as any
+    }, t) as any
     expect(markdownOf(card)).toContain('将把会话')
     expect(markdownOf(card)).toContain('Fix the bug')
   })
@@ -94,6 +97,7 @@ describe('startFeishuSession', () => {
       channel: channel as any,
       bridge: () => bridge as any,
       logger: { warn: vi.fn(), error: vi.fn() },
+      getTranslations: () => t,
     })
     try {
       await handle.open({ chatId: 'oc_x', chatType: 'p2p' })
@@ -128,6 +132,7 @@ describe('startFeishuSession', () => {
       channel: channel as any,
       bridge: () => bridge as any,
       logger: { warn: vi.fn(), error: vi.fn() },
+      getTranslations: () => t,
     })
     try {
       await handle.open({ chatId: 'oc_x', chatType: 'p2p' })
@@ -170,6 +175,7 @@ describe('startFeishuSession', () => {
       bridge: () => bridge as any,
       sessionController: { rename, fork: vi.fn() },
       logger: { warn: vi.fn(), error: vi.fn() },
+      getTranslations: () => t,
     })
     try {
       await handle.open({ chatId: 'oc_x', chatType: 'p2p' })
@@ -179,9 +185,9 @@ describe('startFeishuSession', () => {
         raw: { action: { form_value: { session: 's2' } } },
       })
       await new Promise((resolve) => setImmediate(resolve))
-      // A dedicated rename card (header '✏️ 改名') was sent, not a confirm card.
+      // A dedicated rename card (header '✏️ 重命名会话') was sent, not a confirm card.
       const renameCard = harness.sentCards[1].card
-      expect(renameCard.header.title.content).toBe('✏️ 改名')
+      expect(renameCard.header.title.content).toBe('✏️ 重命名会话')
       expect(rename).not.toHaveBeenCalled()
       // Submit the typed title through the rename form.
       await harness.cardActionHandler!({

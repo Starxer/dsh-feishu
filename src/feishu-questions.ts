@@ -31,6 +31,8 @@ declare module '@deepseek-ai/cordis' {
 }
 import type { HarnessConversationService } from './harness.ts'
 import type { ConversationMessage } from './conversation.ts'
+import type { Translations } from './i18n.ts'
+import { translationsFor } from './i18n.ts'
 
 /** Minimal logger surface the listener needs; matches ctx.logger's call style. */
 interface PluginLogger {
@@ -89,6 +91,8 @@ export interface FeishuQuestionsDeps {
   channel: FeishuQuestionsChannel
   bridgeHolder: BridgeHolder
   logger: PluginLogger
+  /** Return the strings for the ACTIVE locale, read at render time. */
+  getTranslations: () => Translations
 }
 
 /**
@@ -103,7 +107,7 @@ export interface FeishuQuestionsDeps {
  * @returns a disposer that detaches the listener and the cardAction handler.
  */
 export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
-  const { ctx, channel, bridgeHolder, logger } = deps
+  const { ctx, channel, bridgeHolder, logger, getTranslations } = deps
   const pendingCards = new Map<string, PendingCard>()
 
   // Build an answer from a card click and resolve the matching pending
@@ -148,7 +152,7 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
     if (parsed.type === 'skip') {
       const answer = settlePending(pending, [], undefined)
       if (pending.cardMessageId !== undefined) {
-        const settledCard = renderSettledQuestionCard(pending.question, ['⏭️ 已跳过'])
+        const settledCard = renderSettledQuestionCard(pending.question, [`⏭️ ${getTranslations().questionSkippedLabel}`], getTranslations())
         await channel.updateCard(pending.cardMessageId, settledCard).catch((error: unknown) => {
           logger.warn(`dsh-feishu: failed to update question card: ${error instanceof Error ? error.message : String(error)}`)
         })
@@ -162,7 +166,7 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
       if (customText === '') return
       const answer = settlePending(pending, [], customText)
       if (pending.cardMessageId !== undefined) {
-        const settledCard = renderSettledQuestionCard(pending.question, [`✏️ ${customText}`])
+        const settledCard = renderSettledQuestionCard(pending.question, [`✏️ ${customText}`], getTranslations())
         await channel.updateCard(pending.cardMessageId, settledCard).catch((error: unknown) => {
           logger.warn(`dsh-feishu: failed to update question card: ${error instanceof Error ? error.message : String(error)}`)
         })
@@ -177,7 +181,7 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
     const custom = typeof parsed.custom === 'string' && parsed.custom !== '' ? parsed.custom : undefined
     const selectedLabels = selected.length > 0 ? selected : (action?.option !== undefined ? [action.option] : [])
     if (pending.cardMessageId !== undefined && selectedLabels.length > 0) {
-      const settledCard = renderSettledQuestionCard(pending.question, selectedLabels)
+      const settledCard = renderSettledQuestionCard(pending.question, selectedLabels, getTranslations())
       await channel.updateCard(pending.cardMessageId, settledCard).catch((error: unknown) => {
         logger.warn(`dsh-feishu: failed to update question card: ${error instanceof Error ? error.message : String(error)}`)
       })
@@ -221,7 +225,7 @@ export function startFeishuQuestions(deps: FeishuQuestionsDeps): () => void {
       }
     })
 
-    return await presentQuestions(chat, channel, pendingCards, request.questions, abortController, logger)
+    return await presentQuestions(chat, channel, pendingCards, request.questions, abortController, logger, getTranslations())
   }
   // Prepended so this answerer runs BEFORE api-remotes' forwarding listener.
   // remotes routes agent-scoped waterfalls (e.g. `user-questions/request`) to
@@ -258,6 +262,7 @@ async function presentQuestions(
   questions: readonly AskUserQuestionItem[],
   abortController: AbortController,
   logger?: PluginLogger,
+  t?: Translations,
 ): Promise<AskUserQuestionAnswer> {
   if (questions.length === 0) {
     return { answers: [] }
@@ -265,7 +270,7 @@ async function presentQuestions(
   console.log(`dsh-feishu: [q] presenting ${questions.length} question(s) to chat=${chat.chatId} thread=${chat.threadId ?? '-'}`)
   const answers: AskUserQuestionAnswerItem[] = []
   for (const question of questions) {
-    const item = await presentOneQuestion(chat, channel, pendingCards, question, abortController, logger)
+    const item = await presentOneQuestion(chat, channel, pendingCards, question, abortController, logger, t)
     if (item === undefined) break
     answers.push(item)
   }
@@ -287,10 +292,11 @@ async function presentOneQuestion(
   question: AskUserQuestionItem,
   abortController: AbortController,
   logger?: PluginLogger,
+  t?: Translations,
 ): Promise<AskUserQuestionAnswerItem | undefined> {
   const pendingId = `feishu-q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const options = question.options ?? []
-  const card = renderQuestionCard(question, options, pendingId)
+  const card = renderQuestionCard(question, options, pendingId, t ?? translationsFor('zh'))
   // The cardAction -> deferred bridge carries the whole `{ answers: [item] }`
   // settle value; extract the single item here so the batch loop can accumulate.
   const deferred = new Promise<AskUserQuestionAnswerItem | undefined>((resolve) => {
@@ -331,6 +337,7 @@ async function presentOneQuestion(
 function renderSettledQuestionCard(
   question: AskUserQuestionItem,
   selected: readonly string[],
+  t: Translations,
 ): object {
   const options = question.options ?? []
   const selectedSet = new Set(selected)
@@ -349,18 +356,18 @@ function renderSettledQuestionCard(
     const skipped = selected.some(s => s.startsWith('⏭️ '))
     for (const option of options) {
       if (selectedSet.has(option.label)) {
-        mdParts.push(`✅ **${option.label}** — *已选择*`)
+        mdParts.push(`✅ **${option.label}** — *${t.questionSelectedSuffix}*`)
       } else {
         mdParts.push(`⬜ ${option.label}`)
       }
     }
     if (customAnswer !== undefined) {
-      mdParts.push(`\n✅ **自定义回答：** ${customAnswer.slice(3)}`)
+      mdParts.push(`\n✅ **${t.questionCustomAnswerLabel}** ${customAnswer.slice(3)}`)
     } else if (skipped) {
-      mdParts.push(`\n⏭️ *已跳过*`)
+      mdParts.push(`\n⏭️ *${t.questionSkippedLabel}*`)
     }
   } else {
-    mdParts.push(`✅ **已选择：** ${selected.join(', ')}`)
+    mdParts.push(`✅ **${t.questionSelectedLabel}** ${selected.join(', ')}`)
   }
   // Use Card JSON 2.0 format (schema + body.elements) for the settled card.
   // This is necessary because im.v1.message.patch only supports v2 format.
@@ -370,7 +377,7 @@ function renderSettledQuestionCard(
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: question.header ?? 'Question' },
+      title: { tag: 'plain_text', content: question.header ?? t.questionDefaultTitle },
       template: 'turquoise',
     },
     body: {
@@ -388,6 +395,7 @@ function renderQuestionCard(
   question: AskUserQuestionItem,
   options: readonly AskUserQuestionOption[],
   pendingId: string,
+  t: Translations,
 ): object {
   const mdParts: string[] = []
   if (question.header !== undefined && question.header !== '') {

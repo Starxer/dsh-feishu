@@ -19,6 +19,7 @@
 import type { ConversationMessage } from './conversation.ts'
 import { conversationKey } from './conversation.ts'
 import type { HarnessConversationService } from './harness.ts'
+import type { Translations } from './i18n.ts'
 import { decodeCardValue } from './card-action.ts'
 
 /** One session entry surfaced by the panel (bridge.listSessions shape). */
@@ -68,6 +69,9 @@ export interface FeishuSessionDeps {
   sessionController?: SessionControllerLike
   workspaceRegistry?: WorkspaceRegistryLike
   logger: { warn(message: string): unknown; error(message: string): unknown }
+  /** Return the strings for the ACTIVE locale, read at render time so language
+   *  changes (/lang) apply to newly rendered cards without rebuilding. */
+  getTranslations: () => Translations
 }
 
 export interface FeishuSessionHandle {
@@ -97,8 +101,15 @@ interface RenameState {
   sessionLabel: string
 }
 
-const OP_LABEL: Record<Op, string> = {
-  switch: '切换', detach: 'detach', rename: '改名', archive: '归档', fork: 'fork',
+/** Locale-aware verb for an operation (used in confirm titles). */
+function opWord(op: Op, t: Translations): string {
+  switch (op) {
+    case 'switch': return t.sessionOpSwitch
+    case 'detach': return t.sessionOpDetach
+    case 'archive': return t.sessionOpArchive
+    case 'fork': return t.sessionOpFork
+    case 'rename': return t.sessionOpRename
+  }
 }
 
 /** Short display name for a session entry. */
@@ -119,45 +130,46 @@ function sessionOptions(sessions: readonly SessionEntry[]): Array<{ text: object
 export function renderSessionPanelCard(
   sessions: readonly SessionEntry[],
   currentChatKey: string,
+  t: Translations,
 ): object {
   const options = sessionOptions(sessions)
   const formElements: object[] = [
-    { tag: 'markdown', content: '**选择会话**' },
+    { tag: 'markdown', content: t.sessionPanelSelectLabel },
     {
       tag: 'select_static',
       name: 'session',
-      placeholder: { tag: 'plain_text', content: options.length > 0 ? '选择会话...' : '暂无会话' },
+      placeholder: { tag: 'plain_text', content: t.sessionPanelSelectPlaceholder(options.length === 0) },
       options,
     },
     { tag: 'hr' },
-    { tag: 'markdown', content: '**执行操作**' },
-    ...buildOpButtons(),
+    { tag: 'markdown', content: t.sessionPanelActionLabel },
+    ...buildOpButtons(t),
   ]
   const locked = sessions.filter(s => s.ownedBy !== undefined && s.ownedBy !== currentChatKey).length
   return {
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: '🧭 会话管理' },
+      title: { tag: 'plain_text', content: t.sessionPanelTitle },
       template: 'blue',
     },
     body: {
       elements: [
         {
           tag: 'markdown',
-          content: `共 ${sessions.length} 个会话${locked > 0 ? ` · ${locked} 个被占用` : ''}\n_选择会话后点下方按钮执行对应操作。_`,
+          content: `${t.sessionPanelCount(sessions.length, locked)}\n${t.sessionPanelHint}`,
         },
         { tag: 'hr' },
         { tag: 'form', name: 'session_panel', elements: formElements },
         {
           tag: 'button',
-          text: { tag: 'plain_text', content: '📋 列表' },
+          text: { tag: 'plain_text', content: t.sessionListButton },
           type: 'default',
           behaviors: [{ type: 'callback', value: { action: 'list' } }],
         },
         {
           tag: 'button',
-          text: { tag: 'plain_text', content: '🔄 刷新' },
+          text: { tag: 'plain_text', content: t.sessionRefreshButton },
           type: 'default',
           behaviors: [{ type: 'callback', value: { action: 'refresh' } }],
         },
@@ -167,13 +179,13 @@ export function renderSessionPanelCard(
 }
 
 /** Build the operation submit buttons (each carries its op). */
-function buildOpButtons(): object[] {
+function buildOpButtons(t: Translations): object[] {
   const ops: Array<{ op: Op; label: string; type?: 'primary' | 'danger' }> = [
-    { op: 'switch', label: '🔀 切换', type: 'primary' },
-    { op: 'detach', label: '🔓 detach' },
-    { op: 'archive', label: '🗄️ 归档' },
-    { op: 'fork', label: '🍴 fork' },
-    { op: 'rename', label: '✏️ 改名' },
+    { op: 'switch', label: t.sessionSwitch, type: 'primary' },
+    { op: 'detach', label: t.sessionDetach },
+    { op: 'archive', label: t.sessionArchive },
+    { op: 'fork', label: t.sessionFork },
+    { op: 'rename', label: t.sessionRename },
   ]
   return ops.map(({ op, label, type }) => ({
     tag: 'button',
@@ -186,19 +198,19 @@ function buildOpButtons(): object[] {
 }
 
 /** Render a confirm/cancel card for a destructive op. */
-export function renderSessionConfirmCard(state: ConfirmState): object {
+export function renderSessionConfirmCard(state: ConfirmState, t: Translations): object {
   const detail: Record<Op, string> = {
-    switch: `将把这个对话切换到会话 \`${state.sessionLabel}\`，若它被其它对话占用会先接管。`,
-    detach: `将释放会话 \`${state.sessionLabel}\` 的占用（原持有者重置为新会话）。`,
-    archive: `将归档会话 \`${state.sessionLabel}\`。`,
-    fork: `将从会话 \`${state.sessionLabel}\` fork 出一个新会话（保留到当前事件的对话）。`,
-    rename: `将把会话 \`${state.sessionLabel}\` 改成新的标题。`,
+    switch: t.sessionConfirmDetailSwitch(state.sessionLabel),
+    detach: t.sessionConfirmDetailDetach(state.sessionLabel),
+    archive: t.sessionConfirmDetailArchive(state.sessionLabel),
+    fork: t.sessionConfirmDetailFork(state.sessionLabel),
+    rename: t.sessionConfirmDetailRename(state.sessionLabel),
   }
   return {
     schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: `确认${OP_LABEL[state.op]}？` },
+      title: { tag: 'plain_text', content: t.sessionConfirmTitle(opWord(state.op, t)) },
       template: 'orange',
     },
     body: {
@@ -206,13 +218,13 @@ export function renderSessionConfirmCard(state: ConfirmState): object {
         { tag: 'markdown', content: detail[state.op] },
         {
           tag: 'button',
-          text: { tag: 'plain_text', content: '✅ 确认' },
+          text: { tag: 'plain_text', content: `✅ ${t.sessionConfirmOk}` },
           type: 'primary',
           behaviors: [{ type: 'callback', value: { action: 'confirm-ok', token: state.token } }],
         },
         {
           tag: 'button',
-          text: { tag: 'plain_text', content: '❌ 取消' },
+          text: { tag: 'plain_text', content: `❌ ${t.sessionConfirmCancel}` },
           type: 'default',
           behaviors: [{ type: 'callback', value: { action: 'confirm-cancel', token: state.token } }],
         },
@@ -232,22 +244,22 @@ export function renderSessionResultCard(title: string, lines: readonly string[])
 }
 
 /** Render a rename card: text input + confirm submit (self-contained). */
-export function renderSessionRenameCard(sessionLabel: string): object {
+export function renderSessionRenameCard(sessionLabel: string, t: Translations): object {
   return {
     schema: '2.0',
     config: { wide_screen_mode: true },
-    header: { title: { tag: 'plain_text', content: '✏️ 改名' }, template: 'blue' },
+    header: { title: { tag: 'plain_text', content: t.sessionRenameTitle }, template: 'blue' },
     body: {
       elements: [
-        { tag: 'markdown', content: `为会话 \`${sessionLabel}\` 输入新标题：` },
+        { tag: 'markdown', content: t.sessionRenamePrompt(sessionLabel) },
         {
           tag: 'form',
           name: 'rename_form',
           elements: [
-            { tag: 'input', name: 'new_title', placeholder: { tag: 'plain_text', content: '输入新的会话标题...' }, max_length: 200 },
+            { tag: 'input', name: 'new_title', placeholder: { tag: 'plain_text', content: t.sessionRenamePlaceholder }, max_length: 200 },
             {
               tag: 'button',
-              text: { tag: 'plain_text', content: '✅ 确认改名' },
+              text: { tag: 'plain_text', content: t.sessionRenameButton },
               type: 'primary',
               name: 'confirm_rename',
               form_action_type: 'submit',
@@ -261,35 +273,35 @@ export function renderSessionRenameCard(sessionLabel: string): object {
 }
 
 /** Render the `/session list` table card. */
-export function renderSessionListCard(sessions: readonly SessionEntry[]): object {
+export function renderSessionListCard(sessions: readonly SessionEntry[], t: Translations): object {
   const rows = sessions.map(entry => {
     const owned = entry.ownedBy === undefined ? '-' : '🔒'
-    return `| ${sessionLabel(entry)} | \`${entry.id.slice(-12)}\` | ${owned} | ${formatRelative(entry.updatedAt)} |`
+    return `| ${sessionLabel(entry)} | \`${entry.id.slice(-12)}\` | ${owned} | ${formatRelative(entry.updatedAt, t)} |`
   })
   const body = rows.length > 0
-    ? `| 会话 | ID | 占用 | 最近活跃 |\n|---|---|---|---|\n${rows.join('\n')}`
-    : '暂无会话。'
+    ? `${t.sessionListTableHeader}\n|---|---|---|---|\n${rows.join('\n')}`
+    : t.sessionListNone
   return {
     schema: '2.0',
     config: { wide_screen_mode: true },
-    header: { title: { tag: 'plain_text', content: '📋 会话列表' }, template: 'blue' },
+    header: { title: { tag: 'plain_text', content: t.sessionListTitle }, template: 'blue' },
     body: { elements: [{ tag: 'markdown', content: body }] },
   }
 }
 
-function formatRelative(updatedAt: number): string {
+function formatRelative(updatedAt: number, t: Translations): string {
   const diff = Date.now() - updatedAt
   const m = Math.round(diff / 60_000)
-  if (m < 1) return '刚刚'
-  if (m < 60) return `${m}m 前`
+  if (m < 1) return t.sessionTimeJustNow
+  if (m < 60) return `${m}${t.sessionTimeMinute}`
   const h = Math.round(m / 60)
-  if (h < 24) return `${h}h 前`
-  return `${Math.round(h / 24)}d 前`
+  if (h < 24) return `${h}${t.sessionTimeHour}`
+  return `${Math.round(h / 24)}${t.sessionTimeDay}`
 }
 
 /** Start the session panel: handle the panel + confirm card callbacks. */
 export function startFeishuSession(deps: FeishuSessionDeps): FeishuSessionHandle {
-  const { channel, bridge, sessionController, workspaceRegistry, logger } = deps
+  const { channel, bridge, sessionController, workspaceRegistry, logger, getTranslations } = deps
   const openCards = new Map<string, OpenState>()
   const confirmCards = new Map<string, ConfirmState>()
   const renameCards = new Map<string, RenameState>()
@@ -316,13 +328,13 @@ export function startFeishuSession(deps: FeishuSessionDeps): FeishuSessionHandle
 
     if (action === 'list') {
       const sessions = await brid.listSessions()
-      await channel.send(state.chat.chatId, { card: renderSessionListCard(sessions) }, replyOpts(state.chat)).catch(() => undefined)
+      await channel.send(state.chat.chatId, { card: renderSessionListCard(sessions, getTranslations()) }, replyOpts(state.chat)).catch(() => undefined)
       return
     }
     if (action === 'refresh') {
       const sessions = await brid.listSessions()
       const key = conversationKey(state.chat)
-      await channel.updateCard(evt.messageId!, renderSessionPanelCard(sessions, key)).catch((e: unknown) => {
+      await channel.updateCard(evt.messageId!, renderSessionPanelCard(sessions, key, getTranslations())).catch((e: unknown) => {
         logger.warn(`dsh-feishu: session panel refresh failed: ${e instanceof Error ? e.message : String(e)}`)
       })
       return
@@ -353,7 +365,7 @@ export function startFeishuSession(deps: FeishuSessionDeps): FeishuSessionHandle
   }
 
   const openRename = async (chat: ConversationMessage, state: Omit<RenameState, 'chat'>): Promise<void> => {
-    const result = await channel.send(chat.chatId, { card: renderSessionRenameCard(state.sessionLabel) }, replyOpts(chat))
+    const result = await channel.send(chat.chatId, { card: renderSessionRenameCard(state.sessionLabel, getTranslations()) }, replyOpts(chat))
     const mid = result?.messageId
     if (mid !== undefined) renameCards.set(mid, { chat, ...state })
   }
@@ -363,28 +375,28 @@ export function startFeishuSession(deps: FeishuSessionDeps): FeishuSessionHandle
     const formValue = (evt.raw?.action?.form_value ?? {}) as Record<string, unknown>
     const title = typeof formValue.new_title === 'string' ? formValue.new_title.trim() : ''
     if (title === '') {
-      await channel.updateCard(evt.messageId!, renderSessionResultCard('⚠️ 标题为空', ['请输入新的会话标题后再确认。'])).catch((e: unknown) => {
+      await channel.updateCard(evt.messageId!, renderSessionResultCard(getTranslations().sessionResultEmptyTitle, [getTranslations().sessionResultEmptyBody])).catch((e: unknown) => {
         logger.warn(`dsh-feishu: session rename title empty: ${e instanceof Error ? e.message : String(e)}`)
       })
       return
     }
     if (sessionController?.rename === undefined) {
-      await channel.send(state.chat.chatId, { card: renderSessionResultCard('⚠️ 暂不可用', ['本部署未启用「改名」能力。']) }, replyOpts(state.chat)).catch(() => undefined)
+      await channel.send(state.chat.chatId, { card: renderSessionResultCard(getTranslations().sessionResultUnavailable, [getTranslations().sessionResultUnavailableRename]) }, replyOpts(state.chat)).catch(() => undefined)
       return
     }
     try {
       await sessionController.rename({ sessionId: state.sessionId, title })
-      await channel.send(state.chat.chatId, { card: renderSessionResultCard('✅ 已改名', [`会话 \`${state.sessionLabel}\` 已改名为：\n\`\`\`\n${title}\n\`\`\``]) }, replyOpts(state.chat)).catch(() => undefined)
+      await channel.send(state.chat.chatId, { card: renderSessionResultCard(getTranslations().sessionResultRenamedHeader, [`${getTranslations().sessionResultRenamedBody(state.sessionLabel)}\n\`\`\`\n${title}\n\`\`\``]) }, replyOpts(state.chat)).catch(() => undefined)
     } catch (e: unknown) {
       logger.error(`dsh-feishu: session rename failed: ${e instanceof Error ? e.message : String(e)}`)
-      await channel.send(state.chat.chatId, { card: renderSessionResultCard('❌ 改名失败', [String(e instanceof Error ? e.message : e)]) }, replyOpts(state.chat)).catch(() => undefined)
+      await channel.send(state.chat.chatId, { card: renderSessionResultCard(getTranslations().sessionResultRenameFailed, [String(e instanceof Error ? e.message : e)]) }, replyOpts(state.chat)).catch(() => undefined)
     }
   }
 
   const openConfirm = async (chat: ConversationMessage, state: Omit<ConfirmState, 'token' | 'chat'>): Promise<void> => {
     const token = `session-c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const st: ConfirmState = { token, chat, ...state }
-    const result = await channel.send(chat.chatId, { card: renderSessionConfirmCard(st) }, replyOpts(chat))
+    const result = await channel.send(chat.chatId, { card: renderSessionConfirmCard(st, getTranslations()) }, replyOpts(chat))
     const mid = result?.messageId
     if (mid !== undefined) confirmCards.set(mid, st)
   }
@@ -394,7 +406,7 @@ export function startFeishuSession(deps: FeishuSessionDeps): FeishuSessionHandle
     const confirm = parsed.action === 'confirm-ok'
     if (!confirm) {
       confirmCards.delete(evt.messageId!)
-      await channel.updateCard(evt.messageId!, renderSessionResultCard('已取消', ['本次操作已取消。'])).catch((e: unknown) => {
+      await channel.updateCard(evt.messageId!, renderSessionResultCard(getTranslations().sessionResultCancelled, [getTranslations().sessionResultCancelledBody])).catch((e: unknown) => {
         logger.warn(`dsh-feishu: session cancel update failed: ${e instanceof Error ? e.message : String(e)}`)
       })
       return
@@ -410,40 +422,40 @@ export function startFeishuSession(deps: FeishuSessionDeps): FeishuSessionHandle
       if (st.op === 'switch') {
         const outcome = brid.attachSession(chat, st.sessionId)
         if (outcome === 'archived') {
-          await channel.send(chat.chatId, { card: renderSessionResultCard('⚠️ 已归档', [`会话 \`${st.sessionLabel}\` 已归档，无法切换。`]) }, replyOpts(chat)).catch(() => undefined)
+          await channel.send(chat.chatId, { card: renderSessionResultCard(getTranslations().sessionResultArchivedHeader, [getTranslations().sessionResultArchivedSwitchBody(st.sessionLabel)]) }, replyOpts(chat)).catch(() => undefined)
           return
         }
-        await channel.send(chat.chatId, { card: renderSessionResultCard('✅ 已切换', [`这个对话已切换到会话 \`${st.sessionLabel}\`。下一轮对话将使用它。`]) }, replyOpts(chat)).catch(() => undefined)
+        await channel.send(chat.chatId, { card: renderSessionResultCard(getTranslations().sessionResultSwitchedHeader, [getTranslations().sessionResultSwitchedBody(st.sessionLabel)]) }, replyOpts(chat)).catch(() => undefined)
         return
       }
       if (st.op === 'detach') {
         const outcome = brid.detachSession(st.sessionId)
         const line = outcome.kind === 'free'
-          ? `会话 \`${st.sessionLabel}\` 本就空闲。`
-          : `已释放会话 \`${st.sessionLabel}\`（原持有者：${outcome.ownerLabel}）。`
-        await channel.send(chat.chatId, { card: renderSessionResultCard('🔓 已 detach', [line]) }, replyOpts(chat)).catch(() => undefined)
+          ? getTranslations().sessionResultDetachFree(st.sessionLabel)
+          : getTranslations().sessionResultDetachReleased(st.sessionLabel, outcome.ownerLabel)
+        await channel.send(chat.chatId, { card: renderSessionResultCard(getTranslations().sessionResultDetachHeader, [line]) }, replyOpts(chat)).catch(() => undefined)
         return
       }
       if (st.op === 'archive') {
-        if (workspaceRegistry?.archiveSession === undefined) { await unsupported(chat, '归档'); return }
+        if (workspaceRegistry?.archiveSession === undefined) { await unsupported(chat, getTranslations().sessionOpArchive); return }
         await workspaceRegistry.archiveSession(st.sessionId)
-        await channel.send(chat.chatId, { card: renderSessionResultCard('🗄️ 已归档', [`会话 \`${st.sessionLabel}\` 已归档。`]) }, replyOpts(chat)).catch(() => undefined)
+        await channel.send(chat.chatId, { card: renderSessionResultCard(getTranslations().sessionResultArchivedOk, [getTranslations().sessionResultArchivedBody(st.sessionLabel)]) }, replyOpts(chat)).catch(() => undefined)
         return
       }
       if (st.op === 'fork') {
-        if (sessionController?.fork === undefined) { await unsupported(chat, 'fork'); return }
+        if (sessionController?.fork === undefined) { await unsupported(chat, getTranslations().sessionOpFork); return }
         const res = await sessionController.fork({ sessionId: st.sessionId }) as { sessionId?: string } | undefined
-        await channel.send(chat.chatId, { card: renderSessionResultCard('🍴 已 fork', [`已从 \`${st.sessionLabel}\` fork 出新会话${res?.sessionId !== undefined ? ` \`${res.sessionId}\`` : ''}。可用「/new」或并在本面板中切换。`]) }, replyOpts(chat)).catch(() => undefined)
+        await channel.send(chat.chatId, { card: renderSessionResultCard(getTranslations().sessionResultForkHeader, [getTranslations().sessionResultForkBody(st.sessionLabel, res?.sessionId)]) }, replyOpts(chat)).catch(() => undefined)
         return
       }
     } catch (e: unknown) {
       logger.error(`dsh-feishu: session op ${st.op} failed: ${e instanceof Error ? e.message : String(e)}`)
-      await channel.send(chat.chatId, { card: renderSessionResultCard('❌ 操作失败', [String(e instanceof Error ? e.message : e)]) }, replyOpts(chat)).catch(() => undefined)
+      await channel.send(chat.chatId, { card: renderSessionResultCard(getTranslations().sessionResultOpFailed, [String(e instanceof Error ? e.message : e)]) }, replyOpts(chat)).catch(() => undefined)
     }
   }
 
   const unsupported = async (chat: ConversationMessage, name: string): Promise<void> => {
-    await channel.send(chat.chatId, { card: renderSessionResultCard('⚠️ 暂不可用', [`本部署未启用「${name}」能力。`]) }, replyOpts(chat)).catch(() => undefined)
+    await channel.send(chat.chatId, { card: renderSessionResultCard(getTranslations().sessionResultUnavailable, [getTranslations().sessionResultUnsupported(name)]) }, replyOpts(chat)).catch(() => undefined)
   }
 
   const unsubscribe = channel.onCardAction(onCardAction)
@@ -452,7 +464,7 @@ export function startFeishuSession(deps: FeishuSessionDeps): FeishuSessionHandle
     if (brid === undefined) return undefined
     const sessions = await brid.listSessions()
     const key = conversationKey(chat)
-    const result = await channel.send(chat.chatId, { card: renderSessionPanelCard(sessions, key) }, replyOpts(chat))
+    const result = await channel.send(chat.chatId, { card: renderSessionPanelCard(sessions, key, getTranslations()) }, replyOpts(chat))
     const mid = result?.messageId
     if (mid !== undefined) openCards.set(mid, { chat })
     return mid

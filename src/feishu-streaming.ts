@@ -18,6 +18,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { HarnessConversationService } from './harness.ts'
 import type { ConversationMessage } from './conversation.ts'
+import type { Translations } from './i18n.ts'
+import { translationsFor } from './i18n.ts'
 
 /** Minimal logger surface. */
 interface PluginLogger {
@@ -45,6 +47,8 @@ export interface FeishuStreamingDeps {
   logger: PluginLogger
   /** Whether to show reasoning content. */
   showReasoning?: () => boolean
+  /** Current translations for the user's language. */
+  getTranslations?: () => Translations
 }
 
 /** Per-step usage from assistant/message event. */
@@ -131,7 +135,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
   consumeLastStepHadContent: (sessionId: string) => boolean
   flushed: (sessionId: string) => Promise<TurnStats | undefined>
 } {
-  const { ctx, channel, bridgeHolder, logger, showReasoning } = deps
+  const { ctx, channel, bridgeHolder, logger, showReasoning, getTranslations } = deps
   console.log('dsh-feishu: startFeishuStreaming (unified per-step cards)')
   const sessionStates = new Map<string, SessionStepState>()
 
@@ -201,7 +205,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
       if (decodeMs > 0) tps = state.usage.outputTokens / (decodeMs / 1000)
     }
 
-    return renderStepCard(reasoning, text, tools, state.usage, stepDurationMs, tps, state.contextMeta)
+    return renderStepCard(getTranslations?.() ?? translationsFor('zh'), reasoning, text, tools, state.usage, stepDurationMs, tps, state.contextMeta)
   }
 
   /** Send the initial step card and track its messageId. */
@@ -713,6 +717,7 @@ export function deriveToolSummary(toolName: string, argsRaw: string): string {
  * Render a unified per-step card with reasoning, text, and tool calls.
  */
 export function renderStepCard(
+  t: Translations,
   reasoning: string | undefined,
   text: string | undefined,
   tools: StepToolCall[],
@@ -728,7 +733,7 @@ export function renderStepCard(
     const displayReasoning = reasoning.length > 3000 ? reasoning.slice(0, 3000) + '\n…(truncated)' : reasoning
     elements.push({
       tag: 'markdown',
-      content: `💬 **Reasoning**\n\`\`\`\`\`\n${displayReasoning}\n\`\`\`\`\``,
+      content: `${t.stepReasoningHeader}\n\`\`\`\`\`\n${displayReasoning}\n\`\`\`\`\``,
     })
   }
 
@@ -736,14 +741,14 @@ export function renderStepCard(
   if (text !== undefined && text !== '') {
     const displayText = text.length > 3000 ? text.slice(0, 3000) + '\n…(truncated)' : text
     if (elements.length > 0) elements.push({ tag: 'hr' })
-    elements.push({ tag: 'markdown', content: `📝 **Message**\n\n${displayText}` })
+    elements.push({ tag: 'markdown', content: `${t.stepMessageHeader}\n\n${displayText}` })
   }
 
   // Tool calls section
   if (tools.length > 0) {
     if (elements.length > 0) {
       elements.push({ tag: 'hr' })
-      elements.push({ tag: 'markdown', content: '🔧 **Tool Call**' })
+      elements.push({ tag: 'markdown', content: t.stepToolHeader })
     }
     for (const tool of tools) {
       const toolLines: string[] = []
@@ -761,7 +766,8 @@ export function renderStepCard(
       // Always show the tool function name (read, bash, web_search, etc.) as inline code
       if (tool.result !== undefined) {
         const icon = tool.result.isError ? '❌' : '✅'
-        toolLines.push(`${icon} \`${tool.toolName}\` — ${tool.result.elapsed >= 1000 ? `${(tool.result.elapsed / 1000).toFixed(1)}s` : `${tool.result.elapsed}ms`}`)
+        const status = tool.result.isError ? t.stepToolError : t.stepToolSuccess
+        toolLines.push(`${icon} \`${tool.toolName}\` — ${status} ${tool.result.elapsed >= 1000 ? `${(tool.result.elapsed / 1000).toFixed(1)}s` : `${tool.result.elapsed}ms`}`)
       } else {
         toolLines.push(`⏳ \`${tool.toolName}\` — running…`)
       }
@@ -819,16 +825,16 @@ export function renderStepCard(
   let title: string
   let template: string
   if (hasTools && allToolsDone && anyToolError) {
-    title = 'Tool Error'
+    title = t.stepCardTitleError
     template = 'red'
   } else if (hasTools && allToolsDone) {
-    title = 'Tool Done'
+    title = t.stepCardTitleDone
     template = 'green'
   } else if (hasTools) {
-    title = 'Tool Call'
+    title = t.stepCardTitleCall
     template = 'wathet'
   } else {
-    title = 'Reply'
+    title = t.stepCardTitleReply
     template = 'blue'
   }
 

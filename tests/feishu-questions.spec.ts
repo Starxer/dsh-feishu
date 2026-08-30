@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AskUserQuestionAnswer, AskUserQuestionItem, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 import { startFeishuQuestions } from '../src/feishu-questions.ts'
+import { translationsFor } from '../src/i18n.ts'
+
+const t = translationsFor('en')
 
 const QUESTION: AskUserQuestionItem = {
   id: 'q1',
@@ -114,7 +117,7 @@ describe('startFeishuQuestions', () => {
       () => ({ chatId: 'oc_chat', chatType: 'p2p' as const }),
       harness,
     )
-    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger })
+    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger, getTranslations: () => t })
     try {
       // Fire the request; it will suspend waiting for a cardAction.
       const answerPromise = ctxHandle.trigger('oc_session', [QUESTION], { session: { id: 'oc_session' } })
@@ -145,7 +148,7 @@ describe('startFeishuQuestions', () => {
       () => ({ chatId: 'oc_chat', chatType: 'p2p' as const }),
       harness,
     )
-    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger })
+    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger, getTranslations: () => t })
     const Q2: AskUserQuestionItem = { id: 'q2', question: 'Second?', options: [{ label: 'B' }, { label: 'C' }] }
     try {
       // Fire a two-question request; it suspends awaiting the first card.
@@ -184,7 +187,7 @@ describe('startFeishuQuestions', () => {
       () => ({ chatId: 'oc_chat', chatType: 'p2p' as const }),
       harness,
     )
-    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger })
+    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger, getTranslations: () => t })
     try {
       const answerPromise = ctxHandle.trigger('oc_session', [QUESTION], { session: { id: 'oc_session' } })
       await new Promise(resolve => setImmediate(resolve))
@@ -218,7 +221,7 @@ describe('startFeishuQuestions', () => {
       () => ({ chatId: 'oc_chat', chatType: 'p2p' as const }),
       harness,
     )
-    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger })
+    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger, getTranslations: () => t })
     try {
       const answerPromise = ctxHandle.trigger('oc_session', [QUESTION], { session: { id: 'oc_session' } })
       await new Promise(resolve => setImmediate(resolve))
@@ -256,7 +259,7 @@ describe('startFeishuQuestions', () => {
       () => ({ chatId: 'oc_chat', chatType: 'p2p' as const }),
       harness,
     )
-    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger })
+    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger, getTranslations: () => t })
     try {
       await harness.cardActionHandler!({
         action: {
@@ -279,7 +282,7 @@ describe('startFeishuQuestions', () => {
       () => undefined,
       harness,
     )
-    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger })
+    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger, getTranslations: () => t })
     try {
       // Triggering with no agent means listener calls `next()` and rejects (no fallback).
       await expect(ctxHandle.trigger('webui-only-session', [QUESTION])).rejects.toThrow()
@@ -300,7 +303,7 @@ describe('startFeishuQuestions', () => {
       () => ({ chatId: 'oc_chat', chatType: 'p2p' as const }),
       harness,
     )
-    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger })
+    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger, getTranslations: () => t })
     void ctxHandle.trigger('oc_session', [QUESTION], { session: { id: 'oc_session' } })
     await new Promise(resolve => setImmediate(resolve))
     stop()
@@ -323,7 +326,7 @@ describe('startFeishuQuestions', () => {
       () => ({ chatId: 'oc_chat', chatType: 'p2p' as const }),
       harness,
     )
-    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger })
+    const stop = startFeishuQuestions({ ctx: ctxHandle.ctx, channel, bridgeHolder, logger, getTranslations: () => t })
     try {
       const answerPromise = ctxHandle.trigger('oc_session', [detailQuestion], { session: { id: 'oc_session' } })
       await new Promise(resolve => setImmediate(resolve))

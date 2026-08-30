@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { renderFooterCard } from '../src/channel.ts'
+import { translationsFor } from '../src/i18n.ts'
+
+const t = translationsFor('en')
 
 function markdownOf(card: any): string {
   return card.body.elements
@@ -25,23 +28,23 @@ const turnStats = {
 
 describe('renderFooterCard (Turn Complete)', () => {
   it('shows the busy mode (queue) in the footer', () => {
-    const card = renderFooterCard({ busyMode: 'queue' }, turnStats) as any
-    expect(card.header.title.content).toBe('Turn Complete')
+    const card = renderFooterCard(t, { busyMode: 'queue' }, turnStats) as any
+    expect(card.header.title.content).toBe('✅ Turn complete')
     expect(markdownOf(card)).toContain('**Enter while busy:** 📥 Queue')
   })
 
   it('shows the busy mode (steer) in the footer', () => {
-    const card = renderFooterCard({ busyMode: 'steer' }, turnStats) as any
+    const card = renderFooterCard(t, { busyMode: 'steer' }, turnStats) as any
     expect(markdownOf(card)).toContain('**Enter while busy:** 🎯 Steer')
   })
 
   it('omits the busy line when busyMode is not provided', () => {
-    const card = renderFooterCard({ model: 'm' }, turnStats) as any
+    const card = renderFooterCard(t, { model: 'm' }, turnStats) as any
     expect(markdownOf(card)).not.toContain('Enter while busy')
   })
 
   it('returns undefined when there is nothing to render', () => {
-    expect(renderFooterCard(undefined, undefined)).toBeUndefined()
-    expect(renderFooterCard({}, undefined)).toBeUndefined()
+    expect(renderFooterCard(t, undefined, undefined)).toBeUndefined()
+    expect(renderFooterCard(t, {}, undefined)).toBeUndefined()
   })
 })

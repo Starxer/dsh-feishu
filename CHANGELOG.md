@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### 中英双语 i18n：`locale` 设置 + `/lang` + 命令/卡片层双语（`src/i18n.ts` 等）
+
+- **语言源**：新增插件 `locale` 字段（`auto`/`zh`/`en`，默认 `auto`）。`auto` 时读 DSH host 侧 `settings.get('locale').preference` 的浏览器语言偏好（由 `@deepseek-ai/dsh-client-locale` 注册的 `'locale'` namespace），无值回退 `zh`。`/lang [zh|en|auto]` 切换并持久化（`auto` unset 字段回到跟随 DSH），`/lang` 无参显示当前与来源。
+- **命令层**：把原单一英文实现 `larkCommandTranslations` 拆成 `zh`/`en` 两份（`src/commands-i18n.ts`，`CommandTranslations` 接口不变），模块级 `activeCommandTranslations` 随 locale 同步；`/model` `/reasoning` `/help` `/approve` `/deny` `/approvals` `/new` `/session` `/detach` `/status` 等命令文案即时按语言切换。
+- **卡片层**：`feishu-busy` / `feishu-permission` / `feishu-model-select` / `feishu-session` / `feishu-onboarding` / `feishu-questions` / `feishu-streaming`（per-step 卡）/ `channel.ts`（Turn Complete footer）/ `renderStatusCard` 的硬编码文案抽成 `Translations` 字典（`src/i18n.ts` 的 `Translations` 接口 + `zh`/`en` 两份，`satisfies` 类型校验两侧键集一致）。
+- **卡片层动态 getter（关键）**：卡片层不是把 `t` 作为启动时**值快照**传给 `start*` 工厂（那样 `/lang` 切换后 `/new`/`/busy`/`/session` 等卡不跟随，实测维持值快照时的语言），而是 `getTranslations: () => Translations` **getter**，每次渲染卡时动态读当前语言。命令层用模块级 `activeCommandTranslations` 同步，`/status`/`/model` 每次调用动态取——三者一致，`/lang` 后新发卡片立即切换语言。
+- **术语对齐 DSH**：`Agent 预设` / `会话` / `工作区` / `推理强度` / `工具调用` / 权限 `仅可查看`/`可写入工作区`/`完全权限`；模式短标签（`Queue`/`Steer`，权限枚举值、`Enter while busy`/`Permission` 标题）两种语言均保持英文（对齐 WebUI 固定命名）。
+- 测试：`npm run test` 191 通过；`npm run typecheck` 干净；`npm run build` 产出 lib/client。
+
 ### 兼容 DSH `0.1.2-alpha.2`（`src/index.ts` / `src/feishu-onboarding.ts`）
 
 - **`settingsNamespace` 从 `@deepseek-ai/dsh-settings` 移除**：alpha.2 删掉了 `settingsNamespace`（连同 `installSettingsSection`/`deepEqualJson`），改成内部 `parseSettingsNamespace`，且 `settings.register()` 新签名**直接接受字面量字符串**（内部校验 kebab-case）。原代码 `settingsNamespace(LARK_SETTINGS_NAMESPACE)` 在 alpha.2 会 `TypeError: settingsNamespace is not a function` 导致起不来。

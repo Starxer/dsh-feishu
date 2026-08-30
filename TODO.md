@@ -73,8 +73,8 @@
 |---|---|---|---|
 | 1 | subagent 只读列表面板 | **中** | 订阅 `ctx.subagents.listChildren` / `listDescendants`，列名称/状态/depth，并在会话面板/命令加入口。**只读列表**（用户澄清） |
 | 2 | `/steer` 与 `/queue` idle 兼容 | **中** | agent 空闲时自动**回退为发新消息**（不再报错），回执注明「空闲→已作为新消息」；running 时行为不变（`/queue` 同）。读 `bridge.isAgentRunning` + `resolveAgentOrResume` 判断。**2026-08-30 核查**：`/steer` 仍未解决 —— 空闲时 `bridge.steer` 抛「当前没有运行中的 turn 可注入」，无明显空闲回退；`/queue` 空闲时实际已走新轮路径（`forceQueue` 正常），仅 `busyMode==='queue'` 的冗余短接会返回提示。**待办焦点 = `/steer` 空闲回退** |
-| 3 | `locale` 设置 + `/lang` | **中** | 新增插件 `locale` 字段（默认 zh），`/lang [zh\|en]` 切换并持久化，`/lang` 无参显示当前。**语言源 = 插件设置字段，默认跟随 DSH 语言**（用户澄清） |
-| 4 | 插件文案 i18n（zh/en) | **中** | 命令响应层优先（`larkCommandTranslations`/`CommandTranslations`/`/help`），再扩展关键卡片（streaming/session/busy/permission/questions/todos） |
+| 3 | `locale` 设置 + `/lang` | **中** | ✅ 已完成（2026-08-31）：插件 `locale` 字段（`auto`/`zh`/`en`，默认 `auto`）+ `/lang [zh\|en\|auto]` 切换持久化。**语言源 = 插件字段，默认跟随 DSH**（`settings.get('locale').preference`，无值回退 `zh`）。见 CHANGELOG「中英双语 i18n」 |
+| 4 | 插件文案 i18n（zh/en) | **中** | ✅ 已完成（2026-08-31）：命令响应层（`CommandTranslations` 拆 zh/en，`src/commands-i18n.ts`）+ 卡片层（`Translations` 字典 `src/i18n.ts`）：streaming/session/busy/permission/questions/onboarding/model-select/status/footer 全部双语，术语对齐 DSH。191 测试通过 |
 | 5 | 测试 + typecheck + build + restart + 文档 | **中** | 上述改动收尾：补 spec、`npm run typecheck`/`test`/`build`、`systemctl --user restart dsh`、AGENTS/CHANGELOG 更新 |
 
 ---
