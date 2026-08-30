@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### 兼容 DSH `0.1.2-alpha.2`（`src/index.ts` / `src/feishu-onboarding.ts`）
+
+- **`settingsNamespace` 从 `@deepseek-ai/dsh-settings` 移除**：alpha.2 删掉了 `settingsNamespace`（连同 `installSettingsSection`/`deepEqualJson`），改成内部 `parseSettingsNamespace`，且 `settings.register()` 新签名**直接接受字面量字符串**（内部校验 kebab-case）。原代码 `settingsNamespace(LARK_SETTINGS_NAMESPACE)` 在 alpha.2 会 `TypeError: settingsNamespace is not a function` 导致起不来。
+  - **改法**：`settingsNamespace(LARK_SETTINGS_NAMESPACE)` → `LARK_SETTINGS_NAMESPACE as SettingsNamespace`（`register` 直接收字面量；`as SettingsNamespace` 仅补 alpha.1/alpha.2 都需要的 brand），`import { settingsNamespace }` 改为 `import type { SettingsNamespace }`。
+  - **双向兼容**：alpha.1 运行时 `register` 把 namespace 当纯字符串 key（brand 仅编译期），传字面量运行时等价；`as` cast 在构建时被编译掉，所以 `lib/index.js` 对 alpha.1/alpha.2 是同一份。alpha.1 启动验证通过，alpha.2 就绪（待升级后实测）。
+- **preset 选择卡显示名 `title` → `name`**（`renderPresetPicker`）：`AgentPreset` 类型从未有 `title`（只有 `name?/id`），原代码 `preset.title ?? preset.id` 一直回退到裸 id。改为 `preset.name ?? preset.id`，吃 alpha.2 的 localized shipped preset names。
+
 ### 插件更名：`dsh-feishu` → `chatterbox4dsh`（2026-08-30）
 
 - **背景**：生态里已有 13 个同名 `dsh-feishu` 仓库 + 大量 `dsh-lark*` 变体，命名严重饱和、难区分。为跳出同名簇并突出差异化，改用「唠叨话痨」意象的独立品牌名。

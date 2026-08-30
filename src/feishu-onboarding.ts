@@ -311,7 +311,7 @@ function renderWorkspacePicker(workspaces: readonly WorkspaceLike[], currentWork
 }
 
 /** Agent preset picker card (step 2 of /new). */
-function renderPresetPicker(presets: readonly { id: string; title?: string }[], currentPreset: string | undefined): object {
+function renderPresetPicker(presets: readonly { id: string; name?: string }[], currentPreset: string | undefined): object {
   const elements: object[] = [
     { tag: 'markdown', content: '**🧩 选择 Agent 模板**\n\n模板决定这个会话拥有哪些能力。' },
     { tag: 'hr' },
@@ -320,7 +320,7 @@ function renderPresetPicker(presets: readonly { id: string; title?: string }[], 
     elements.push({ tag: 'markdown', content: '没有可用模板，将使用默认模板。' })
   }
   for (const preset of presets) {
-    const label = preset.title !== undefined && preset.title !== '' ? preset.title : preset.id
+    const label = preset.name !== undefined && preset.name !== '' ? preset.name : preset.id
     const mark = preset.id === currentPreset ? ' ✅' : ''
     elements.push({
       tag: 'button',

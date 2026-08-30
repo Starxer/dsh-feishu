@@ -11,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-workspace'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { LarkChannel, NormalizedMessage } from '@larksuiteoapi/node-sdk'
 import { createLarkChannel } from '@larksuiteoapi/node-sdk'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -95,11 +95,11 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   }
 
   const settingsScope = settings.register(
-    settingsNamespace(LARK_SETTINGS_NAMESPACE),
+    LARK_SETTINGS_NAMESPACE as SettingsNamespace,
     ConfigSchema,
     { base: rawConfig, applies: 'live' },
   )
-  const namespace = settingsNamespace(LARK_SETTINGS_NAMESPACE)
+  const namespace = LARK_SETTINGS_NAMESPACE as SettingsNamespace
   const currentSettings = (): SettingsConfig => resolveSettingsConfig(settingsScope.get())
   const currentRevision = () => settings.describe({ redactSecrets: true }).find(item => item.ns === namespace)?.revision ?? 0
   let apiUpdateDepth = 0
