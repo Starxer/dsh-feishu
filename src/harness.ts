@@ -195,7 +195,7 @@ export class HarnessConversationService {
     }
   }
 
-  async reply(message: InboundMessage): Promise<string> {
+  async reply(message: InboundMessage, opts?: { forceQueue?: boolean }): Promise<string> {
     const key = conversationKey(message)
     // Capture the topic root id so streaming/question/approval/todo cards
     // can reply into the same Feishu topic instead of the main chat stream.
@@ -205,7 +205,11 @@ export class HarnessConversationService {
     const handle = await this.getOrCreate(key)
     const agent = handle.agent
     const gen = this.generationOf(key)
-    const busyMode = this.busyModeFor(key)
+    // `forceQueue` overrides the per-chat busy mode for one message: the
+    // `/queue` command uses it to send a message as a queued new turn even
+    // when the chat is in steer mode (the conjugate of `/steer`, which forces
+    // an injection regardless of the mode).
+    const runBusyMode = opts?.forceQueue === true ? 'queue' as const : this.busyModeFor(key)
     const running = agent.status === 'running'
     const text = message.content
     const imageBlocks = message.imageBlocks ?? []
@@ -229,7 +233,7 @@ export class HarnessConversationService {
 
     // Steer mode + running: inject into the live turn immediately (no wait),
     // then wait for the running turn (including the steered step) to finish.
-    if (busyMode === 'steer' && running) {
+    if (runBusyMode === 'steer' && running) {
       const firstSeq = agent.session.seq
       agent.steer(createUserMessage({ content, source: { kind: 'user' } }))
       await agent.whenIdle()

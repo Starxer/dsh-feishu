@@ -17,7 +17,7 @@ import { createLarkChannel } from '@larksuiteoapi/node-sdk'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { ConfigSchema, LARK_SETTINGS_NAMESPACE, resolveSettingsConfig } from './config.ts'
 import type { Config as PluginConfig, SettingsConfig } from './config.ts'
-import { HarnessConversationService } from './harness.ts'
+import { HarnessConversationService, TurnDroppedError, type BusyMode } from './harness.ts'
 import type { ConversationMessage } from './conversation.ts'
 import { startChannel, type SlashCommandHandler } from './channel.ts'
 import { LarkRuntime } from './runtime.ts'
@@ -45,6 +45,7 @@ import { startFeishuQuestions } from './feishu-questions.ts'
 import { startFeishuSendFileTool } from './feishu-send-file.ts'
 import { startFeishuModelSelect, renderProviderSelectCard, sendModelCardV2, type ModelSelectChannel } from './feishu-model-select.ts'
 import { startFeishuPermission, SANDBOX_MODES, PERMISSION_LABELS, type FeishuPermissionHandle } from './feishu-permission.ts'
+import { startFeishuBusy, type FeishuBusyHandle } from './feishu-busy.ts'
 import { startFeishuOnboarding, type FeishuOnboardingHandle } from './feishu-onboarding.ts'
 import type { ChatCreationOptions } from './harness.ts'
 
@@ -126,6 +127,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   let modelSelectHandle: { dispose: () => void; cardByMessage: Map<string, string>; sequenceByCard: Map<string, number> } | undefined = undefined
   let onboardingHandle: FeishuOnboardingHandle | undefined = undefined
   let permissionHandle: FeishuPermissionHandle | undefined = undefined
+  let busyHandle: FeishuBusyHandle | undefined = undefined
   const channelHolder: { current: LarkChannel | undefined } = { current: undefined }
   // The approvals handle IS the ApprovalControl surface; the new
   // approval/request waterfall listener inside startFeishuApprovals owns the
@@ -318,6 +320,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
           void settings.mutate(namespace, [{ op: 'set', path: ['showIntermediateMessages'], value: next }], currentRevision())
           return { enabled: next as boolean }
         }, sessionController, agents, sandboxPolicy, permissionHandle, llm, defaultModel, cardChannel,
+        busyHandle,
         modelSelectHandle !== undefined ? { cardByMessage: modelSelectHandle.cardByMessage, sequenceByCard: modelSelectHandle.sequenceByCard } : undefined,
         onboardingHandle, workspaceRegistry, agentPresets),
         attachments,
@@ -386,6 +389,14 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     channel: cardChannel,
     sandbox: sandboxPolicy,
     sessionGetter: (id: string) => (agents as any)?.get?.(id)?.session,
+    logger: ctx.logger('dsh-feishu'),
+  })
+  // Interactive `/busy` picker card. Independent of the questions/approvals
+  // seams; only needs the live card channel + the bridge's per-chat busy mode.
+  busyHandle = startFeishuBusy({
+    channel: cardChannel,
+    getMode: chat => bridgeHolder.current?.busyMode(chat) ?? 'queue',
+    setMode: (chat, mode) => bridgeHolder.current?.setBusyMode(chat, mode),
     logger: ctx.logger('dsh-feishu'),
   })
   if (sessionController !== undefined && userQuestions !== undefined && approval !== undefined) {
@@ -511,7 +522,8 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     stopSendFileTool()
     modelSelectHandle?.dispose()
     permissionHandle?.stop()
-  }, 'dsh-feishu: feishu questions + approvals + todos + streaming + send-file + model-select + permission listeners')
+    busyHandle?.stop()
+  }, 'dsh-feishu: feishu questions + approvals + todos + streaming + send-file + model-select + permission + busy listeners')
 
   let lastPrintedQrUrl: string | undefined
   const provisionManager = new ProvisionManager({
@@ -916,6 +928,7 @@ async function executeSlashCommand(
   llm?: LlmRuntime,
   agentDefaultModel?: AgentDefaultModelConfig,
   cardChannel?: ModelSelectChannel,
+  busyCard?: { open: (chat: ConversationMessage) => Promise<string | undefined> },
   modelSelectMaps?: { cardByMessage: Map<string, string>; sequenceByCard: Map<string, number> },
   onboardingHandle?: FeishuOnboardingHandle,
   workspaceRegistry?: { list(): { path: string; name?: string }[] },
@@ -1054,11 +1067,25 @@ async function executeSlashCommand(
   }
   // /busy [queue|steer] sets the per-chat behavior for messages sent while the
   // agent is running: queue (wait for the turn, then run as a new turn) or
-  // steer (inject into the running turn). Persisted across restarts; the
-  // one-off `/steer <text>` remains for a temporary injection.
+  // steer (inject into the running turn). Persisted across restarts. With no
+  // argument it opens the interactive picker card (buttons switch the mode);
+  // `/busy <mode>` still switches directly by text. The one-off `/steer <text>`
+  // remains for a temporary injection.
   if (parsed.name === 'busy') {
     const raw = parsed.rawInput.trim()
     if (raw === '') {
+      // Interactive picker card: clicking a button switches the mode and the
+      // card re-marks the active one. Fall back to a text listing when the
+      // picker handle is unavailable.
+      if (busyCard !== undefined) {
+        try {
+          await busyCard.open(chatMessage)
+          return { kind: 'consumed' }
+        } catch (error: unknown) {
+          const msg = error instanceof Error ? error.message : String(error)
+          return { kind: 'error', text: `⚠️ /busy 卡片失败：${msg}` }
+        }
+      }
       const current = bridge.busyMode(chatMessage)
       const icon = current === 'steer' ? ' 🎯' : ' 📥'
       const label = current === 'steer' ? 'Steer' : 'Queue'
@@ -1080,10 +1107,35 @@ async function executeSlashCommand(
     const desc = raw === 'steer' ? '插话发送（注入当前轮）' : '排队发送（当前轮结束后开新轮）'
     return { kind: 'success', text: `✅ 已把本聊天运行中（busy）的 Enter 行为切为 \`${raw}\`（${desc}）。已持久化。` }
   }
+  // /queue <text> is the conjugate of /steer: it forces a message onto the
+  // QUEUE path even when the chat is in steer mode, so it runs as a new turn
+  // after the current one instead of being injected into the running turn.
+  // Immediate feedback (the queued message's own output streams through the
+  // per-step cards when it runs); a /stop during the wait drops it.
+  if (parsed.name === 'queue') {
+    const text = parsed.rawInput.trim()
+    if (text === '') {
+      return { kind: 'error', text: '⚠️ 用法：/queue <内容> —— 在 steer 模式下也强制把一条消息排队为新轮（/steer 的共轭）。' }
+    }
+    // Submit in the background so the command can acknowledge immediately; the
+    // queue path waits for the current turn then runs it as a new turn. A
+    // `TurnDroppedError` (user ran /stop while queued) is a silent drop, not a
+    // failure — the acknowledgment already told them they can /stop.
+    void bridge.reply({ ...chatMessage, content: text }, { forceQueue: true }).catch((error: unknown) => {
+      if (error instanceof TurnDroppedError) return
+      console.error('dsh-feishu: /queue background reply failed:', error instanceof Error ? error.message : String(error))
+    })
+    return {
+      kind: 'success',
+      text: `📥 已把消息排队为该聊天下一轮运行：\`${text}\`\n\n当前 turn 结束后会自动生成本次回答。排队期间可用 \`/stop\` 丢弃。`,
+    }
+  }
   // /steer <text> injects a message into the RUNNING agent turn (DSH next-step
   // inbox) instead of queueing it as a new turn — the Feishu equivalent of the
-  // WebUI's steer gesture while busy. Returns consumed so the steered content
-  // renders through the per-step cards and no duplicate reply card is sent.
+  // WebUI's steer gesture while busy. The bridge does not wait for idle, so we
+  // acknowledge immediately with a confirmation text (the steered content
+  // itself still renders through the per-step streaming cards as the turn
+  // continues) — otherwise the injection would be silent with no feedback.
   if (parsed.name === 'steer') {
     const text = parsed.rawInput.trim()
     if (text === '') {
@@ -1091,7 +1143,10 @@ async function executeSlashCommand(
     }
     try {
       await bridge.steer({ ...chatMessage, content: text })
-      return { kind: 'consumed' }
+      return {
+        kind: 'success',
+        text: `🎯 已注入运行中的 turn：\`${text}\`\n\nAgent 会把它作为下一步指令继续执行。若想中止，发送 \`/stop\`。`,
+      }
     } catch (error: unknown) {
       return { kind: 'error', text: `⚠️ /steer 失败：${error instanceof Error ? error.message : String(error)}` }
     }

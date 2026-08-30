@@ -149,6 +149,24 @@ describe('HarnessConversationService', () => {
     expect(out).toBe('answer:inject')
   })
 
+  it('forceQueue overrides steer mode for one reply (/queue)', async () => {
+    const f = fixture()
+    const service = new HarnessConversationService(dependencies(f), { domain: 'feishu' })
+    service.setBusyMode({ chatId: 'oc_1', chatType: 'p2p' }, 'steer')
+    await service.reply({ chatId: 'oc_1', chatType: 'p2p', content: 'warmup' })
+    const agent = [...f.agents.values()][0] as any
+    agent.followup.mockClear()
+    agent.steer.mockClear()
+    agent.status = 'running'
+    // Even in steer mode, forceQueue routes to the queue path (followup), never steer.
+    const out = await service.reply({ chatId: 'oc_1', chatType: 'p2p', content: 'queued' }, { forceQueue: true })
+    expect(agent.followup).toHaveBeenCalledTimes(1)
+    expect(agent.steer).not.toHaveBeenCalled()
+    const msg = agent.followup.mock.calls[0]![0]
+    expect(msg.content).toEqual([{ type: 'text', text: '[Feishu] queued' }])
+    expect(out).toBe('answer:queued')
+  })
+
   it('queue-mode reply drops (TurnDroppedError) when the session is stopped while waiting', async () => {
     const f = fixture()
     const service = new HarnessConversationService(dependencies(f), { domain: 'feishu' })
