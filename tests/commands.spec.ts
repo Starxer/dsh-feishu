@@ -39,7 +39,8 @@ const translations: CommandTranslations = {
   threadLastActiveDaysAgo: n => `${n}d ago`,
   threadLastActiveUnknown: 'unknown',
   helpDescription: 'help desc',
-  helpHeader: 'help header:',
+  helpFeishuHeader: 'FEISHU:',
+  helpNativeHeader: 'NATIVE:',
   helpUsage: 'help usage',
   helpEntry: (name, description, hint) => hint === undefined
     ? `${name}: ${description}`
@@ -552,7 +553,7 @@ describe('/detach command', () => {
 })
 
 describe('/help command', () => {
-  it('lists every command returned by the command runtime', async () => {
+  it('splits runtime commands into the dsh-feishu and DSH built-in sections', async () => {
     const fake = fakeContext()
     const descriptors = [
       { name: 'compact', description: 'Compact older conversation history' },
@@ -565,10 +566,19 @@ describe('/help command', () => {
     const result = await handler(fakeInvocation(''))
     expect(cmds.list).toHaveBeenCalledWith(expect.objectContaining({ session: { id: 'a' } }))
     const text = (result as { text: string }).text
-    expect(text).toContain('help header:')
+    // Section headers.
+    expect(text).toContain('FEISHU:')
+    expect(text).toContain('NATIVE:')
+    // Feishu section: registered `model` plus intercepted busy/steer/queue/permission/stop.
+    expect(text).toContain('model: Show, list, or switch the active model')
+    expect(text).toContain('stop: 停止当前运行中的 agent')
+    expect(text).toContain('busy:')
+    expect(text).toContain('steer:')
+    expect(text).toContain('queue:')
+    expect(text).toContain('permission:')
+    // DSH built-in section: compact & export are not owned by the plugin.
     expect(text).toContain('compact: Compact older conversation history')
     expect(text).toContain('export: Download this Session log as a ZIP archive')
-    expect(text).toContain('model: Show, list, or switch the active model')
     expect(text).toContain('help usage')
   })
 
@@ -588,12 +598,17 @@ describe('/help command', () => {
     expect(text).toContain('goal: set or view the goal for a long-running task [[<objective>|clear|edit <objective>|pause|resume]]')
   })
 
-  it('reports an empty list when no descriptors are returned', async () => {
+  it('still lists the Feishu-only (intercepted) commands when the runtime has none', async () => {
     const fake = fakeContext()
     registerLarkCommands(fake.ctx, fakeLlmDirectory(), fakeDefaultModel(), fakeBridge().bridge, fakeBridge().chatMessageFor, translations, fakeCommands([]), stubApprovalControl, stubShowReasoning, fakeSessionController() as never)
     const handler = fake.registered.find(item => item.name === 'help')!.handler
     const result = await handler(fakeInvocation(''))
-    expect(result).toEqual({ kind: 'success', text: 'help empty' })
+    const text = (result as { text: string }).text
+    expect(text).toContain('FEISHU:')
+    expect(text).toContain('busy:')
+    expect(text).toContain('stop:')
+    // No runtime descriptors, so no DSH built-in section should render.
+    expect(text).not.toContain('NATIVE:')
   })
 
   it('ignores extra raw input', async () => {

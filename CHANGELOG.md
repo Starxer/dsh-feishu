@@ -4,6 +4,15 @@
 
 本仓库基于 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark) HEAD（`ee639df`）独立维护，**不再跟踪 upstream 同步**。所有改动仅修改本仓库文件，**未对 DSH 源码（`DSH 源码/packages/*`、`vendor/*`）做任何改动**。上游 LICENSE（MIT, Copyright (c) 2026 sugarforever）保留以满足 MIT modified-work 声明。
 
+### `/help` 命令分类：dsh-feishu 插件 / DSH 内置（`src/commands.ts` / `src/index.ts`）
+
+- **背景**：`/help` 原先把 `commands.list()` 的所有命令平铺列出，无法区分哪些来自本插件、哪些是 DSH（或其它插件）自带的。
+- **实现**：`handleHelpCommand` 改为分两组渲染：
+  - **🔹 dsh-feishu 插件：**按 `FEISHU_OWNED_COMMANDS` 名称集合从 `commands.list()` 中挑出本插件注册的命令。
+  - **💠 DSH 内置：**其余（如 `compact`/`goal`/`export`/`feedback` 等 DSH 原生命令）。
+  - **补充被拦截的命令**：`busy`/`steer`/`queue`/`permission`/`stop` 是在 `executeSlashCommand` 里直接拦截处理的（不注册、不在 `commands.list()` 里），此前从不出现在 `/help`；现在用 `FEISHU_INTERCEPTED_COMMANDS`（含描述/输入提示）把它们补进 Feishu 组，并对命令 runtime 列出的 Feishu 命令去重（registered 优先）。
+  - 组内按名称排序；两组都无条目时才回 `helpEmpty`。翻译新增 `helpFeishuHeader` / `helpNativeHeader`（替换原 `helpHeader`）。
+
 ### 移除「Node SDK 过滤 `MessageType.CARD`」补丁（经对照实验证伪）（`package.json` / `scripts/patch-sdk-card-action.sh`）
 
 - **背景**：早期为解决飞书卡片回调，往 `@larksuiteoapi/node-sdk` 打了一个 `postinstall` sed 补丁（`patch-sdk-card-action.sh`），把 WS `handleEventData` 的过滤从 `type !== MessageType.event` 改成也放行 `type === MessageType.card`。

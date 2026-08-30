@@ -89,7 +89,8 @@ export interface CommandTranslations {
   readonly threadLastActiveDaysAgo: (n: number) => string
   readonly threadLastActiveUnknown: string
   readonly helpDescription: string
-  readonly helpHeader: string
+  readonly helpFeishuHeader: string
+  readonly helpNativeHeader: string
   readonly helpUsage: string
   readonly helpEntry: (name: string, description: string, hint: string | undefined) => string
   readonly helpEmpty: string
@@ -543,11 +544,38 @@ async function handleDetachCommand(
 }
 
 /**
+ * Slash commands owned by this Feishu plugin. Used by `/help` to split the
+ * runtime's command list into a "dsh-feishu" section and a "DSH built-in"
+ * section, so the user sees which commands come from this plugin and which are
+ * part of DSH itself.
+ */
+const FEISHU_OWNED_COMMANDS = new Set<string>([
+  'model', 'new', 'thread', 'detach', 'help', 'approve', 'deny', 'approvals',
+  'status', 'stream', 'reasoning', 'busy', 'steer', 'queue', 'permission', 'stop',
+])
+
+/**
+ * Feishu commands handled directly in `src/index.ts`'s `executeSlashCommand`
+ * rather than registered on the command runtime, so they never appear in
+ * `commands.list()`. `/help` supplies their metadata here so they still show up
+ * in the dsh-feishu section.
+ */
+const FEISHU_INTERCEPTED_COMMANDS: Array<{ name: string; description: string; hint?: string }> = [
+  { name: 'stop', description: '停止当前运行中的 agent（同 WebUI 停止按钮），并丢弃排队中的消息' },
+  { name: 'busy', description: '设置 agent 运行中收到消息时的 Enter 行为（Queue / Steer，持久化）', hint: '[queue|steer]' },
+  { name: 'steer', description: '把一条消息注入当前运行中的 turn（运行中插话，/queue 的共轭）', hint: '<内容>' },
+  { name: 'queue', description: '把一条消息排队为新一轮运行（/steer 的共轭）', hint: '<内容>' },
+  { name: 'permission', description: '切换本会话的权限（沙箱）模式', hint: '[read-only|workspace-write|danger-full-access]' },
+]
+
+/**
  * Handle `/help`. Lists every slash command currently registered on the
- * receiving agent's command view, including commands contributed by other
- * plugins (e.g. `compact`, `goal`, `feedback`, `export`). Listing reads the
- * command runtime directly so newly-registered commands appear without any
- * change to this plugin.
+ * receiving agent's command view, split into the commands this Feishu plugin
+ * contributes and the commands DSH (and other plugins) provide. Commands
+ * intercepted directly by the plugin (busy/steer/queue/permission/stop) are
+ * appended to the plugin section even though they are not registered on the
+ * command runtime. Listing reads the command runtime directly so newly-added
+ * DSH commands appear without any change to this plugin.
  */
 async function handleHelpCommand(
   invocation: CommandInvocation,
@@ -555,16 +583,36 @@ async function handleHelpCommand(
   t: CommandTranslations,
 ): Promise<CommandResult> {
   const descriptors = commands.list(invocation.agent)
-  if (descriptors.length === 0) {
+  const native = descriptors.filter(d => !FEISHU_OWNED_COMMANDS.has(d.name))
+  // Registered Feishu commands first, then any intercepted ones not already
+  // present (e.g. busy/steer/queue/permission/stop, which only exist here).
+  // Normalize to a single { name, description, hint } shape for rendering.
+  const feishu: Array<{ name: string; description: string; hint?: string }> = [
+    ...descriptors.filter(d => FEISHU_OWNED_COMMANDS.has(d.name)).map(d => ({
+      name: d.name,
+      description: d.description,
+      ...(d.input?.hint !== undefined ? { hint: d.input.hint } : {}),
+    })),
+    ...FEISHU_INTERCEPTED_COMMANDS.filter(d => !descriptors.some(x => x.name === d.name)),
+  ]
+  // Stable, readable ordering within each group.
+  native.sort((a, b) => a.name.localeCompare(b.name))
+  feishu.sort((a, b) => a.name.localeCompare(b.name))
+  if (feishu.length === 0 && native.length === 0) {
     return { kind: 'success', text: t.helpEmpty }
   }
-  const lines = [t.helpHeader]
-  for (const descriptor of descriptors) {
-    lines.push(t.helpEntry(
-      descriptor.name,
-      descriptor.description,
-      descriptor.input?.hint,
-    ))
+  const lines: string[] = []
+  if (feishu.length > 0) {
+    lines.push(t.helpFeishuHeader)
+    for (const d of feishu) {
+      lines.push(t.helpEntry(d.name, d.description, d.hint))
+    }
+  }
+  if (native.length > 0) {
+    lines.push(t.helpNativeHeader)
+    for (const d of native) {
+      lines.push(t.helpEntry(d.name, d.description, d.input?.hint))
+    }
   }
   lines.push(t.helpUsage)
   return { kind: 'success', text: lines.join('\n') }
