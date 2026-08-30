@@ -4,6 +4,13 @@
 
 本仓库基于 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark) HEAD（`ee639df`）独立维护，**不再跟踪 upstream 同步**。所有改动仅修改本仓库文件，**未对 DSH 源码（`DSH 源码/packages/*`、`vendor/*`）做任何改动**。上游 LICENSE（MIT, Copyright (c) 2026 sugarforever）保留以满足 MIT modified-work 声明。
 
+### 移除「Node SDK 过滤 `MessageType.CARD`」补丁（经对照实验证伪）（`package.json` / `scripts/patch-sdk-card-action.sh`）
+
+- **背景**：早期为解决飞书卡片回调，往 `@larksuiteoapi/node-sdk` 打了一个 `postinstall` sed 补丁（`patch-sdk-card-action.sh`），把 WS `handleEventData` 的过滤从 `type !== MessageType.event` 改成也放行 `type === MessageType.card`。
+- **纠错**：该补丁的判断（卡片回调以 `type='card'` 到达会被丢弃）**经对照实验证伪**。还原 pristine SDK（`type !== MessageType.event`）后重启，`card.action.trigger` 仍以 `type='event'`（带 `event_type`）到达插件，`/busy`、`/permission`、`/model` 卡片点选全部正常——**帧过滤并不拦它**。真正导致卡片点选无反应的是 `action.value` 双编码解析问题（见下方 `decodeCardValue` 修复）。
+- **处置**：删除 `scripts/patch-sdk-card-action.sh`、移除 `package.json` 的 `postinstall`，SDK 还原为官方原版 `1.73.0`（不再改动 gitignored 的 node_modules）。对应 issue（`larksuite/node-sdk` #98/#156/#128/#64）均为「事件名类型缺失」用泛型注册可绕过，未涉及帧过滤。
+- **版本**：`@larksuiteoapi/node-sdk` 保持 `^1.73.0`（最新版仍是 1.73.0）。
+
 ### `action.value` 双编码修复：`/permission`、`/busy` 卡片点选无反应（`src/card-action.ts` / `src/feishu-permission.ts` / `src/feishu-busy.ts`）
 
 - **症状**：`/permission` 与 `/busy` 的交互式选择卡片，点击按钮**没有任何反应**（卡片不刷新、模式不切换）。

@@ -48,7 +48,7 @@
 | — | 不同步骤工具调用分离 | ✅ `resetStep` 不清除 `state.chat`（session 级坐标），每个 step 独立卡片 |
 | — | 审批按钮反馈 | ✅ 点击后卡片更新为 ✅ Approved / ❌ Rejected，移除按钮 |
 | — | 飞书事件订阅修复 | ✅ provision 新增 `im:message.reaction` 权限 |
-| — | 卡片按钮回调修复 | ✅ Node.js SDK `MessageType.CARD` 被过滤 → 补丁修复 + postinstall 脚本 |
+| — | 卡片按钮回调修复 | ✅ ~~Node.js SDK `MessageType.CARD` 被过滤~~**经对照实验证实补丁不必要**：`card.action.trigger` 以 `type='event'` 到达，帧过滤不拦它；已移除 `patch-sdk-card-action.sh` + `postinstall`（还原 pristine SDK） |
 | — | 选项卡片反馈 | ✅ 选择后 recall 旧卡 + 发新卡（青绿色头部，显示所有选项，已选高亮） |
 | — | 双重编码 JSON | ✅ Feishu `action.value` 双重编码 → 二次 `JSON.parse`（questions + approvals） |
 | — | Turn Complete 时间修复 | ✅ LLM 时间（assistant/message 累加）与工具时间（tool/result 累加）分开统计 |
@@ -105,13 +105,13 @@
 
 **待优化**：审批卡片的 header 颜色变化目前依赖 updateCard，实际上不会生效。需要改为 recall + resend。
 
-### Node.js SDK `MessageType.CARD` 被过滤
+### ~~Node.js SDK `MessageType.CARD` 被过滤~~（已证伪，补丁已移除）
 
-**现象**：飞书卡片回调事件（`card.action.trigger`）通过 WebSocket 推送时 `type='card'`，Node.js SDK 的 `handleEventData` 过滤了 `type !== 'event'` 的消息。
+**现象（原判断）**：飞书卡片回调事件（`card.action.trigger`）通过 WebSocket 推送时 `type='card'`，Node.js SDK 的 `handleEventData` 过滤了 `type !== 'event'` 的消息。
 
-**解决**：`scripts/patch-sdk-card-action.sh` 补丁 + `postinstall` 脚本自动应用。
+**纠错**：该判断经**对照实验证伪**——还原 pristine SDK（`type !== MessageType.event`）后重启，`card.action.trigger` 仍以 `type='event'`（带 `event_type`）到达插件，卡片点按正常。即帧过滤并不拦它，**此前加的 `scripts/patch-sdk-card-action.sh` + `postinstall` 补丁是过度诊断，已移除**，SDK 还原为官方原版。真正导致卡片「点按无反应」的是 `action.value` 双编码解析问题（用 `decodeCardValue` 修复，见 CHANGELOG）。
 
-**长期方案**：向 @larksuiteoapi/node-sdk 提 issue/PR 修复。
+**长期方案**：若未来 SDK 变更导致 card 帧被拦，再评估提 issue/PR。
 
 ### `action.value` 双重编码
 
