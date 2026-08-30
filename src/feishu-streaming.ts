@@ -57,6 +57,8 @@ interface StepUsage {
   outputTokens: number
   cacheReadTokens?: number | undefined
   cacheWriteTokens?: number | undefined
+  /** Full-call billed total (prompt + output) when the adapter reports it. */
+  totalTokens?: number | undefined
 }
 
 /** Aggregated turn stats for the Turn Complete card. */
@@ -68,6 +70,8 @@ export interface TurnStats {
   totalOutputTokens: number
   totalCacheReadTokens: number
   totalCacheWriteTokens: number
+  /** Sum of per-call billed totals (input + cache + output). Matches Web UI's "consumed". */
+  totalBilledTokens: number
   firstStepTtftMs: number | null
   /** Sum of (firstToken → message) across steps — pure LLM decode time for throughput. */
   totalDecodeMs: number
@@ -366,6 +370,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
             outputTokens: (usage.outputTokens as number) ?? 0,
             cacheReadTokens: (usage.cacheReadTokens as number | undefined),
             cacheWriteTokens: (usage.cacheWriteTokens as number | undefined),
+            totalTokens: (usage.totalTokens as number | undefined),
           }
         }
         if (state.usage !== undefined) {
@@ -387,6 +392,14 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
             ts.totalOutputTokens += state.usage.outputTokens
             ts.totalCacheReadTokens += state.usage.cacheReadTokens ?? 0
             ts.totalCacheWriteTokens += state.usage.cacheWriteTokens ?? 0
+            // Billed total per call: the adapter's exact total when reported,
+            // else uncached input + cache read/write + output (what the Web UI
+            // derives and shows as "consumed").
+            ts.totalBilledTokens += state.usage.totalTokens
+              ?? state.usage.inputTokens
+              + (state.usage.cacheReadTokens ?? 0)
+              + (state.usage.cacheWriteTokens ?? 0)
+              + state.usage.outputTokens
           }
           if (ts.firstStepTtftMs === null && state.firstTokenTime > 0 && state.stepStartTime > 0) {
             ts.firstStepTtftMs = state.firstTokenTime - state.stepStartTime
@@ -432,8 +445,18 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
         console.log(`dsh-feishu: [result] callId=${toolCallId} found=${toolCall !== undefined} toolsInState=${state.toolCalls.length} stepCardSent=${state.stepCardSent}`)
 
         if (toolCall !== undefined) {
-          const isError = event.data?.error !== undefined || event.data?.message?.content?.[0]?.isError === true
-          const resultContent = event.data?.message?.content
+          // `ToolResultMessage.content` is `[ToolResultBlock]` whose real
+          // content blocks nest at `.content[0].content`. Reading the outer
+          // array directly yielded nothing (its block type is `tool-result`,
+          // not `text`), which is why tool output had disappeared. Mirror the
+          // Web UI, which reads `message.content[0]` → `{ content, isError }`.
+          const resultBlock = Array.isArray(event.data?.message?.content)
+            ? event.data.message.content[0]
+            : undefined
+          const isError = event.data?.error !== undefined
+            || resultBlock?.isError === true
+            || event.data?.message?.content?.[0]?.isError === true
+          const resultContent = resultBlock?.content ?? event.data?.message?.content
           const result = Array.isArray(resultContent)
             ? resultContent.map((b: { type: string; text?: string }) => b.type === 'text' ? b.text ?? '' : '').filter(Boolean).join('\n')
             : resultContent
@@ -441,7 +464,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
 
           toolCall.result = {
             isError,
-            content: summarizeValue(result, 300) || '',
+            content: summarizeValue(result, RESULT_CONTENT_CAP) || '',
             elapsed,
           }
           // tool/result carries a tool-private `meta` payload — the
@@ -473,6 +496,7 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
           totalOutputTokens: 0,
           totalCacheReadTokens: 0,
           totalCacheWriteTokens: 0,
+          totalBilledTokens: 0,
           firstStepTtftMs: null,
           totalDecodeMs: 0,
           totalStepMs: 0,
@@ -573,6 +597,12 @@ export function startFeishuStreaming(deps: FeishuStreamingDeps): {
     flushed,
   }
 }
+
+/** Cap for one tool call's kept raw result content (characters). */
+const RESULT_CONTENT_CAP = 1500
+
+/** Cap for one tool result preview rendered into the card (characters). */
+const RESULT_PREVIEW_CAP = 1500
 
 /**
  * Truncate a value to a readable summary for card display.
@@ -776,16 +806,21 @@ export function renderStepCard(
 
       // Args in a dedicated fenced code block: it wraps/scrolls instead of
       // overflowing, and tolerates backticks/newlines that would otherwise
-      // break the inline `...` formatting.
+      // break the inline `...` formatting. Label it so it is not confused
+      // with the tool result block below.
       const argsCode = sanitizeCodeblock(summarizeValue(tool.arguments, 200))
       if (argsCode !== '') {
-        elements.push({ tag: 'markdown', content: '```\n' + argsCode + '\n```' })
+        elements.push({ tag: 'markdown', content: `${t.stepToolArgsHeader}\n\`\`\`\n${argsCode}\n\`\`\`` })
       }
 
-      // Result preview: dispatch on resultView.card type
+      // Result preview: dispatch on resultView.card type. Label the emitted
+      // block(s) as the tool result so it is not confused with the args block.
       if (tool.result !== undefined) {
         const resultElements = renderResultPreview(tool)
-        elements.push(...resultElements)
+        if (resultElements.length > 0) {
+          elements.push({ tag: 'markdown', content: t.stepToolResultHeader })
+          elements.push(...resultElements)
+        }
       }
     }
   }
@@ -803,7 +838,8 @@ export function renderStepCard(
       : `⏱ ${stepDurationMs}ms`)
   }
   if (usage !== undefined) {
-    footerParts.push(`📥 ${formatTokenCount(usage.inputTokens)} → 📤 ${formatTokenCount(usage.outputTokens)}`)
+    const billedIn = usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+    footerParts.push(`📥 ${formatTokenCount(billedIn)} → 📤 ${formatTokenCount(usage.outputTokens)}`)
   }
   if (tps !== undefined && tps > 0) {
     footerParts.push(`🚀 ${tps.toFixed(0)} tok/s`)
@@ -850,112 +886,78 @@ export function renderStepCard(
 }
 
 /**
- * Render result preview elements based on the resultView card type.
- * Mirrors how DSH Web UI dispatches on card type for specialized rendering.
+ * Render one tool result's raw text as a fenced code block, capped.
+ */
+function renderRawCode(content: string, lang = ''): object[] {
+  if (content === '') return []
+  const output = content.length > RESULT_PREVIEW_CAP ? content.slice(0, RESULT_PREVIEW_CAP) + '…' : content
+  return [{ tag: 'markdown', content: `\`\`\`${lang}\n${sanitizeCodeblock(output)}\n\`\`\`` }]
+}
+
+/**
+ * Render a tool result preview. DSH 0.1.2-alpha.2 tools put a tool-private
+ * `presentationMeta` JSON payload on `tool/result` (`event.data.meta`) whose
+ * shape is OWNED BY THE TOOL — the `card: 'terminal' | 'read' | 'diff' | …`
+ * vocabulary from the removed `presentResult` view does NOT appear on it.
+ * Both the Web UI and this bridge therefore treat `meta` as opaque structured
+ * data and recover the rich card by shape, falling back to the raw result text
+ * when the shape is unknown. Every branch ends in `finish`, which guarantees
+ * the raw content is shown when a matched shape renders nothing.
  */
 function renderResultPreview(tool: StepToolCall): object[] {
   const rv = tool.resultView
   const elements: object[] = []
-  // If a matched card view has no rendered content (e.g. a terminal view
-  // without an `output` field), fall back to the raw result content so the
-  // result is always visible instead of silently dropping it.
   const finish = (els: object[]): object[] => {
     if (els.length === 0 && tool.result !== undefined && tool.result.content !== '') {
-      const output = tool.result.content.length > 500 ? tool.result.content.slice(0, 500) + '…' : tool.result.content
-      els.push({ tag: 'markdown', content: `\`\`\`\n${output}\n\`\`\`` })
+      els.push(...renderRawCode(tool.result.content))
     }
     return els
   }
 
-  // Terminal card (bash, pwsh): code block with output + exit code
-  if (rv?.card === 'terminal') {
-    if (rv.output !== undefined && rv.output.trim() !== '') {
-      const output = rv.output.length > 500 ? rv.output.slice(0, 500) + '…' : rv.output
-      elements.push({ tag: 'markdown', content: `\`\`\`\n${output}\n\`\`\`` })
-    }
+  // Search (grep/glob): `{ shape: 'paths', paths }` or `{ shape: 'matches', files }`.
+  if (rv?.shape === 'paths' && Array.isArray(rv.paths)) {
+    const paths = rv.paths.slice(0, 20)
+    const lines = paths.map((p: string) => `- \`${p}\``)
+    if (rv.truncated) lines.push(`*(showing ${paths.length} of ${rv.total})*`)
+    if (lines.length > 0) elements.push({ tag: 'markdown', content: lines.join('\n') })
     return finish(elements)
   }
-
-  // Web search card: structured source list
-  if (rv?.card === 'web' && rv.kind === 'search' && Array.isArray(rv.sources)) {
+  if (rv?.shape === 'matches' && Array.isArray(rv.files)) {
     const lines: string[] = []
-    if (rv.answer !== undefined && rv.answer.trim() !== '') {
-      lines.push(rv.answer.length > 300 ? rv.answer.slice(0, 300) + '…' : rv.answer)
-      lines.push('')
-    }
-    for (let i = 0; i < rv.sources.length; i++) {
-      const s = rv.sources[i]
-      const title = s.title ?? s.url
-      lines.push(`${i + 1}. [${title}](${s.url})`)
-      if (s.snippet !== undefined && s.snippet.trim() !== '') {
-        lines.push(`   > ${s.snippet.length > 150 ? s.snippet.slice(0, 150) + '…' : s.snippet}`)
-      }
-    }
-    if (rv.truncated) lines.push('*(truncated)*')
-    if (lines.length > 0) {
-      elements.push({ tag: 'markdown', content: lines.join('\n') })
-    }
-    return finish(elements)
-  }
-
-  // Web fetch card: URL + status
-  if (rv?.card === 'web' && rv.kind === 'fetch') {
-    const status = rv.statusCode >= 200 && rv.statusCode < 300 ? '✅' : '⚠️'
-    elements.push({ tag: 'markdown', content: `${status} \`${rv.url}\` — HTTP ${rv.statusCode}${rv.truncated ? ' (truncated)' : ''}` })
-    return finish(elements)
-  }
-
-  // Search card (grep/glob): file matches or paths
-  if (rv?.card === 'search') {
-    if (rv.shape === 'paths' && Array.isArray(rv.paths)) {
-      const paths = rv.paths.slice(0, 20)
-      const lines = paths.map((p: string) => `- \`${p}\``)
-      if (rv.truncated) lines.push(`*(showing ${paths.length} of ${rv.total})*`)
-      if (lines.length > 0) {
-        elements.push({ tag: 'markdown', content: lines.join('\n') })
-      }
-    } else if (rv.shape === 'matches' && Array.isArray(rv.files)) {
-      const lines: string[] = []
-      for (const file of rv.files.slice(0, 5)) {
-        lines.push(`**${file.path}**`)
-        if (Array.isArray(file.matches)) {
-          for (const m of file.matches.slice(0, 3)) {
-            lines.push(`  ${m.lineNumber}: \`${m.line.trim()}\``)
-          }
+    for (const file of rv.files.slice(0, 5)) {
+      lines.push(`**${file.path}**`)
+      if (Array.isArray(file.matches)) {
+        for (const m of file.matches.slice(0, 3)) {
+          const line = typeof m.line === 'string' ? m.line : String(m.line ?? '')
+          lines.push(`  ${m.lineNumber}: \`${line.trim()}\``)
         }
       }
-      if (rv.truncated) lines.push(`*(showing ${rv.files.length} files of ${rv.total} matches)*`)
-      if (lines.length > 0) {
-        elements.push({ tag: 'markdown', content: lines.join('\n') })
-      }
     }
+    if (rv.truncated) lines.push(`*(showing ${rv.files.length} files of ${rv.total} matches)*`)
+    if (lines.length > 0) elements.push({ tag: 'markdown', content: lines.join('\n') })
     return finish(elements)
   }
 
-  // Read card: file content with line numbers
-  if (rv?.card === 'read' && Array.isArray(rv.lines)) {
-    if (rv.lines.length > 0) {
-      const content = rv.lines
-        .map((l: any) => `${String(l.number).padStart(4)}│ ${l.text}`)
-        .slice(0, 30)
-        .join('\n')
-      const lang = rv.lang !== undefined ? rv.lang : ''
-      elements.push({ tag: 'markdown', content: `\`\`\`${lang}\n${content}\n\`\`\`` })
-    }
+  // Read (fs/read): `{ path, lines: [{ number, text }], lang }`.
+  if (Array.isArray(rv?.lines) && rv.lines.length > 0 && typeof rv.lines[0]?.number === 'number') {
+    const content = rv.lines
+      .map((l: any) => `${String(l.number).padStart(4)}│ ${l.text}`)
+      .slice(0, 30)
+      .join('\n')
+    elements.push({ tag: 'markdown', content: `\`\`\`${rv.lang ?? ''}\n${content}\n\`\`\`` })
     return finish(elements)
   }
 
-  // Diff card: show diff hunks
-  if (rv?.card === 'diff' && Array.isArray(rv.diffs)) {
+  // Edit (fs/edit): `{ diffs: [{ path, oldText, newText }] }`.
+  if (Array.isArray(rv?.diffs) && rv.diffs.length > 0 && rv.diffs.some((d: any) => d.oldText !== undefined || d.newText !== undefined)) {
     for (const diff of rv.diffs.slice(0, 3)) {
-      if (!Array.isArray(diff.hunks)) continue
-      const lines = diff.hunks
-        .flatMap((h: any) => h.lines.map((l: any) => {
-          if (l.type === 'add') return `+ ${l.text}`
-          if (l.type === 'remove') return `- ${l.text}`
-          return `  ${l.text}`
-        }))
-        .slice(0, 20)
+      const lines: string[] = []
+      if (typeof diff.oldText === 'string' && typeof diff.newText === 'string') {
+        const oldFirst = diff.oldText.split('\n').slice(0, 8)
+        const newFirst = diff.newText.split('\n').slice(0, 8)
+        for (const l of oldFirst) lines.push(`- ${l}`)
+        for (const l of newFirst) lines.push(`+ ${l}`)
+      }
       if (lines.length > 0) {
         elements.push({ tag: 'markdown', content: `**${diff.path}**\n\`\`\`diff\n${lines.join('\n')}\n\`\`\`` })
       }
@@ -963,23 +965,20 @@ function renderResultPreview(tool: StepToolCall): object[] {
     return finish(elements)
   }
 
-  // Generic card or fallback: use content blocks or raw result
-  if (rv?.card === 'generic' && Array.isArray(rv.content)) {
-    const text = rv.content
-      .filter((b: any) => b.type === 'text' && b.text !== undefined)
-      .map((b: any) => b.text ?? '')
-      .join('\n')
-    if (text.trim() !== '') {
-      const output = text.length > 500 ? text.slice(0, 500) + '…' : text
-      elements.push({ tag: 'markdown', content: `\`\`\`\n${output}\n\`\`\`` })
-    }
+  // Legacy/fallback: a `card`-style view (no longer emitted by DSH tools, but
+  // kept so any future view presentation still renders). Read-shape note: the
+  // read branch is disambiguated above by `lines[0].number`; this safety net
+  // only catches a card-typed sub-message.
+  if (rv?.card === 'terminal' || rv?.card === 'web' || rv?.card === 'search'
+    || rv?.card === 'read' || rv?.card === 'diff' || rv?.card === 'generic') {
+    // These generally carry no renderable text by themselves (the real tools
+    // export the model-facing text via `content`), so fall through to content.
     return finish(elements)
   }
 
-  // Last resort: use raw result content from the tool result
+  // Last resort: the raw result text is the authoritative source.
   if (tool.result !== undefined && tool.result.content !== '') {
-    const output = tool.result.content.length > 500 ? tool.result.content.slice(0, 500) + '…' : tool.result.content
-    elements.push({ tag: 'markdown', content: `\`\`\`\n${output}\n\`\`\`` })
+    elements.push(...renderRawCode(tool.result.content))
   }
 
   return elements

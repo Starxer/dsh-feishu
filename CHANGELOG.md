@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### 修复：步骤卡片工具调用输出不可见（`src/feishu-streaming.ts`）
+
+- **根因**：DSH 0.1.2-alpha.2 的 `ToolResultMessage.content` 是 `[ToolResultBlock]`（`{ type: 'tool-result', toolCallId, content, isError }`），**真实结果内容块嵌套在 `content[0].content`**。旧代码在 `tool/result` 处读 `event.data.message.content`（外层数组），然后按 `type === 'text'` 过滤——外层块的类型是 `tool-result` 而非 `text`，于是 `result.content` 恒为空。而 `renderResultPreview` 依赖的 `card` 词汇（`presentResult` 的 `card:'terminal'/'read'/'diff'` 等）在 alpha.2 **已不存在**（工具把私有 `presentationMeta` 放 `event.data.meta`，无 `card` 字段），所以任何分支都不匹配，最后兜底又因 `content === ''` 而空——结果输出完全消失。
+- **修复**：
+  - `tool/result` 改读 `message.content[0]`（`ToolResultBlock`），从 `.content` 取真实内容块，`isError` 取 `block.isError`（对齐 Web UI `tool.ts`）。
+  - `renderResultPreview` 改为**按真实 meta 形状**分发：grep/glob 的 `shape:'paths'/'matches'`、fs/read 的 `lines:[{number,text}]`、fs/edit 的 `diffs:[{path,oldText,newText}]`；保留 `card` 词汇分支作安全网（一般无渲染文本而走内容兜底）。**每个分支都走 `finish()`**，产出空时兜底渲染原始结果文本（`renderRawCode`，上限 1500 字符），保证结果始终可见。
+  - 结果内容提取上限从 300 提升到 1500 字符，避免长 bash 输出被截成不可读。
+
+### 修复：Turn Complete 卡片 token 用量与 Web UI 对不上（`src/channel.ts` / `src/feishu-streaming.ts`）
+
+- **根因**：DSH 的 `TokenUsage.inputTokens` **只算未缓存输入**（缓存输入在 `cacheReadTokens`/`cacheWriteTokens` 单独上报）。旧卡片 `📥 uncachedIn in · 📤 out` 未把缓存读/写计入，且没有「本轮总消耗」项；而 Web UI 的 turn-tail pill 显示的是 **总消耗**（`totalTokens` = 未缓存输入 + 缓存读 + 缓存写 + 输出）。多步 turn 里缓存占比高（尤其 reasoning/长上下文），显式对比时卡片数「明显偏少」。
+- **修复**：
+  - `StepUsage`/`TurnStats` 增加 `totalTokens`/`totalBilledTokens`（每个 assistant/message 的计费总消耗：有 `usage.totalTokens` 用原始值，否则 = 输入 + 缓存读 + 缓存写 + 输出，即 Web UI 推导口径）。
+  - Turn Complete 卡片新增 `📦 总消耗 tokens`（= 计费输入 + 输出，匹配 Web UI 的 "consumed"）；`📥 in` 改用**计费输入**（未缓存 + 缓存读 + 缓存写），`💾 cache%` 分母同步用计费输入。
+  - per-step 卡 footer 的 `📥 in → 📤 out` 同样改用计费输入。
+- 测试：`channel-footer.spec.ts` 新增「billed total + cache-inclusive input like Web UI」；`feishu-streaming.spec.ts` 新增「no-shape 兜底（真实 bash meta 情形）」「read-shaped」「edit-shaped」渲染用例。
+
+### 修复：工具调用两个代码块无小标题（`src/feishu-streaming.ts` / `src/i18n.ts`）
+
+- **问题**：修好工具输出可见后，每个工具调用会渲染**两个裸 fenced 代码块**（参数 / 结果），都没有标题或注释，看不出哪个是输入、哪个是输出。
+- **修复**：给两个代码块加**小标题**（随 `/lang` 双语）：
+  - 参数块前加 `stepToolArgsHeader`（`⚙️ 参数` / `⚙️ Args`）。
+  - 结果块前加 `stepToolResultHeader`（`📤 结果` / `📤 Result`），仅在结果块有产出时出现，避免空标题。
+  - `src/i18n.ts` 的 `Translations` 接口 + `zh`/`en` 两份各加这两个键；`feishu-streaming.ts` 在 fenced 块前 push 标题 markdown 元素。
+- 测试：`feishu-streaming.spec.ts` 新增「labels both the args and result code blocks」（校验两个标题都出现、结果标题在输出文本之前），并调整 `codeBlocksOf`（改为按 fence 存在匹配，因标题行在 fence 前）。
+
 ### `/session` 切换：一律弹确认 + 释放被离开的旧会话（`src/feishu-session.ts` / `src/harness.ts`）
 
 - **切换一律弹确认**（`feishu-session.ts` `handlePanel`）：原来只有「目标被别的 chat 占用」时才弹「接管/取消」确认卡，目标空闲时点「🔀 切换」直接切到新会话（`attachSession`）。改为**任何切换都先弹确认卡**——切换 = 离开当前会话、改绑到另一个，误触会静默丢掉当前进行中的对话。确认后才 `execOp → attachSession`。

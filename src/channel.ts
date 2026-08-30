@@ -580,14 +580,20 @@ export function renderFooterCard(
       elements.push({ tag: 'markdown', content: perfParts.join(' · '), text_size: 'notation' })
     }
 
-    // Tokens: in/out · cache
+    // Tokens: total consumed (matches Web UI "consumed") · in/out · cache
     const tokenParts: string[] = []
-    if (turnStats.totalInputTokens > 0 || turnStats.totalOutputTokens > 0) {
-      tokenParts.push(`📥 ${formatTokenCount(turnStats.totalInputTokens)} in · 📤 ${formatTokenCount(turnStats.totalOutputTokens)} out`)
+    const billedIn = turnStats.totalInputTokens + turnStats.totalCacheReadTokens + turnStats.totalCacheWriteTokens
+    const totalBilled = turnStats.totalBilledTokens > 0
+      ? turnStats.totalBilledTokens
+      : billedIn + turnStats.totalOutputTokens
+    if (totalBilled > 0) {
+      tokenParts.push(`📦 ${formatTokenCount(totalBilled)} tokens`)
     }
-    const totalInput = turnStats.totalInputTokens + turnStats.totalCacheReadTokens + turnStats.totalCacheWriteTokens
-    if (totalInput > 0 && turnStats.totalCacheReadTokens > 0) {
-      const cacheHitPct = Math.round(turnStats.totalCacheReadTokens / totalInput * 100)
+    if (billedIn > 0 || turnStats.totalOutputTokens > 0) {
+      tokenParts.push(`📥 ${formatTokenCount(billedIn)} in · 📤 ${formatTokenCount(turnStats.totalOutputTokens)} out`)
+    }
+    if (billedIn > 0 && turnStats.totalCacheReadTokens > 0) {
+      const cacheHitPct = Math.round(turnStats.totalCacheReadTokens / billedIn * 100)
       tokenParts.push(`💾 cache ${cacheHitPct}%`)
     }
     if (tokenParts.length > 0) {

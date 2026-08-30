@@ -8,7 +8,16 @@ function codeBlocksOf(card: any): string[] {
   return card.body.elements
     .filter((el: any) => el.tag === 'markdown')
     .map((el: any) => el.content)
-    .filter((c: string) => c.startsWith('```') && c.endsWith('```'))
+    // A fenced block now carries a label line before the fence (e.g. "⚙️ 参数"),
+    // so match on the fence presence rather than block start.
+    .filter((c: string) => c.includes('```'))
+}
+
+function mdOf(card: any): string {
+  return card.body.elements
+    .filter((el: any) => el.tag === 'markdown')
+    .map((el: any) => el.content)
+    .join('\n')
 }
 
 describe('renderStepCard tool result/args rendering', () => {
@@ -33,6 +42,57 @@ describe('renderStepCard tool result/args rendering', () => {
     const argsBlock = blocks.find(b => b.includes('echo'))
     expect(argsBlock).toBeDefined()
     expect(argsBlock).toContain('echo `x`')
+    // Each fenced block carries its own label so args and result are distinct.
+    expect(argsBlock).toContain('**⚙️ 参数**')
+  })
+
+  it('labels both the args and result code blocks', () => {
+    const card = renderStepCard(t, undefined, undefined, [{
+      toolName: 'bash', callId: 'c1', arguments: '{"command":"ls"}', startedAt: 0,
+      result: { isError: false, content: 'out.txt\nin.txt', elapsed: 12 },
+      resultView: { card: 'terminal', output: 'out.txt\nin.txt' },
+    }]) as any
+    const md = mdOf(card)
+    expect(md).toContain('**⚙️ 参数**')
+    expect(md).toContain('**📤 结果**')
+    // Result label appears before the output text.
+    expect(md.indexOf('**📤 结果**')).toBeLessThan(md.indexOf('out.txt'))
+  })
+
+  it('shows raw content when the tool meta carries no card/shape (the real bash case)', () => {
+    // Real tool `meta` is `{ viewport, waitReason, sessionStatus, truncated }`
+    // — no `card`, and the raw content is the authoritative display source.
+    const card = renderStepCard(t, undefined, undefined, [{
+      toolName: 'bash', callId: 'c1', arguments: '{"command":"ls"}', startedAt: 0,
+      result: { isError: false, content: 'out.txt\nin.txt', elapsed: 12 },
+      resultView: { viewport: { rows: 24 }, waitReason: 'exited', sessionStatus: 0 },
+    }]) as any
+    const blocks = codeBlocksOf(card)
+    expect(blocks.some(b => b.includes('out.txt'))).toBe(true)
+  })
+
+  it('renders a read-shaped meta as a line-numbered block', () => {
+    const card = renderStepCard(t, undefined, undefined, [{
+      toolName: 'read', callId: 'c1', arguments: '{"path":"/a"}', startedAt: 0,
+      result: { isError: false, content: '12│ b', elapsed: 1 },
+      resultView: { path: '/a', lines: [{ number: 12, text: 'b' }], lang: 'ts' },
+    }]) as any
+    const blocks = codeBlocksOf(card)
+    expect(blocks.some(b => b.includes('12│ b'))).toBe(true)
+  })
+
+  it('renders an edit-shaped meta as a before/after diff block', () => {
+    const card = renderStepCard(t, undefined, undefined, [{
+      toolName: 'edit', callId: 'c1', arguments: '{"file_path":"/a"}', startedAt: 0,
+      result: { isError: false, content: 'a -> b', elapsed: 1 },
+      resultView: { diffs: [{ path: '/a', oldText: 'foo', newText: 'bar' }] },
+    }]) as any
+    const md = card.body.elements
+      .filter((el: any) => el.tag === 'markdown')
+      .map((el: any) => el.content)
+      .join('\n')
+    expect(md).toContain('- foo')
+    expect(md).toContain('+ bar')
   })
 })
 

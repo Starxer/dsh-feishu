@@ -103,6 +103,8 @@ export interface Translations {
   stepToolSuccess: string
   stepToolError: string
   stepToolRunning: string
+  stepToolArgsHeader: string
+  stepToolResultHeader: string
   stepCardTitleError: string
   stepCardTitleDone: string
   stepCardTitleCall: string
@@ -323,6 +325,8 @@ export const zh = {
   stepToolSuccess: '成功',
   stepToolError: '失败',
   stepToolRunning: '运行中…',
+  stepToolArgsHeader: '**⚙️ 参数**',
+  stepToolResultHeader: '**📤 结果**',
   stepCardTitleError: '工具出错',
   stepCardTitleDone: '工具完成',
   stepCardTitleCall: '工具调用',
@@ -534,6 +538,8 @@ export const en: Translations = {
   stepToolSuccess: 'ok',
   stepToolError: 'failed',
   stepToolRunning: 'running…',
+  stepToolArgsHeader: '**⚙️ Args**',
+  stepToolResultHeader: '**📤 Result**',
   stepCardTitleError: 'Tool Error',
   stepCardTitleDone: 'Tool Done',
   stepCardTitleCall: 'Tool Call',

@@ -19,6 +19,7 @@ const turnStats = {
   totalOutputTokens: 20,
   totalCacheReadTokens: 0,
   totalCacheWriteTokens: 0,
+  totalBilledTokens: 30,
   firstStepTtftMs: 100,
   totalDecodeMs: 500,
   totalStepMs: 600,
@@ -46,5 +47,21 @@ describe('renderFooterCard (Turn Complete)', () => {
   it('returns undefined when there is nothing to render', () => {
     expect(renderFooterCard(t, undefined, undefined)).toBeUndefined()
     expect(renderFooterCard(t, {}, undefined)).toBeUndefined()
+  })
+
+  it('reports billed total and cache-inclusive input like the Web UI', () => {
+    const cached = renderFooterCard(t, {}, {
+      ...turnStats,
+      totalInputTokens: 15,
+      totalCacheReadTokens: 30,
+      totalCacheWriteTokens: 5,
+      totalBilledTokens: 100,
+    }) as any
+    const md = markdownOf(cached)
+    // Headline total = billed (input + cache + output), matching "consumed".
+    expect(md).toContain('📦 100 tokens')
+    // in = billed prompt (uncached + cache read + cache write), NOT just uncached.
+    expect(md).toContain('📥 50 in · 📤 20 out')
+    expect(md).toContain('💾 cache 60%')
   })
 })
