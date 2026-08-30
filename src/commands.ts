@@ -14,7 +14,7 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-interface LlmDirectoryLike {
+export interface LlmDirectoryLike {
   listProviders(): readonly LlmProviderInfo[]
   listModels(provider: string): Promise<readonly LlmModelInfo[]>
 }
@@ -198,7 +198,7 @@ export interface ApprovalControl {
  * the agent (and therefore the session), not the chatId/threadId the bridge
  * needs.
  */
-interface SessionControllerLike {
+export interface SessionControllerLike {
   selectModel(request: { sessionId: string; provider: string; model: string; reasoningEffort?: string }): Promise<unknown>
 }
 
@@ -306,7 +306,7 @@ export function registerLarkCommands(
   }, 'dsh-feishu: /model /new /thread /detach /help /approve /deny /approvals /status /stream /reasoning commands')
 }
 
-async function handleModelCommand(
+export async function handleModelCommand(
   invocation: CommandInvocation,
   llm: LlmDirectoryLike,
   agentDefaultModel: AgentDefaultModelConfig,
@@ -371,7 +371,7 @@ const VALID_REASONING_LEVELS = ['off', 'low', 'high', 'max'] as const
  * The setting is persisted through agentDefaultModel.saveSelection so it
  * survives DSH restarts. `show on|off` toggles reasoning content display.
  */
-async function handleReasoningCommand(
+export async function handleReasoningCommand(
   invocation: CommandInvocation,
   agentDefaultModel: AgentDefaultModelConfig,
   bridge: Pick<HarnessConversationService, 'resolveSessionIdFor'>,
@@ -553,6 +553,7 @@ const FEISHU_OWNED_COMMANDS = new Set<string>([
   'model', 'new', 'thread', 'detach', 'help', 'approve', 'deny', 'approvals',
   'status', 'stream', 'reasoning', 'busy', 'steer', 'queue', 'permission', 'stop',
 ])
+export { FEISHU_OWNED_COMMANDS }
 
 /**
  * Feishu commands handled directly in `src/index.ts`'s `executeSlashCommand`
@@ -567,6 +568,7 @@ const FEISHU_INTERCEPTED_COMMANDS: Array<{ name: string; description: string; hi
   { name: 'queue', description: '把一条消息排队为新一轮运行（/steer 的共轭）', hint: '<内容>' },
   { name: 'permission', description: '切换本会话的权限（沙箱）模式', hint: '[read-only|workspace-write|danger-full-access]' },
 ]
+export { FEISHU_INTERCEPTED_COMMANDS }
 
 /**
  * Handle `/help`. Lists every slash command currently registered on the
@@ -577,7 +579,7 @@ const FEISHU_INTERCEPTED_COMMANDS: Array<{ name: string; description: string; hi
  * command runtime. Listing reads the command runtime directly so newly-added
  * DSH commands appear without any change to this plugin.
  */
-async function handleHelpCommand(
+export async function handleHelpCommand(
   invocation: CommandInvocation,
   commands: Pick<CommandRuntime, 'list'>,
   t: CommandTranslations,
@@ -619,12 +621,46 @@ async function handleHelpCommand(
 }
 
 /**
+ * Render only the dsh-feishu section of `/help`. Used when no conversation
+ * exists at all (so there is no live agent to enumerate scoped commands): the
+ * plugin's own commands are always available and listed via their static
+ * metadata. DSH-native commands are omitted because they need a session.
+ */
+export function renderFeishuCommandsOnly(t: CommandTranslations): string {
+  const names: Array<{ name: string; description: string; hint?: string }> = [
+    { name: 'help', description: t.helpDescription },
+    { name: 'model', description: t.modelDescription, hint: '[list|provider/model]' },
+    { name: 'status', description: t.statusDescription },
+    { name: 'reasoning', description: t.reasoningDescription, hint: '[off|low|high|max]' },
+    { name: 'stream', description: t.streamDescription },
+    { name: 'new', description: t.newDescription },
+    { name: 'thread', description: t.threadDescription, hint: '[N]' },
+    { name: 'detach', description: t.detachDescription, hint: '<N>' },
+    { name: 'busy', description: '设置 agent 运行中收到消息时的 Enter 行为（Queue / Steer，持久化）', hint: '[queue|steer]' },
+    { name: 'steer', description: '把一条消息注入当前运行中的 turn（运行中插话）', hint: '<内容>' },
+    { name: 'queue', description: '把一条消息排队为新一轮运行（/steer 的共轭）', hint: '<内容>' },
+    { name: 'stop', description: '停止当前运行中的 agent（同 WebUI 停止按钮），并丢弃排队中的消息' },
+    { name: 'permission', description: '切换本会话的权限（沙箱）模式', hint: '[read-only|workspace-write|danger-full-access]' },
+    { name: 'approvals', description: t.approvalsDescription },
+    { name: 'approve', description: t.approveDescription, hint: '[shortCode]' },
+    { name: 'deny', description: t.denyDescription, hint: '[shortCode]' },
+  ]
+  names.sort((a, b) => a.name.localeCompare(b.name))
+  const lines = [t.helpFeishuHeader]
+  for (const cmd of names) {
+    lines.push(t.helpEntry(cmd.name, cmd.description, cmd.hint))
+  }
+  lines.push(t.helpUsage)
+  return lines.join('\n')
+}
+
+/**
  * Handle `/approve` and `/deny`. With no input, targets the most-recent
  * pending approval in the receiving agent's session; with a shortCode
  * argument, targets the matching pending approval. Replies with a short
  * human-readable summary the user can verify in the chat log.
  */
-async function handleApprovalCommand(
+export async function handleApprovalCommand(
   invocation: CommandInvocation,
   approvals: ApprovalControl,
   outcome: 'allowed-once' | 'rejected',
@@ -661,7 +697,7 @@ async function handleApprovalCommand(
  * agent's session so the user can identify the shortCode to feed back
  * into `/approve<short>` / `/deny<short>`.
  */
-async function handleListApprovalsCommand(
+export async function handleListApprovalsCommand(
   invocation: CommandInvocation,
   approvals: ApprovalControl,
   t: CommandTranslations,

@@ -4,6 +4,15 @@
 
 本仓库基于 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark) HEAD（`ee639df`）独立维护，**不再跟踪 upstream 同步**。所有改动仅修改本仓库文件，**未对 DSH 源码（`DSH 源码/packages/*`、`vendor/*`）做任何改动**。上游 LICENSE（MIT, Copyright (c) 2026 sugarforever）保留以满足 MIT modified-work 声明。
 
+### 免会话命令修复：重启后不再要求「先发一条消息」＋真正免会话命令直接可用（`src/index.ts` / `src/commands.ts` / `src/harness.ts`）
+
+- **背景**：`executeSlashCommand` 末尾对未特殊处理的命令统一 `resolveAgent`，拿不到 live agent 就报「needs an existing conversation」。而 DSH 重启后，会话在磁盘（persistence）里、但 live agent 未水合，直到下一次消息才被拉起——于是 `/help`、`/model`、`/reasoning`、`/approvals`、`/approve`、`/deny` 等会话级命令在重启后全部误报「需要对话」。
+- **修复**：
+  - **恢复冷会话**：`bridge` 新增 `resolveAgentOrResume(message)`——有 live agent 直接返回；否则若该 chat 有持久化会话就**懒恢复**（复用 `createAgent` 的 `resume` 分支），此时才返回 agent；完全没有会话才返回 `undefined`。`executeSlashCommand` 的兜底改用该方法，于是所有「本就有会话」的命令重启后立即可用（`/help`、`/model`、`/reasoning`、`/compact` 等）。
+  - **真正免会话命令直接拦截**：`/model list`、`/model <route>`、`/reasoning`、`/approvals`、`/approve`、`/deny`、`/help` 属于部署/持久化层，根本不需要 live agent——在 `resolveAgent` 兜底**之前**直接调用对应 handler（用派生 sessionId 构造极简 invocation）。于是它们**连会话都不需要**（全新 chat 也能用）：`/model list` 列目录、`/reasoning` 读写部署默认、`/approvals`/`/approve`/`/deny` 读/结 pending（无则提示）、`/help` 有 agent 列全量、无 agent 列本插件命令（`renderFeishuCommandsOnly`）。
+  - **保持需会话**：`/steer`、`/permission`（落点在 DSH 会话日志）、DSH 原生（`compact`/`goal` 等）仍需会话，兜底未命中时清晰提示；但因为有 `resolveAgentOrResume`，已有持久化会话时它们重启后也能用。
+- **实现**：`commands.ts` 导出 `handleHelpCommand`/`handleModelCommand`/`handleReasoningCommand`/`handleApprovalCommand`/`handleListApprovalsCommand`（+`LlmDirectoryLike`/`SessionControllerLike`/`FEISHU_OWNED_COMMANDS`/`FEISHU_INTERCEPTED_COMMANDS`/`renderFeishuCommandsOnly`）；`index.ts` 在 `apply()` 提升 `approvalControl`/`showReasoningControl` 供命令运行时与免会话拦截共用。新增 harness `resolveAgentOrResume` 单测（live/冷会话恢复/无会话三态）。
+
 ### `/help` 命令分类：dsh-feishu 插件 / DSH 内置（`src/commands.ts` / `src/index.ts`）
 
 - **背景**：`/help` 原先把 `commands.list()` 的所有命令平铺列出，无法区分哪些来自本插件、哪些是 DSH（或其它插件）自带的。

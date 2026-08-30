@@ -77,6 +77,44 @@ describe('HarnessConversationService', () => {
     expect(f.create).not.toHaveBeenCalled()
   })
 
+  it('resolves a live agent without re-creating the session', async () => {
+    const f = fixture()
+    const sessionId = 'lark-v2-427e3361f60f3bd896c74f6acd7d065d2e0198db'
+    const liveHandle = await f.create({ sessionId })
+    f.create.mockClear()
+    const deps = dependencies(f)
+    deps.sessionPersistence.list = vi.fn(async () => [{ id: sessionId }])
+    const service = new HarnessConversationService(deps, { domain: 'lark' })
+    const agent = await service.resolveAgentOrResume({ chatId: 'a', chatType: 'p2p' })
+    expect(agent).toBeDefined()
+    expect(f.create).not.toHaveBeenCalled()
+    expect(liveHandle.agent).toBe(agent)
+  })
+
+  it('resolveAgentOrResume rehydrates a cold persisted session (commands work after restart)', async () => {
+    const f = fixture()
+    const sessionId = 'lark-v2-427e3361f60f3bd896c74f6acd7d065d2e0198db'
+    const deps = dependencies(f)
+    deps.sessionPersistence.list = vi.fn(async () => [{ id: sessionId }])
+    const service = new HarnessConversationService(deps, { domain: 'lark' })
+    const agent = await service.resolveAgentOrResume({ chatId: 'a', chatType: 'p2p' })
+    expect(agent).toBeDefined()
+    // Cold session → resumed (not freshly created).
+    expect(f.resume).toHaveBeenCalledWith(expect.objectContaining({ resumeSessionId: sessionId }))
+    expect(f.create).not.toHaveBeenCalled()
+  })
+
+  it('resolveAgentOrResume returns undefined when no conversation exists at all', async () => {
+    const f = fixture()
+    const deps = dependencies(f)
+    deps.sessionPersistence.list = vi.fn(async () => [])
+    const service = new HarnessConversationService(deps, { domain: 'lark' })
+    const agent = await service.resolveAgentOrResume({ chatId: 'never', chatType: 'p2p' })
+    expect(agent).toBeUndefined()
+    expect(f.create).not.toHaveBeenCalled()
+    expect(f.resume).not.toHaveBeenCalled()
+  })
+
   it('reuses a live agent without trying to resume the same session', async () => {
     const f = fixture()
     const sessionId = 'lark-v2-427e3361f60f3bd896c74f6acd7d065d2e0198db'

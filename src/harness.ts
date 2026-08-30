@@ -359,6 +359,42 @@ export class HarnessConversationService {
   }
 
   /**
+   * Resolve the agent backing one inbound message for commands that genuinely
+   * need a session, WITHOUT requiring the user to send a regular message
+   * first. Unlike {@link resolveAgent} this rehydrates a persisted-but-cold
+   * session (e.g. right after a restart, before any new message) so session
+   * commands like `/help`, `/model`, `/reasoning`, `/approvals` and `/compact`
+   * work immediately on the existing conversation. Returns `undefined` only
+   * when no conversation exists at all (nothing live AND nothing persisted) —
+   * commands signal "send a regular message first" in that case.
+   */
+  async resolveAgentOrResume(message: ConversationMessage): Promise<Agent | undefined> {
+    const key = conversationKey(message)
+    const sessionId = this.resolveSessionId(message)
+    const live = this.deps.agents.get(sessionId as never)
+    if (live !== undefined) return live as unknown as Agent
+    const pending = this.handles.get(key)
+    if (pending !== undefined) {
+      try {
+        return (await pending).agent as unknown as Agent
+      } catch {
+        return undefined
+      }
+    }
+    // Cold session: rehydrate it (resume) only if it actually has persisted
+    // history; do not silently create a brand-new session for a reference
+    // command. `getOrCreate` takes the `resume` branch because `createAgent`
+    // checks `sessionPersistence.list()`.
+    const persisted = (await this.deps.sessionPersistence.list()).some(item => item.id === sessionId)
+    if (!persisted) return undefined
+    try {
+      return (await this.getOrCreate(key)).agent as unknown as Agent
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
    * Check if the agent for a chat is currently running (processing a turn).
    * Does NOT create an agent — returns false if no agent exists yet.
    */

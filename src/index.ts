@@ -24,7 +24,8 @@ import { LarkRuntime } from './runtime.ts'
 import { createSettingsApi } from './settings-api.ts'
 import { renderTerminalQr } from './provision.ts'
 import { ProvisionManager } from './provision-manager.ts'
-import { registerLarkCommands, formatRelativeTime, type ApprovalControl, type CommandTranslations } from './commands.ts'
+import { registerLarkCommands, formatRelativeTime, handleHelpCommand, handleModelCommand, handleReasoningCommand, handleApprovalCommand, handleListApprovalsCommand, renderFeishuCommandsOnly, type ApprovalControl, type CommandTranslations } from './commands.ts'
+import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { handleProvisionRequest, handleSettingsRequest, PROVISION_PATH, SETTINGS_PATH } from './web.ts'
 import { startFeishuApprovals, type PendingApprovalView } from './feishu-approvals.ts'
 import { startFeishuTodos } from './feishu-todos.ts'
@@ -322,7 +323,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         }, sessionController, agents, sandboxPolicy, permissionHandle, llm, defaultModel, cardChannel,
         busyHandle,
         modelSelectHandle !== undefined ? { cardByMessage: modelSelectHandle.cardByMessage, sequenceByCard: modelSelectHandle.sequenceByCard } : undefined,
-        onboardingHandle, workspaceRegistry, agentPresets),
+        onboardingHandle, workspaceRegistry, agentPresets, approvalControl, showReasoningControl),
         attachments,
         async (coords) => {
           const meta = await bridge.getSessionMeta(coords as ConversationMessage)
@@ -481,6 +482,17 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
       },
     })
   }
+  // Approval control (the Feishu waterfall listener) and the reasoning-display
+  // toggle are shared by the command runtime and the same-session standalone
+  // dispatches in executeSlashCommand (which must not require a live agent).
+  const approvalControl = buildApprovalControl()
+  const showReasoningControl = {
+    get: () => currentSettings().showReasoning,
+    toggle: () => {
+      const current = currentSettings().showReasoning
+      void settings.mutate(namespace, [{ op: 'set', path: ['showReasoning'], value: !current }], currentRevision())
+    },
+  }
   registerLarkCommands(
     ctx,
     llm,
@@ -504,14 +516,8 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     },
     larkCommandTranslations,
     commands,
-    buildApprovalControl(),
-    {
-      get: () => currentSettings().showReasoning,
-      toggle: () => {
-        const current = currentSettings().showReasoning
-        void settings.mutate(namespace, [{ op: 'set', path: ['showReasoning'], value: !current }], currentRevision())
-      },
-    },
+    approvalControl,
+    showReasoningControl,
     sessionController,
   )
   ctx.effect(() => () => {
@@ -934,6 +940,8 @@ async function executeSlashCommand(
   onboardingHandle?: FeishuOnboardingHandle,
   workspaceRegistry?: { list(): { path: string; name?: string }[] },
   agentPresets?: { list(): Promise<Array<{ id: string; title?: string }>> },
+  approvals?: ApprovalControl,
+  showReasoning?: { get: () => boolean; toggle: () => void },
 ): Promise<
   | { kind: 'success' | 'error'; text: string; card?: object }
   | { kind: 'consumed' }
@@ -1255,12 +1263,47 @@ async function executeSlashCommand(
       return { kind: 'success', text: '', card }
     }
   }
+  // ── Conversation-free slash commands ────────────────────────────────
+  // These only need deployment config and/or a derived session id — not a live
+  // agent — so they work right after a restart (before any new message) and on
+  // a brand-new chat. Commands that genuinely need an existing/running session
+  // (`steer`, `permission`, and DSH-native `compact`/`goal`/…) are NOT listed
+  // here: they fall through to the resolveAgent gate below.
+  bridgeHolder.lastChatMessage = chatMessage
+  const freeSessionId = bridge.resolveSessionIdFor(chatMessage)
+  const freeInvocation = (rawInput: string, agentOverride?: unknown) =>
+    ({ name: parsed.name, rawInput, agent: agentOverride ?? { session: { id: freeSessionId } } }) as unknown as CommandInvocation
+  const freeChatMessageFor = () => chatMessage as ConversationMessage
+  // CommandResult has an optional `text`; normalize to the handler's echo shape.
+  const toEcho = (r: CommandResult) =>
+    ({ kind: r.kind, text: r.text ?? `Command /${parsed.name} produced no output.` } as const) as unknown as { kind: 'success' | 'error'; text: string; card?: object }
+  if (parsed.name === 'model' && parsed.rawInput.trim() !== '' && llm !== undefined && agentDefaultModel !== undefined) {
+    return toEcho(await handleModelCommand(freeInvocation(parsed.rawInput), llm, agentDefaultModel, bridge, freeChatMessageFor, larkCommandTranslations, (sessionController ?? {}) as never))
+  }
+  if (parsed.name === 'reasoning' && agentDefaultModel !== undefined) {
+    return toEcho(await handleReasoningCommand(freeInvocation(parsed.rawInput), agentDefaultModel, bridge, freeChatMessageFor, larkCommandTranslations, showReasoning ?? { get: () => false, toggle: () => {} }, (sessionController ?? {}) as never))
+  }
+  if (parsed.name === 'approvals' && approvals !== undefined) {
+    return toEcho(await handleListApprovalsCommand(freeInvocation(parsed.rawInput), approvals, larkCommandTranslations))
+  }
+  if ((parsed.name === 'approve' || parsed.name === 'deny') && approvals !== undefined) {
+    return toEcho(await handleApprovalCommand(freeInvocation(parsed.rawInput), approvals, parsed.name === 'approve' ? 'allowed-once' : 'rejected', larkCommandTranslations))
+  }
+  if (parsed.name === 'help') {
+    // Prefer the full scoped command list when a session/agent exists (a
+    // persisted cold session is resumed here); otherwise fall back to listing
+    // the commands this plugin contributes so /help always works.
+    const scoped = await bridge.resolveAgentOrResume(chatMessage)
+    if (scoped !== undefined) {
+      return toEcho(await handleHelpCommand(freeInvocation(parsed.rawInput, scoped), commands, larkCommandTranslations))
+    }
+    return { kind: 'success', text: renderFeishuCommandsOnly(larkCommandTranslations) }
+  }
   // Stash the chat coordinates so the registered handler can find them
   // without holding per-invocation state on the agent. The bridge serializes
   // inbound messages per chat, so a synchronous dispatch always sees its own
   // chat context here.
-  bridgeHolder.lastChatMessage = chatMessage
-  const agent = await bridge.resolveAgent(chatMessage)
+  const agent = await bridge.resolveAgentOrResume(chatMessage)
   if (agent === undefined) {
     return {
       kind: 'error',
