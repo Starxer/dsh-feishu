@@ -716,7 +716,7 @@ function renderStatusCard(meta: {
   sessionId: string; workspace: string; agentPreset: string; model: string; reasoningEffort: string; title: string
   turns: number; steps: number; toolCalls: number; inputTokens: number; outputTokens: number
   contextWindow: number; lastInputTokens: number
-}, agentRunning: boolean, sandboxMode?: string): object {
+}, agentRunning: boolean, sandboxMode?: string, busyMode?: string): object {
   const fields: string[] = []
   fields.push(`**Session:** \`${meta.sessionId}\``)
   if (meta.title !== '') fields.push(`**Title:** ${meta.title}`)
@@ -728,6 +728,10 @@ function renderStatusCard(meta: {
     const label = PERMISSION_LABELS[sandboxMode] ?? sandboxMode
     const icon = sandboxMode === 'workspace-write' ? ' ✍️' : sandboxMode === 'danger-full-access' ? ' 🔓' : sandboxMode === 'read-only' ? ' 📖' : ''
     fields.push(`**Permission:** \`${sandboxMode}\` ${label}${icon}`)
+  }
+  if (busyMode !== undefined) {
+    const icon = busyMode === 'steer' ? ' 🎯' : ' 📥'
+    fields.push(`**Queue mode:** \`${busyMode}\`${icon}`)
   }
   fields.push(`**Agent:** ${agentRunning ? '🔄 Running' : '⏸️ Idle'}`)
   if (meta.turns > 0 || meta.steps > 0) {
@@ -932,7 +936,8 @@ async function executeSlashCommand(
     const sessionId = meta.sessionId
     const session = agents?.get(sessionId)?.session as any
     const sandboxMode = sandboxPolicy?.resolve?.({ session })?.mode
-    return { kind: 'success', text: '', card: renderStatusCard(meta, agentRunning, sandboxMode) }
+    const busyMode = bridge.busyMode(chatMessage)
+    return { kind: 'success', text: '', card: renderStatusCard(meta, agentRunning, sandboxMode, busyMode) }
   }
   if (parsed.name === 'new') {
     const args = parsed.rawInput.trim().split(/\s+/).filter(s => s !== '')
