@@ -53,12 +53,12 @@ npx @deepseek-ai/dsh plugin --profile web add @starxer/dsh-feishu
 | `/reasoning [off\|low\|high\|max]` | 设置推理强度 |
 | `/stop` | 中止当前轮次并丢弃排队消息（不再进入下一 turn） |
 | `/steer <内容>` | agent 运行中，把一条消息注入当前 turn |
-| `/busy [queue\|steer]` | 设置运行中发消息的行为：排队（默认）或注入当前 turn，**持久化** |
+| `/busy [queue\|steer]` | 设置运行中（busy）的 Enter 行为：排队发送（默认）或插话发送，**持久化** |
 | `/permission [模式]` | 查看/切换会话权限（沙箱）模式；无参发交互式选择卡片 |
 | `/approve` `/deny` `/approvals` | 处理工具审批 |
 | `/help` | 列出所有可用命令 |
 
-> **运行中发消息的行为（`/busy`）**：`queue`（默认，等待当前轮结束后作为新轮运行）或 `steer`（注入当前 turn 立即响应，persist）。一次性注入用 `/steer <内容>`。`/stop` 会中止当前轮并**丢弃排队/等待中的消息**（不再自动进入下一 turn）。
+> **运行中发消息的行为（`/busy`）**：`queue`（排队发送，等待当前轮结束后作为新轮运行）或 `steer`（插话发送，注入当前轮立即响应，persist）。`/status` 的 **Enter while busy** 行显示当前值。一次性插话用 `/steer <内容>`。`/stop` 会中止当前轮并**丢弃排队/等待中的消息**（不再自动进入下一 turn）。
 
 ## 配置
 

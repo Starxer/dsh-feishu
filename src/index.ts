@@ -558,9 +558,19 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   })
 
   settingsScope.watch(() => apiUpdateDepth > 0 ? undefined : runtime.reconcile())
-  ctx.on('credentials/updated', ref => {
+  // Credentials-change event was renamed `credentials/updated` →
+  // `credentials/reference-updated` in a newer Harness. Register under BOTH
+  // names via a loose cast so `tsc` typechecks against either version; the
+  // name a given Harness never emits simply never fires (a no-op there). The
+  // ref are credential-reference names, so `=== appSecretRef` matches.
+  const onCredentialRefUpdated = (ref: string): void => {
     if (apiUpdateDepth === 0 && ref === currentSettings().appSecretRef) void runtime.reconcile()
-  })
+  }
+  const looseOn = (name: string, handler: (ref: string) => void): void => {
+    ;(ctx as unknown as { on(name: string, handler: (ref: string) => void): unknown }).on(name, handler)
+  }
+  looseOn('credentials/updated', onCredentialRefUpdated)
+  looseOn('credentials/reference-updated', onCredentialRefUpdated)
   ctx.effect(() => webServer.register({
     kind: 'exact',
     path: SETTINGS_PATH,
@@ -730,8 +740,10 @@ function renderStatusCard(meta: {
     fields.push(`**Permission:** \`${sandboxMode}\` ${label}${icon}`)
   }
   if (busyMode !== undefined) {
+    // WebUI names this "Enter behavior while busy"; options Queue / Steer.
+    const label = busyMode === 'steer' ? 'Steer' : 'Queue'
     const icon = busyMode === 'steer' ? ' 🎯' : ' 📥'
-    fields.push(`**Queue mode:** \`${busyMode}\`${icon}`)
+    fields.push(`**Enter while busy:** \`${busyMode}\` ${label}${icon}`)
   }
   fields.push(`**Agent:** ${agentRunning ? '🔄 Running' : '⏸️ Idle'}`)
   if (meta.turns > 0 || meta.steps > 0) {
@@ -1048,23 +1060,25 @@ async function executeSlashCommand(
     const raw = parsed.rawInput.trim()
     if (raw === '') {
       const current = bridge.busyMode(chatMessage)
-      const icon = current === 'steer' ? '🎯' : '📥'
+      const icon = current === 'steer' ? ' 🎯' : ' 📥'
+      const label = current === 'steer' ? 'Steer' : 'Queue'
       return { kind: 'success', text: [
-        `**当前 busy 消息行为：** \`${current}\` ${icon}`,
+        `**运行中（busy）的 Enter 行为：** \`${current}\` ${label}${icon}`,
         '',
-        '- `queue`：agent 运行中发消息 → 排队，当前轮结束后开新轮（默认）',
-        '- `steer`：agent 运行中发消息 → 注入当前 turn 立即响应',
+        '仅运行中生效：',
+        '- `queue`：排队发送，当前轮结束后作为新轮运行（默认）',
+        '- `steer`：插话发送，把消息注入当前运行轮立即响应',
         '',
         '**切换：** `/busy queue` 或 `/busy steer`（持久化）',
-        '_一次性注入用 `/steer <内容>`_',
+        '_一次性插话用 `/steer <内容>`_',
       ].join('\n') }
     }
     if (raw !== 'queue' && raw !== 'steer') {
       return { kind: 'error', text: '⚠️ 未知 busy 模式。可选：queue | steer' }
     }
     bridge.setBusyMode(chatMessage, raw)
-    const desc = raw === 'steer' ? '运行中注入当前 turn' : '排队，当前轮结束后开新轮'
-    return { kind: 'success', text: `✅ 已把本聊天的 busy 消息行为切为 \`${raw}\`（${desc}）。已持久化。` }
+    const desc = raw === 'steer' ? '插话发送（注入当前轮）' : '排队发送（当前轮结束后开新轮）'
+    return { kind: 'success', text: `✅ 已把本聊天运行中（busy）的 Enter 行为切为 \`${raw}\`（${desc}）。已持久化。` }
   }
   // /steer <text> injects a message into the RUNNING agent turn (DSH next-step
   // inbox) instead of queueing it as a new turn — the Feishu equivalent of the
