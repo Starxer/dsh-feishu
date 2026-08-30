@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### 插件更名：`dsh-feishu` → `chatterbox4dsh`（2026-08-30）
+
+- **背景**：生态里已有 13 个同名 `dsh-feishu` 仓库 + 大量 `dsh-lark*` 变体，命名严重饱和、难区分。为跳出同名簇并突出差异化，改用「唠叨话痨」意象的独立品牌名。
+- **改名**：`@starxer/dsh-feishu` → `@starxer/chatterbox4dsh`（npm 包名）；GitHub `Starxer/dsh-feishu` → `Starxer/chatterbox4dsh`（旧链接自动重定向）。
+- **命名理由**：`chatterbox`（唠叨话痨）= 把 agent 每一步唠叨给你看（对应 step 级过程透明卖点）；`4dsh`（for dsh）保住 DSH 生态搜索词；`dsh-feishu` 簇彻底隔离。
+- **范围**：改 npm 包名 + GitHub repo 名/描述/topics + 文档（README/AGENTS/CHANGELOG）+ 用户可见的 `/help` 分组标题。**插件运行 id `lark-channel` 保持不变**（DSH loader 实际读它，改动风险高）；`/dsh-feishu/settings` 内部路由/日志前缀/CSS 类等内部标识不动（与 web.ts/client 需保持一致）。
+- **可发现性兜底**：GitHub topics（`dsh`/`feishu`/`lark`/`deepseek-harness`）+ npm `description` 明确「Feishu/Lark plugin for DSH」。
+
 ### 工具调用卡片：args 用代码块防溢出 + 结果兜底展示（`src/feishu-streaming.ts`）
 
 - **args 内联代码块破坏格式/溢出**：原来 `> args: \`${args}\`` 用内联代码，args 含换行/反引号或超长单行时会把卡片 markdown 破坏、内容横向溢出。改为在工具名下方用**独立的 fenced 代码块**渲染 args（` ``` `）——自动换行/滚动，且 `sanitizeCodeblock` 折叠连续反引号、剔除控制字符，避免破坏 fence。

@@ -14,7 +14,7 @@
  * dance needed. Thread replies reuse the same `replyTo`/`replyInThread`
  * options the question/approval cards use.
  *
- * @module @starxer/dsh-feishu/feishu-send-file
+ * @module @starxer/chatterbox4dsh/feishu-send-file
  */
 
 import { readFile, stat } from 'node:fs/promises'

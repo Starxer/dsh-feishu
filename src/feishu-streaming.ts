@@ -12,7 +12,7 @@
  *   tool/call                                      → update card: append tool info
  *   tool/result                                    → update card: append tool result
  *
- * @module @starxer/dsh-feishu/feishu-streaming
+ * @module @starxer/chatterbox4dsh/feishu-streaming
  */
 
 import type { Context } from '@deepseek-ai/cordis'

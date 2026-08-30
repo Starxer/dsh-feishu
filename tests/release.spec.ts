@@ -5,7 +5,7 @@ describe('release configuration', () => {
   it('declares the public npm package metadata', async () => {
     const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
     expect(pkg).toMatchObject({
-      name: '@starxer/dsh-feishu',
+      name: '@starxer/chatterbox4dsh',
       publishConfig: { access: 'public' },
     })
   })

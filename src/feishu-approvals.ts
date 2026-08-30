@@ -11,7 +11,7 @@
  * upstream `ApprovalRequest` does not expose one (audit IDs are minted
  * inside the `user-approval` service after the waterfall resolves).
  *
- * @module @starxer/dsh-feishu/feishu-approvals
+ * @module @starxer/chatterbox4dsh/feishu-approvals
  */
 
 import type { Context } from '@deepseek-ai/cordis'

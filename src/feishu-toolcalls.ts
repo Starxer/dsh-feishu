@@ -6,7 +6,7 @@
  * Reasoning content is NOT handled here — it's in feishu-streaming.ts as
  * part of the per-step assistant card (one card per step with reasoning + text).
  *
- * @module @starxer/dsh-feishu/feishu-toolcalls
+ * @module @starxer/chatterbox4dsh/feishu-toolcalls
  */
 
 import type { Context } from '@deepseek-ai/cordis'

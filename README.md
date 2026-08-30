@@ -1,10 +1,12 @@
-# dsh-feishu — DeepSeek Harness 飞书/Lark 插件
+# chatterbox4dsh — 陪 DeepSeek Harness 用的唠叨型飞书/Lark 插件
 
-把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 agent 能力接入飞书/Lark 聊天。安装后，用户直接从飞书与 Harness Agent 对话，共享 DSH 的模型、工具、工作区和会话存储。
+把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 agent 能力接入飞书/Lark 聊天，并把 **agent 的每一步都唠叨给你看**（推理、工具调用、结果、时长/token）。安装后，用户直接从飞书与 Harness Agent 对话，共享 DSH 的模型、工具、工作区和会话存储。
 
-> **定位**：dsh-feishu 只做"DSH 原生特性 → 飞书聊天"这一层接入，**DSH 本身才是 agent 本体**。我们不做一个独立的 agent 平台或 24h 常驻助手——那是另一个产品。飞书和 DSH Web UI 共享同一套服务，飞书只是多出一个聊天端口。
+> **定位**：`chatterbox4dsh`（chatterbox = 唠叨话痨）只做"DSH 原生特性 → 飞书聊天"这一层接入，**DSH 本身才是 agent 本体**。我们不做一个独立的 agent 平台或 24h 常驻助手——那是另一个产品。飞书和 DSH Web UI 共享同一套服务，飞书只是多出一个聊天端口。
 >
 > **设计理念**：功能对齐优先于功能创新。新增能力前先对照 DSH Web UI 是否有同名/等价能力，有则对齐，无再讨论。
+>
+> **差异化**：step 级过程透明——每个 step 一张三段式卡片（💬 Reasoning / 📝 Message / 🛠 Tool call + 结果 + 时长/token footer），在弱模型下也能观察 Agent 行为并即时干预（`/steer` `/stop`），其余 IM 桥接多收敛到"结果交付/审批"。
 
 ## 功能
 
@@ -30,7 +32,7 @@
 ## 安装
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add @starxer/dsh-feishu
+npx @deepseek-ai/dsh plugin --profile web add @starxer/chatterbox4dsh
 ```
 
 然后在 DSH **Settings** → 飞书与 Lark 中配置 App ID 和 App Secret。支持扫码一键配置（推荐）或手动创建应用。
@@ -59,7 +61,7 @@ npx @deepseek-ai/dsh plugin --profile web add @starxer/dsh-feishu
 | `/busy [queue\|steer]` | 设置运行中（busy）的 Enter 行为：排队发送（默认）或插话发送，**持久化** |
 | `/permission [模式]` | 查看/切换会话权限（沙箱）模式；无参发交互式选择卡片 |
 | `/approve` `/deny` `/approvals` | 处理工具审批 |
-| `/help` | 卡片列出所有可用命令（分组：dsh-feishu 插件 / DSH 内置） |
+| `/help` | 卡片列出所有可用命令（分组：chatterbox4dsh 插件 / DSH 内置） |
 
 > **运行中发消息的行为（`/busy`）**：`queue`（排队发送，等待当前轮结束后作为新轮运行）或 `steer`（插话发送，注入当前轮立即响应，persist）。`/status` 的 **Enter while busy** 行显示当前值。一次性插话用 `/steer <内容>`；一次性排队用 `/queue <内容>`。**agent 空闲时**，`/steer`、`/queue` 都会自动回退为「作为新消息发送」而不是报错。`/stop` 会中止当前轮并**丢弃排队/等待中的消息**（不再自动进入下一 turn）。
 
@@ -94,7 +96,7 @@ npx @deepseek-ai/dsh plugin --profile web add @starxer/dsh-feishu
 ## 架构
 
 ```
-飞书用户 → Lark SDK (WebSocket) → dsh-feishu → Harness Agent → 回复卡片
+飞书用户 → Lark SDK (WebSocket) → chatterbox4dsh → Harness Agent → 回复卡片
 ```
 
 插件运行在 DSH Host 内部，不启动额外进程，不暴露 HTTP 端点。每个飞书聊天映射一个 DSH Session，Agent 在 turn 完成后复用。

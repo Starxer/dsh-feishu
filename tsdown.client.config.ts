@@ -1,6 +1,6 @@
 import { defineConfig } from 'tsdown'
 
-const moduleId = '@starxer/dsh-feishu'
+const moduleId = '@starxer/chatterbox4dsh'
 const externals = [
   'react',
   'react/jsx-runtime',

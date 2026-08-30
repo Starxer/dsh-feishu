@@ -12,7 +12,7 @@
  *   another subscriber IS the documented fan-out path — the WebUI client uses
  *   the same one. This module connects the same way.
  *
- * @module @starxer/dsh-feishu/feishu-questions
+ * @module @starxer/chatterbox4dsh/feishu-questions
  */
 
 import type { LarkChannel } from '@larksuiteoapi/node-sdk'

@@ -3,7 +3,7 @@
  * `session/event` fan-out so the Feishu chat can render a card showing the
  * current todo list whenever it changes.
  *
- * @module @starxer/dsh-feishu/feishu-todos
+ * @module @starxer/chatterbox4dsh/feishu-todos
  */
 
 import type { Context } from '@deepseek-ai/cordis'

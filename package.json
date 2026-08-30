@@ -1,7 +1,7 @@
 {
-  "name": "@starxer/dsh-feishu",
+  "name": "@starxer/chatterbox4dsh",
   "version": "0.1.0",
-  "description": "Feishu/Lark WebSocket channel with scan-to-configure for DeepSeek Harness",
+  "description": "A verbose Feishu/Lark channel plugin for DeepSeek Harness (dsh) — narrates every agent step (reasoning, tool calls, results) and mirrors the native dsh experience.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -164,10 +164,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Starxer/dsh-feishu.git"
+    "url": "git+https://github.com/Starxer/chatterbox4dsh.git"
   },
-  "homepage": "https://github.com/Starxer/dsh-feishu",
+  "homepage": "https://github.com/Starxer/chatterbox4dsh",
   "bugs": {
-    "url": "https://github.com/Starxer/dsh-feishu/issues"
+    "url": "https://github.com/Starxer/chatterbox4dsh/issues"
   }
 }

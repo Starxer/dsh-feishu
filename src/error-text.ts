@@ -6,7 +6,7 @@
  * numeric error code (e.g. Feishu API business codes like 230021 for a file
  * that is too large), so the message tells the user exactly what went wrong.
  *
- * @module @starxer/dsh-feishu/error-text
+ * @module @starxer/chatterbox4dsh/error-text
  */
 
 /**

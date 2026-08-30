@@ -13,7 +13,7 @@
  * title, and the shared `cardChannel.onCardAction` dispatcher for every
  * callback — so buttons keep working across channel reconnects.
  *
- * @module @starxer/dsh-feishu/feishu-session
+ * @module @starxer/chatterbox4dsh/feishu-session
  */
 
 import type { ConversationMessage } from './conversation.ts'

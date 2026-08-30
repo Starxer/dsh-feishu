@@ -7,7 +7,7 @@
  * selecting a model does NOT trigger any callback — only clicking "确认"
  * submits the form and applies the switch.
  *
- * @module @starxer/dsh-feishu/feishu-model-select
+ * @module @starxer/chatterbox4dsh/feishu-model-select
  */
 
 import type { AgentDefaultModelConfig } from '@deepseek-ai/dsh-agent-default-model'

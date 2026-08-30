@@ -13,7 +13,7 @@
  *    defaults come from the latest active session's settings when
  *    available, falling back to deployment-wide config.
  *
- * @module @starxer/dsh-feishu/feishu-onboarding
+ * @module @starxer/chatterbox4dsh/feishu-onboarding
  */
 
 import type { HarnessConversationService, ChatCreationOptions } from './harness.ts'

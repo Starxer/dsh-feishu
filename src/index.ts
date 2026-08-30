@@ -677,7 +677,7 @@ const larkCommandTranslations: CommandTranslations = {
   threadLastActiveDaysAgo: n => `${n}d ago`,
   threadLastActiveUnknown: 'unknown',
   helpDescription: 'List every slash command available in this chat',
-  helpFeishuHeader: '**🔹 dsh-feishu 插件：**',
+  helpFeishuHeader: '**🔹 chatterbox4dsh 插件：**',
   helpNativeHeader: '**💠 DSH 内置：**',
   helpUsage: 'Send `/<name> [arguments]` to run a command. Optional input hints appear in `[brackets]`.',
   helpEntry: (name, description, hint) => hint === undefined

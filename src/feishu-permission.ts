@@ -13,7 +13,7 @@
  * which rebinds handlers across channel reconnects; button clicks therefore
  * keep working even after a channel swap.
  *
- * @module @starxer/dsh-feishu/feishu-permission
+ * @module @starxer/chatterbox4dsh/feishu-permission
  */
 
 import type { ConversationMessage } from './conversation.ts'

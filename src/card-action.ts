@@ -9,7 +9,7 @@
  * nothing). This helper unwraps repeatedly (up to a small depth) and returns
  * the innermost object, or `undefined` when the value is not JSON-decodable.
  *
- * @module @starxer/dsh-feishu/card-action
+ * @module @starxer/chatterbox4dsh/card-action
  */
 
 /** Unpack a card button's `action.value` to a plain object. */
