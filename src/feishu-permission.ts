@@ -1,13 +1,15 @@
 /**
  * Interactive Permission picker card for the `/permission` Feishu command.
  *
- * DSH's Web UI exposes the per-session permission (sandbox) mode through the
- * `ui-permission-presets` picker decorating the `/permission` command. This
+ * DSH's Web UI exposes the per-session permission mode through the
+ * `permission-presets` picker decorating the `/permission` command. This
  * module renders the Feishu equivalent: a card showing the current mode with
  * one button per preset (Read Only / Workspace Write / Full access). Clicking
- * a button switches the session by appending the log-only `sandbox/mode`
- * event (the `dsh-sandbox-policy` `setSandboxMode` write path) and updates the
- * card in place so the active mode is re-marked.
+ * a button switches the session through DSH's `permissionPresets.set()` write
+ * path — it records the `permission/preset` intent and writes BOTH the
+ * `sandbox/mode` and `approval/policy` knobs, so the session's effective
+ * bundle keeps matching a real preset instead of degrading to "custom" — and
+ * updates the card in place so the active mode is re-marked.
  *
  * The cardAction dispatcher is shared via the plugin's `cardChannel` adapter,
  * which rebinds handlers across channel reconnects; button clicks therefore
@@ -65,6 +67,22 @@ export interface PermissionSession {
   append(type: string, data: object): void
 }
 
+/**
+ * Narrow DSH `permissionPresets` service surface. A preset bundles BOTH the
+ * sandbox mode and the approval policy; using the service's `set()` write path
+ * keeps both knobs (plus the `permission/preset` intent event) consistent so
+ * DSH recognizes the mode as a real preset instead of "custom". Without it the
+ * picker falls back to appending only the `sandbox/mode` knob, which DSH can
+ * never match against a preset.
+ */
+export interface PermissionPresets {
+  /** The effective preset name for the session (`read-only` /
+   *  `workspace-write` / `danger-full-access` / `custom`). */
+  current(session: PermissionSession): string
+  /** Switch the session to a preset, writing every changed knob. */
+  set(session: PermissionSession, name: string): void
+}
+
 /** Narrow `ctx.sandboxPolicy` surface used to read the effective mode. */
 export interface PermissionSandbox {
   resolve?(req: { session?: PermissionSession }): { mode: string; workspaceRoot?: string }
@@ -73,6 +91,9 @@ export interface PermissionSandbox {
 export interface FeishuPermissionDeps {
   channel: PermissionCardChannel
   sandbox: PermissionSandbox | undefined
+  /** DSH `permissionPresets` service; preferred for both the read and the write
+   *  path (it keeps the sandbox + approval bundle in sync). */
+  permissionPresets?: PermissionPresets | undefined
   sessionGetter: (id: string) => PermissionSession | undefined
   logger: { warn(message: string): unknown; error(message: string): unknown }
   /** Return the strings for the ACTIVE locale, read at render time. */
@@ -94,10 +115,16 @@ export function renderPermissionCard(current: string, t: Translations): object {
   ]
   for (const mode of SANDBOX_MODES) {
     const active = mode === current
+    // Color language: keep every selectable button clearly clickable. Only
+    // "Full access" keeps the red danger tint (a warning); Read Only and
+    // Workspace Write share the blue primary so none of them look like the
+    // grayed-out (disabled) current-mode button. The current mode is the ONE
+    // disabled + gray + ✓ button, so it is never confusable with Read Only.
+    const type = mode === 'danger-full-access' ? 'danger' : 'primary'
     elements.push({
       tag: 'button',
       text: { tag: 'plain_text', content: `${active ? '✓ ' : ''}${permissionLabel(mode, t)}` },
-      type: mode === 'danger-full-access' ? 'danger' : mode === 'workspace-write' ? 'primary' : 'default',
+      type,
       value: JSON.stringify({ p: 'permission', mode }),
       ...(active ? { disabled: true } : {}),
     })
@@ -112,7 +139,7 @@ export function renderPermissionCard(current: string, t: Translations): object {
 
 /** Start the permission picker: send cards on demand and handle button clicks. */
 export function startFeishuPermission(deps: FeishuPermissionDeps): FeishuPermissionHandle {
-  const { channel, sandbox, sessionGetter, logger, getTranslations } = deps
+  const { channel, sandbox, permissionPresets, sessionGetter, logger, getTranslations } = deps
   const byCard = new Map<string, { sessionId: string }>()
 
   const onCardAction = async (evt: PermissionCardEvent): Promise<void> => {
@@ -127,9 +154,16 @@ export function startFeishuPermission(deps: FeishuPermissionDeps): FeishuPermiss
     if (!(SANDBOX_MODES as readonly string[]).includes(parsed.mode)) return
     const session = sessionGetter(rec.sessionId)
     if (session === undefined) return
-    // setSandboxMode(session, mode) — append the log-only switch event.
-    session.append('sandbox/mode', { mode: parsed.mode })
-    const current = sandbox?.resolve?.({ session })?.mode ?? parsed.mode
+    // Switch through DSH's preset write path when available: a preset bundles
+    // the sandbox mode AND the approval policy, so writing only the sandbox
+    // knob leaves the bundle unmatched and DSH reports it as "custom". Fall
+    // back to the single-knob `sandbox/mode` append when the service is absent.
+    if (permissionPresets !== undefined) {
+      permissionPresets.set(session, parsed.mode)
+    } else {
+      session.append('sandbox/mode', { mode: parsed.mode })
+    }
+    const current = permissionPresets?.current(session) ?? sandbox?.resolve?.({ session })?.mode ?? parsed.mode
     await channel.updateCard(messageId, renderPermissionCard(current, getTranslations())).catch((error: unknown) => {
       logger.warn(`dsh-feishu: permission card update failed: ${error instanceof Error ? error.message : String(error)}`)
     })
@@ -139,7 +173,7 @@ export function startFeishuPermission(deps: FeishuPermissionDeps): FeishuPermiss
   const open = async (chat: ConversationMessage, sessionId: string): Promise<string | undefined> => {
     const session = sessionGetter(sessionId)
     if (session === undefined) throw new Error(getTranslations().permissionNoSession)
-    const current = sandbox?.resolve?.({ session })?.mode ?? ''
+    const current = permissionPresets?.current(session) ?? sandbox?.resolve?.({ session })?.mode ?? ''
     const opts = chat.threadId !== undefined
       ? { replyInThread: true, ...(chat.rootId !== undefined ? { replyTo: chat.rootId } : {}) }
       : {}

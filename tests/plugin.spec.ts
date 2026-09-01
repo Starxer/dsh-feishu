@@ -32,7 +32,7 @@ function fakeAttachments(overrides: { saveImage?: (input: any) => Promise<ImageA
   }
 }
 
-function fakeChannel() {
+function fakeChannel(imageBytes?: Buffer) {
   const handlers = new Map<string, Function>()
   // Minimal SDK download-response shape: the wrapper exposes a readable stream.
   const fakeReadable = (bytes: Buffer): { getReadableStream: () => unknown; writeFile: unknown; headers: unknown } => ({
@@ -52,7 +52,7 @@ function fakeChannel() {
       im: {
         v1: {
           messageResource: {
-            get: vi.fn(async () => fakeReadable(Buffer.from([0xff, 0xd8, 0xff, 0xe0]))),
+            get: vi.fn(async () => fakeReadable(imageBytes ?? Buffer.from([0xff, 0xd8, 0xff, 0xe0]))),
           },
         },
       },
@@ -72,7 +72,7 @@ describe('startChannel', () => {
       groupAllowlist: [], dmAllowlist: [], workspace: '/work', errorMessage: 'safe error', reactEmoji: 'THUMBSUP', showIntermediateMessages: false, showReasoning: true,
     }, bridge, factory, logger)
     expect(logger.info).toHaveBeenCalledWith('dsh-feishu: WebSocket connected')
-    expect(factory).toHaveBeenCalledWith(expect.objectContaining({ transport: 'websocket', policy: expect.objectContaining({ requireMention: true, dmMode: 'open' }) }))
+    expect(factory).toHaveBeenCalledWith(expect.objectContaining({ transport: 'websocket', policy: expect.objectContaining({ requireMention: true, dmMode: 'open' }), wsConfig: expect.objectContaining({ pingTimeout: expect.any(Number) }) }))
     await channel.handlers.get('message')!({ messageId: 'om_1', chatId: 'oc_1', chatType: 'p2p', content: 'hi' })
     await flushAsync()
     expect(channel.addReaction).toHaveBeenCalledWith('om_1', 'THUMBSUP')
@@ -228,6 +228,27 @@ describe('startChannel', () => {
     await stop()
   })
 
+  it('derives image media type from the downloaded bytes, not a guessed MIME (PNG)', async () => {
+    // PNG magic: 89 50 4E 47 0D 0A 1A 0A ...
+    const channel = fakeChannel(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00]))
+    const bridge = { reply: vi.fn(async () => 'described image'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
+    const attachments = fakeAttachments()
+    const { stop } = await startChannel({
+      appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
+      groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: 'THUMBSUP', showIntermediateMessages: false, showReasoning: true,
+    }, bridge, () => channel as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, undefined, undefined, attachments)
+    await channel.handlers.get('message')!({
+      messageId: 'om_png', chatId: 'oc_png', chatType: 'p2p', content: '',
+      resources: [{ type: 'image', fileKey: 'img_png' }],
+    })
+    await flushAsync()
+    expect(attachments.saveImage).toHaveBeenCalledWith(expect.objectContaining({ mediaType: 'image/png' }))
+    expect(bridge.reply).toHaveBeenCalledWith(expect.objectContaining({
+      imageBlocks: [expect.objectContaining({ mediaType: 'image/png' })],
+    }))
+    await stop()
+  })
+
   it('rejects image-bearing messages when no attachment service is composed', async () => {
     const channel = fakeChannel()
     const bridge = { reply: vi.fn(async () => 'should not happen'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
@@ -265,5 +286,33 @@ describe('startChannel', () => {
     expect(terminal.error).toHaveBeenCalledWith('dsh-feishu: image admission failed: storage full')
     expect(bridge.reply).not.toHaveBeenCalled()
     expect(channel.send).toHaveBeenCalledWith('oc_4', { text: '图片处理出错：storage full' }, { replyTo: 'om_4', replyInThread: false })
+  })
+
+  it('admits files into the session workspace .feishu-inbox and injects the path', async () => {
+    const channel = fakeChannel()
+    const bridge: any = { reply: vi.fn(async () => 'ok'), dispose: vi.fn(async () => undefined), consumeIntermediateSent: vi.fn(() => false), resolveSessionIdFor: vi.fn(() => 'test-session'), needsOnboarding: vi.fn(async () => false) }
+    const workspaceRoot = await (await import('node:fs/promises')).mkdtemp('/tmp/dsh-test-ws-')
+    const resolveWorkspaceRoot = vi.fn(async () => workspaceRoot)
+    const { stop } = await startChannel({
+      appId: 'id', appSecret: 'secret', domain: 'feishu', requireMention: true, dmMode: 'open',
+      groupAllowlist: [], dmAllowlist: [], errorMessage: 'safe error', reactEmoji: 'THUMBSUP', showIntermediateMessages: false, showReasoning: true,
+    }, bridge, () => channel as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, resolveWorkspaceRoot)
+    await channel.handlers.get('message')!({
+      messageId: 'om_file', chatId: 'oc_file', chatType: 'p2p', content: '',
+      resources: [{ type: 'file', fileKey: 'file_abc', fileName: 'report.pdf' }],
+    })
+    await flushAsync()
+    expect(channel.rawClient.im.v1.messageResource.get).toHaveBeenCalledWith({
+      params: { type: 'file' },
+      path: { message_id: 'om_file', file_key: 'file_abc' },
+    })
+    expect(resolveWorkspaceRoot).toHaveBeenCalled()
+    const { readdir } = await import('node:fs/promises')
+    const files = await readdir(`${workspaceRoot}/.feishu-inbox`)
+    expect(files.length).toBeGreaterThan(0)
+    const injected = (bridge.reply.mock.calls[0]![0] as { content: string }).content
+    expect(injected).toContain('[文件: report.pdf')
+    expect(injected).toContain(`${workspaceRoot}/.feishu-inbox`)
+    await stop()
   })
 })

@@ -56,6 +56,8 @@ export interface HarnessDependencies {
   agentPresets: {
     resolve(id?: string): Promise<{ id: string }>
     mount(agentCtx: import('@deepseek-ai/cordis').Context, id?: string): Promise<unknown>
+    /** Optional roster so the session list can show a preset's display name. */
+    list?(): Promise<Array<{ id: string; name?: string }>>
   }
   workspaceRegistry: {
     list(): WorkspaceLike[]
@@ -675,30 +677,54 @@ export class HarnessConversationService {
    * blank sessions remain visible because the bridge has no projection service
    * to read their `blank` bit.
    */
-  async listSessions(): Promise<Array<{ id: string; updatedAt: number; title: string; ownedBy?: string }>> {
+  async listSessions(): Promise<Array<{ id: string; updatedAt: number; title: string; ownedBy?: string; agentPreset?: string }>> {
     const persisted = await this.deps.sessionPersistence.list()
     const archived = new Set(this.deps.workspaceRegistry.archivedSessionIds)
-    const entries: Array<{ id: string; updatedAt: number; title: string; ownedBy?: string }> = []
+    // Resolve preset ids to display names once, when the roster is available.
+    const presetDisplay: Record<string, string> = {}
+    if (typeof this.deps.agentPresets.list === 'function') {
+      try {
+        for (const row of await this.deps.agentPresets.list()) {
+          presetDisplay[row.id] = row.name !== undefined && row.name !== '' ? row.name : row.id
+        }
+      } catch {
+        // Roster read failure: fall back to showing preset ids below.
+      }
+    }
+    const entries: Array<{ id: string; updatedAt: number; title: string; ownedBy?: string; agentPreset?: string }> = []
     for (const item of persisted) {
       if (archived.has(item.id)) continue
       const live = this.deps.agents.get(item.id as never)
+      const readFrom = this.deps.sessionPersistence.readFrom
       let updatedAt = 0
       let title = ''
       let blank = false
+      let presetId = ''
       let events: ReadonlyArray<{ seq: number; type: string; data: any }> | undefined
       if (live !== undefined) {
         events = (live as unknown as AgentLike).session.events
+        // The live session's in-memory log has no header, so read the on-disk
+        // meta for the creation preset (also catches the docs getSessionMeta path).
+        if (typeof readFrom === 'function') {
+          try {
+            const result = await readFrom.call(this.deps.sessionPersistence, item.id as never, 0)
+            presetId = (result.meta as { agentPreset?: string } | undefined)?.agentPreset ?? ''
+          } catch {
+            // Missing artifact / service: preset stays unknown.
+          }
+        }
       } else {
         // Cold session: ask SessionPersistence for the on-disk log via the same
         // readFrom primitive the webui's session list uses. The dependency
         // surface is widened lazily here so cold sessions still expose their
         // latest `session/title` event and `turn/start` bit.
-        const readFrom = this.deps.sessionPersistence.readFrom
         if (typeof readFrom === 'function') {
           try {
             const result = await readFrom.call(this.deps.sessionPersistence, item.id as never, 0)
             events = result.events as ReadonlyArray<{ seq: number; type: string; data: any }>
-            const metaTime = Number((result.meta as { createdAt?: number })?.createdAt ?? 0)
+            const meta = result.meta as { agentPreset?: string; createdAt?: number } | undefined
+            presetId = meta?.agentPreset ?? ''
+            const metaTime = Number(meta?.createdAt ?? 0)
             if (metaTime > updatedAt) updatedAt = metaTime
           } catch {
             // No artifact, missing service, or cordis shadow mismatch: fall
@@ -714,16 +740,22 @@ export class HarnessConversationService {
             const next = (event as { data?: { title?: unknown } }).data?.title
             if (typeof next === 'string' && next !== '') title = next
           }
+          if (event.type === 'agent-preset/selected') {
+            const next = (event as { data?: { agentPreset?: unknown } }).data?.agentPreset
+            if (typeof next === 'string' && next !== '') presetId = next
+          }
         }
         blank = !events.some(event => event.type === 'turn/start')
       }
       if (blank) continue
       const ownerKey = this.sessionOwnerKey(item.id)
+      const agentPreset = presetId === '' ? undefined : (presetDisplay[presetId] ?? presetId)
       entries.push({
         id: item.id,
         updatedAt,
         title,
         ...(ownerKey === undefined ? {} : { ownedBy: ownerKey }),
+        ...(agentPreset === undefined ? {} : { agentPreset }),
       })
     }
     entries.sort((left, right) => right.updatedAt - left.updatedAt)

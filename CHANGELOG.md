@@ -2,6 +2,67 @@
 
 ## Unreleased
 
+### 修复：图片判型按真实字节，不再猜 JPEG（非 JPEG 图片接收失败）（`src/channel.ts` / `tests/plugin.spec.ts`）
+
+- **问题**：用户发送**非 JPEG 图片**（PNG/WebP/GIF 等）时，插件报 `图片处理出错：Declared image type does not match its bytes. (code: IMAGE_TYPE_MISMATCH)` 并被拒收。只碰巧收到 JPEG 图才正常。
+- **根因**：`pickImageMime` 对入站 image 资源**无文件名**（飞书 `im.v1.messageResource` 只告诉类型、不给内容 MIME，SDK `convertImage` 产出的资源只有 `{ type: 'image', fileKey }`，无 `fileName`），于是总走到兜底分支**默认猜成 `image/jpeg`**。而 DSH `attachment-local` 的 `saveImage` 会用 `detectImage` 按**真实 magic bytes** 校验"声明 vs 实际"，声明 JPEG 实为 PNG/WebP/GIF 时必然抛 `IMAGE_TYPE_MISMATCH`。
+- **修复**：改 `admitImagesForMessage` 为**先下载字节、再从真实字节判型**——新增 `sniffImageMime(bytes)` 按 magic bytes 判出 PNG/JPEG/WebP/GIF（`image/png`：`89 50 4E 47 0D 0A 1A 0A`；`image/jpeg`：`FF D8 FF`；`image/webp`：`RIFF....WEBP`；`image/gif`：`GIF87a`/`GIF89a`），作为 `saveImage` 的 `mediaType`；文件后缀仅作兜底，**不再猜 JPEG**。无需改 DSH 源码（DSH 校验本身正确，是插件此前猜型违约）。
+- **验证**：`npm run typecheck` / `npm run test` 全绿（217 passed）；`tests/plugin.spec.ts` 新增 PNG magic 字节 → 推导 `image/png` 用例（正是此前必失败的场景），`fakeChannel` 支持按测试注入下载字节。实机发送 PNG（1920x1080）成功接收，归一化副本标 `image/png`。
+
+### 修复：`feishu_send_file` 发图变成文件、需点开才能预览（`src/feishu-send-file.ts` / `src/channel.ts` / `tests/feishu-send-file.spec.ts`）
+
+- **问题**：agent 用 `feishu_send_file` 发图片给用户时，图片变成**文件消息**（`msg_type: 'file'`），用户要点开才能预览，而不是直接内联显示。
+- **根因**：工具**一律**走 `channel.send(chatId, { file: {...} })` → SDK `sendFile` → `msg_type: 'file'`。飞书**内联预览**需要走图片消息：`sendImage` → `msg_type: 'image'` + `content.image_key`（经 `im.v1.image.create`，`image_type: 'message'` 上传）。
+- **修复**：读文件字节后，用 `sniffImageMime(bytes)`（从 `channel.ts` 导出的 magic-byte 嗅探）判断是否为**真实图片**。是图且 ≤ 10 MB（飞书图片上传上限）→ 发 `{ image: { source: bytes } }` 内联预览；非图 / 图超 10MB → 仍走 `{ file: { source, fileName } }`（保证能落地）。
+- **复用**：`sniffImageMime` / `ImageMediaTypeId` 由 `channel.ts` 导出（入站图片判型同一函数），避免两处重复维护 magic-byte 逻辑。
+- **验证**：`npm run typecheck` / `npm run test` 全绿（220 passed）；`tests/feishu-send-file.spec.ts` 新增 PNG 字节→image payload、文本→file payload 用例。实机：agent 通过 `feishu_send_file` 发送 PNG（1920x1080）到飞书，**直接内联显示**、无需点开。
+
+### 修复：入站连接自愈（网络静默分区后飞书消息到不了 DSH）（`src/channel.ts`）
+
+- **问题**：插件入站只走 WebSocket 长连接（`channel.on('message')`），出站 `channel.send` 走 HTTP REST（每条消息新建立连接）。所以遇到**网络静默分区**（TCP half-open——数据包被丢弃、socket 不触发干净 `close`）时：出站仍能发（HTTP 每次新连），但入站死掉，飞书消息再也到不了 DSH。
+- **根因**：SDK 的 `LarkChannel` 自带 liveness 看门狗，可在 ping 后 `pingTimeout` 秒内无入站帧时 `terminate()` 死连接 → 触发 `close` → `reConnect()` → `tryConnect()`/`communicate()` **重新挂载入站消息 handler**，实现自愈；但该看门狗**默认 `pingTimeout` 为 0（被禁用）**，静默分区下永远等不到 `close` 事件从而不重连。`autoReconnect`/`reconnectCount: -1` 等虽为默认开启，却因找不到死连接而不触发。
+- **修复**：向 `createLarkChannel` 工厂选项传 `wsConfig: { pingTimeout: 60 }`，启用 liveness 看门狗（60 秒无入站帧即终止死 socket 触发重连），恢复入站自愈。`pingInterval` 默认 120s，看门狗只在 ping 后武装、任何入站帧都会取消，健康空闲连接不会被误杀。无需改 DSH 源码。
+- **验证**：`npm run typecheck` / `npm run test` 全绿；`tests/plugin.spec.ts` 断言工厂收到 `wsConfig: { pingTimeout: expect.any(Number) }`。
+
+### 改进：入站文件落地到会话工作区的 `.feishu-inbox/`（`src/channel.ts` / `src/index.ts`）
+
+- **问题**：用户发送的普通文件经 `admitFilesForMessage` 下载到**全局** `~/.dsh/feishu-inbox/`（跨会话共享），与"文件属于某个会话工作区"的心智不符；不同会话的文件混在一起。
+- **修复**：`startChannel` 新增 `resolveWorkspaceRoot(message)` 回调（`index.ts` 里经 `bridge.getSessionMeta(coords).workspace` 解析该消息所属会话的工作区根），`admitFilesForMessage` 优先把文件写到 **`<workspace>/.feishu-inbox/`**（懒创建）；工作区解析不出时回退全局 `~/.dsh/feishu-inbox/`。注入消息内容的 `[文件: <name> → <path>]` 路径随之指向工作区目录。
+- **约束**：**转发块**（`forwarded_messages`）不在归一化消息的 `resources[]` 里（SDK `convertMergeForward` 把子消息展开成文本并恒返回 `resources: []`，内层 file_key 被丢弃），因此转发来的文件**不预下载**——要处理必须额外调飞书子消息/消息列表 API 挖内层 key（需 `im:message` 读权限），本期明确不做。普通用户直接发的文件仍正常预下载。
+
+### 新增：`feishu_receive_file` 收文件工具（`src/feishu-receive-file.ts` / `src/index.ts`）
+
+- **背景**：`feishu_send_file` 是"agent 往飞书 push 文件"的出站侧；入站侧 agent 此前只能依赖插件自动预下载，无法**按需/兜底**直接下载某个飞书文件资源。
+- **实现**：注册 host 全局 model tool `feishu_receive_file`（`ctx.tools.register(defineTool(...))`，参数 `message_id` + `file_key` 必填 + `file_name` 可选）。执行时：`exec.agent.id` → `bridge.resolveChat(sessionId)` 反查 chat → `channel.rawClient.im.v1.messageResource.get({ type: 'file' })` 拉字节 → 校验（非空/≤30MB）→ 落到 **`<workspace>/.feishu-inbox/`**（`resolveWorkspaceRoot`，无则回退全局收件箱），返回 `{ file_name, path, workspace }`。
+- **约束**：与 `feishu_send_file` 一致，转发块的内层 key 拿不到，故对转发文件同样无解；unbound session 执行期返回明确错误。两条路径共用同一工作区收件箱目录，避免 agent 在"预下载落盘"与"工具拉取"之间迷失。
+
+### 改进：模型输出超长不再截断，按卡片分片发送（`src/channel.ts` / `src/feishu-streaming.ts` / `src/text-chunk.ts`）
+
+- **问题**：模型输出较长时，卡片内容会被**截断**（`renderReplyCard` 直接把整段文本塞进一张卡；`renderStepCard` 对 text/reasoning 超过 3000 字符直接 `…(truncated)`），用户看到答案中断。
+- **修复**：新增 `src/text-chunk.ts` 的 `chunkText(text, maxLen, maxChunks)`（默认 `CARD_TEXT_MAX = 4000`，最多 30 张卡，超量折叠成 `···（continued）` 标记）——按空白行分段落打包、避免在 `code fence` 中间切分；`renderReplyCard` 改为 `renderReplyCards`，返回**多张卡**（标题标 `Reply (i/N)`，首卡带 reasoning、末卡带 footer meta），`renderReplyCard` 调用点在 `startChannel` 里**串行发送**。
+- **注**：关闭流式（`showIntermediateMessages: false`）时走 `renderReplyCards` 多卡路径。流式 step 卡仍是**单张实时更新**（`updateCard` 按一个 messageId patch），多卡拆分与实时修补的交互复杂，本期未对流式 step 卡做多卡化，维持其 3000 字符截断（流式当前默认关闭）。
+
+### 改进：工作区选择卡片长路径溢出（`src/feishu-onboarding.ts`）
+
+- **问题**：`/new` 的工作区选择把完整路径塞进按钮的 `plain_text`，路径过长时按钮内**无法完整显示路径**（飞书按钮单行截断/溢出），看不清选了哪个工作区。
+- **修复**：`renderWorkspacePicker` 对每个工作区渲染**两行**——先渲染**完整路径的 `markdown` 行（可换行、必可读）**，再渲染一个**紧凑选择按钮**（按钮文案 = 工作区名，或超长路径用 `elideMiddle` 头尾省略；完整路径放 `behaviors.value` 供切换，选中不受影响）。避免依赖飞书按钮不支持的 `note` 字段（Card JSON 2.0 无 `note` 标签），保证完整路径始终可见。
+
+### 改进：`/session list` 增加 agent 预设与最近活跃列（`src/harness.ts` / `src/feishu-session.ts` / `src/i18n.ts`）
+
+- **问题**：`/session list` 表格只显示 会话 / ID / 占用 / 最近活跃，看不出每个会话用的是哪个 Agent 预设，不便在多会话间辨识。
+- **修复**：`harness.listSessions` 现在为每个会话读取**agent 预设**——从会话 header meta 取 `agentPreset` id，并叠加较晚的 `agent-preset/selected`（空白期切换）事件；再经 `agentPresets.list()` 把 id 解析为**显示名**（名缺省回退 id），未知显示 `-`。「最近活跃」仍取最新事件时间（`updatedAt`，相对时间）。
+- **表格**：`| 会话 | ID | 预设 | 占用 | 最近活跃 |`（zh）/ `| Session | ID | Preset | In use | Last active |`（en）。
+- 测试：`feishu-session.spec.ts` 更新表头断言并校验预设名/`-` 兜底；`harness.spec.ts` 新增「listSessions 显示 agent 预设显示名」。
+
+### 修复：`/permission` 选「完全权限」后 DSH 识别为 Custom（`src/feishu-permission.ts` / `src/index.ts`）
+
+- **根因**：DSH 的权限 preset 是**双 knob 捆绑**——一个 preset 同时带 sandbox 模式**和** approval 策略（`danger-full-access` 的捆绑是 `sandbox: danger-full-access` + `approval: never`）。旧飞书实现只 `session.append('sandbox/mode', ...)` 写 sandbox 这一个 knob，approval  knob 停留原值（如 `ask`），于是投影 `derive` 找不到匹配项——DSH WebUI 显示 "Current sandbox and approval settings do not match a preset."（即 `custom`）。
+- **修复**：切换走 DSH 的 `permissionPresets.set(session, preset)` 写路径——它记录 `permission/preset` 意图并写全 `sandbox/mode` + `approval/policy` 两个 knob。读取当前模式用 `permissionPresets.current(session)`（优先），服务不可用时才回退到单 knob `sandbox/mode` append。
+  - `feishu-permission.ts`：新增 `PermissionPresets` 依赖，`onCardAction`/`open` 分别走 `set()`/`current()`。
+  - `index.ts`：新增 `ctx.get('permissionPresets')`，卡片路径 `startFeishuPermission` 与带参文本路径 `/permission <mode>` 都改用 `set()`。
+  - 卡片按钮配色：三个按钮无一再是 `default`（灰），Read Only / Workspace Write 用 `primary`（蓝）、仅 Full access 用 `danger`（红）；当前模式是**唯一**的 `disabled` + 灰色 + `✓` 按钮，不再与「仅可查看」的灰色混淆，也明确了哪个可点。
+- 测试：`feishu-permission.spec.ts` 新增「走 permissionPresets.set() 写路径」「服务缺失时回退 sandbox/mode」「无灰按钮、仅当前 disabled」。
+
 ### 修复：步骤卡片工具调用输出不可见（`src/feishu-streaming.ts`）
 
 - **根因**：DSH 0.1.2-alpha.2 的 `ToolResultMessage.content` 是 `[ToolResultBlock]`（`{ type: 'tool-result', toolCallId, content, isError }`），**真实结果内容块嵌套在 `content[0].content`**。旧代码在 `tool/result` 处读 `event.data.message.content`（外层数组），然后按 `type === 'text'` 过滤——外层块的类型是 `tool-result` 而非 `text`，于是 `result.content` 恒为空。而 `renderResultPreview` 依赖的 `card` 词汇（`presentResult` 的 `card:'terminal'/'read'/'diff'` 等）在 alpha.2 **已不存在**（工具把私有 `presentationMeta` 放 `event.data.meta`，无 `card` 字段），所以任何分支都不匹配，最后兜底又因 `content === ''` 而空——结果输出完全消失。

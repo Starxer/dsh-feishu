@@ -318,6 +318,28 @@ describe('HarnessConversationService', () => {
     expect(sessions.map(s => s.id)).toEqual([])
   })
 
+  it('listSessions shows the agent preset display name', async () => {
+    const f = fixture()
+    const deps = dependencies(f)
+    const sessionId = 'lark-v2-test-preset'
+    deps.sessionPersistence.list = vi.fn(async () => [{ id: sessionId }])
+    deps.sessionPersistence.readFrom = vi.fn(async () => ({
+      meta: { agentPreset: 'ptc', createdAt: 1000 },
+      events: [
+        { seq: 0, type: 'session', data: {}, time: 1000 },
+        { seq: 1, type: 'turn/start', data: {}, time: 1000 },
+        { seq: 2, type: 'session/title', data: { title: 'Preset session' }, time: 1000 },
+      ],
+    }))
+    deps.agentPresets.list = vi.fn(async () => [{ id: 'ptc', name: 'PTC 模式' }])
+    const service = new HarnessConversationService(deps, { domain: 'feishu' })
+    const sessions = await service.listSessions()
+    expect(sessions).toHaveLength(1)
+    const first = sessions[0]!
+    expect(first.id).toBe(sessionId)
+    expect(first.agentPreset).toBe('PTC 模式')
+  })
+
   it('switchToSession refuses to redirect a chat to an archived session', async () => {
     const f = fixture()
     const deps = dependencies(f)

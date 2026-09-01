@@ -46,6 +46,7 @@ export { ConfigSchema } from './config.ts'
 
 import { startFeishuQuestions } from './feishu-questions.ts'
 import { startFeishuSendFileTool } from './feishu-send-file.ts'
+import { startFeishuReceiveFileTool } from './feishu-receive-file.ts'
 import { startFeishuModelSelect, renderProviderSelectCard, sendModelCardV2, type ModelSelectChannel } from './feishu-model-select.ts'
 import { startFeishuPermission, SANDBOX_MODES, PERMISSION_LABELS, type FeishuPermissionHandle } from './feishu-permission.ts'
 import { startFeishuBusy, type FeishuBusyHandle } from './feishu-busy.ts'
@@ -62,6 +63,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   const agentPresets = ctx.get('agentPresets')
   const sessionController = ctx.get('sessionController')
   const sandboxPolicy = ctx.get('sandboxPolicy') as { resolve?: (r: { session?: any }) => { mode: string; workspaceRoot?: string } } | undefined
+  const permissionPresets = ctx.get('permissionPresets') as { current: (session: any) => string; set: (session: any, name: string) => void } | undefined
   const userQuestions = ctx.get('userQuestions')
   const approval = ctx.get('approval')
   const workspaceRegistry = ctx.get('workspaceRegistry')
@@ -149,6 +151,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
   let flushed: (sessionId: string) => Promise<TurnStats | undefined> = () => Promise.resolve(undefined)
   let stopTodos: () => void = () => undefined
   let stopSendFileTool: () => void = () => undefined
+  let stopReceiveFileTool: () => void = () => undefined
   let modelSelectHandle: { dispose: () => void; cardByMessage: Map<string, string>; sequenceByCard: Map<string, number> } | undefined = undefined
   let onboardingHandle: FeishuOnboardingHandle | undefined = undefined
   let permissionHandle: FeishuPermissionHandle | undefined = undefined
@@ -349,7 +352,8 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
         busyHandle,
         modelSelectHandle !== undefined ? { cardByMessage: modelSelectHandle.cardByMessage, sequenceByCard: modelSelectHandle.sequenceByCard } : undefined,
         onboardingHandle, workspaceRegistry, agentPresets, approvalControl, showReasoningControl, sessionHandle,
-        { current: currentLocale, set: setPluginLocale }),
+        { current: currentLocale, set: setPluginLocale },
+        permissionPresets),
         attachments,
         async (coords) => {
           const meta = await bridge.getSessionMeta(coords as ConversationMessage)
@@ -394,6 +398,21 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
           },
         },
       () => translationsFor(currentLocale().id),
+      async (message) => {
+        const b = bridgeHolder.current
+        if (b === undefined) return undefined
+        const coords: ConversationMessage = {
+          chatId: message.chatId,
+          chatType: message.chatType,
+          ...message.threadId === undefined ? {} : { threadId: message.threadId },
+        }
+        try {
+          const meta = await b.getSessionMeta(coords)
+          return meta.workspace !== '' ? meta.workspace : undefined
+        } catch {
+          return undefined
+        }
+      },
       )
     },
   })
@@ -412,11 +431,33 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     channelHolder,
     logger: ctx.logger('dsh-feishu'),
   })
+  // `feishu_receive_file` mirrors the send tool: pull an inbound Feishu file
+  // resource into the session workspace inbox on demand. Registers
+  // unconditionally; unbound sessions fail at execution time.
+  stopReceiveFileTool = startFeishuReceiveFileTool({
+    ctx,
+    bridgeHolder,
+    channelHolder,
+    logger: ctx.logger('dsh-feishu'),
+    resolveWorkspaceRoot: async (sessionId) => {
+      const b = bridgeHolder.current
+      if (b === undefined) return undefined
+      const chat = b.resolveChat(sessionId)
+      if (chat === undefined) return undefined
+      try {
+        const meta = await b.getSessionMeta(chat)
+        return meta.workspace !== '' ? meta.workspace : undefined
+      } catch {
+        return undefined
+      }
+    },
+  })
   // Interactive `/permission` picker card. Independent of the questions/
   // approvals seams; only needs the live card channel + the sandbox policy.
   permissionHandle = startFeishuPermission({
     channel: cardChannel,
     sandbox: sandboxPolicy,
+    permissionPresets,
     sessionGetter: (id: string) => (agents as any)?.get?.(id)?.session,
     logger: ctx.logger('dsh-feishu'),
     getTranslations: () => translationsFor(currentLocale().id),
@@ -571,6 +612,7 @@ export async function apply(ctx: Context, rawConfig: PluginConfig): Promise<void
     stopTodos()
     stopStreaming()
     stopSendFileTool()
+    stopReceiveFileTool()
     modelSelectHandle?.dispose()
     permissionHandle?.stop()
     busyHandle?.stop()
@@ -858,6 +900,7 @@ async function executeSlashCommand(
     current: () => { id: LocaleId; plugin: 'zh' | 'en' | 'auto'; dsh: string | undefined }
     set: (value: 'zh' | 'en' | 'auto') => Promise<void>
   },
+  permissionPresets?: { current?: (session: any) => string; set?: (session: any, name: string) => void },
 ): Promise<
   | { kind: 'success' | 'error'; text: string; card?: object }
   | { kind: 'consumed' }
@@ -1215,8 +1258,15 @@ async function executeSlashCommand(
     if (!(SANDBOX_MODES as readonly string[]).includes(raw)) {
       return { kind: 'error', text: `⚠️ 未知权限模式 \`${raw}\`。可选：${SANDBOX_MODES.join(' | ')}（对应 Read Only / Workspace Write / Full access）` }
     }
-    // setSandboxMode(session, raw) — appends the log-only switch event.
-    session.append('sandbox/mode', { mode: raw })
+    // Switch through DSH's preset write path when available: a preset bundles
+    // the sandbox mode AND the approval policy, so writing only the sandbox
+    // knob leaves the bundle unmatched and DSH shows it as "custom". Fall back
+    // to the single-knob `sandbox/mode` append when the service is absent.
+    if (permissionPresets?.set !== undefined) {
+      permissionPresets.set(session, raw)
+    } else {
+      session.append('sandbox/mode', { mode: raw })
+    }
     return { kind: 'success', text: `✅ 权限模式已切换为 \`${raw}\`（${PERMISSION_LABELS[raw] ?? raw}）。将从下一次受限调用起生效。` }
   }
   // /model with no arguments renders the model selector card (V2 card

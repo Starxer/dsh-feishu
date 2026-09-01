@@ -12,6 +12,7 @@ import { translationsFor, type Translations } from './i18n.ts'
 import { TurnDroppedError } from './harness.ts'
 import type { TurnStats } from './feishu-streaming.ts'
 import { errorText } from './error-text.ts'
+import { chunkText, CARD_TEXT_MAX } from './text-chunk.ts'
 
 export type ChannelFactory = (options: LarkChannelOptions) => LarkChannel
 export interface PluginLogger {
@@ -40,25 +41,46 @@ export type SlashCommandHandler = (
 /** Narrow attachment-store view needed for image admission. */
 type AttachmentLike = Pick<AttachmentStore, 'saveImage' | 'imageLimits'>
 
-/** Feishu media type -> MIME type. Returns undefined when unsupported. */
-const FEISHU_IMAGE_MIME = new Map<string, 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif'>([
-  ['image/jpeg', 'image/jpeg'],
-  ['image/jpg', 'image/jpeg'],
-  ['image/png', 'image/png'],
-  ['image/webp', 'image/webp'],
-  ['image/gif', 'image/gif'],
-])
+export type ImageMediaTypeId = 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif'
 
-function pickImageMime(descriptor: ResourceDescriptor): 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif' | undefined {
+/**
+ * Sniff the real media type from the first bytes of an image, independent of
+ * any filename/MIME hint. The attachment store validates declared vs actual
+ * bytes (`IMAGE_TYPE_MISMATCH`), so we must NOT guess — Feishu only exposes
+ * `type: 'image'` with no reliable content hint, and a guessed JPEG stamp will
+ * reject every non-JPEG upload (PNG/WebP/GIF).
+ */
+export function sniffImageMime(bytes: Uint8Array): ImageMediaTypeId | undefined {
+  const b = bytes
+  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 &&
+      b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a) return 'image/png'
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg'
+  // WebP: "RIFF" .... "WEBP"
+  if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+      b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp'
+  // GIF: "GIF87a" / "GIF89a"
+  if (b.length >= 6 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 &&
+      (b[3] === 0x38) && (b[5] === 0x61)) return 'image/gif'
+  return undefined
+}
+
+/** Extension hint as a fallback when magic bytes are inconclusive. */
+function pickImageMimeByExt(descriptor: ResourceDescriptor): ImageMediaTypeId | undefined {
   const hint = descriptor.fileName?.toLowerCase() ?? ''
   if (hint.endsWith('.png')) return 'image/png'
   if (hint.endsWith('.jpg') || hint.endsWith('.jpeg')) return 'image/jpeg'
   if (hint.endsWith('.webp')) return 'image/webp'
   if (hint.endsWith('.gif')) return 'image/gif'
-  // Feishu only tags `image` for image-only messages; there is no MIME hint
-  // in the descriptor itself. Default to JPEG because Feishu mobile captures
-  // are commonly JPEG; the validator re-checks against decoded magic bytes.
-  return FEISHU_IMAGE_MIME.get('image/jpeg')
+  return undefined
+}
+
+/**
+ * Resolve the real media type for an image: magic bytes take priority (the
+ * attachment store validates against actual bytes), the filename extension is
+ * only a fallback when the header is unrecognizable. Never guesses JPEG.
+ */
+function pickImageMime(bytes: Uint8Array, descriptor: ResourceDescriptor): ImageMediaTypeId | undefined {
+  return sniffImageMime(bytes) ?? pickImageMimeByExt(descriptor)
 }
 
 /**
@@ -96,10 +118,6 @@ async function admitImagesForMessage(
   const accepted = attachments.imageLimits.mediaTypes
   const inputs: SaveImageAttachment[] = []
   for (const resource of resources) {
-    const mediaType = pickImageMime(resource)
-    if (mediaType === undefined || !accepted.includes(mediaType)) {
-      throw new Error(`dsh-feishu: image type "${mediaType ?? 'unknown'}" is not accepted by the deployment`)
-    }
     if (signal.aborted) throw new Error('dsh-feishu: image admission aborted')
     // `LarkChannel.downloadResource(fileKey, 'image')` resolves the wrong
     // endpoint (`im.v1.image.get`) which 400s for user-sent keys. The
@@ -111,6 +129,13 @@ async function admitImagesForMessage(
     })
     if (signal.aborted) throw new Error('dsh-feishu: image admission aborted')
     const bytes = await readDownloadStream(raw)
+    // Resolve the media type FROM THE BYTES, not a guessed MIME. The
+    // attachment store rejects declared-vs-actual mismatches, so a filename
+    // hint is only a fallback and JPEG is never assumed.
+    const mediaType = pickImageMime(bytes, resource)
+    if (mediaType === undefined || !accepted.includes(mediaType)) {
+      throw new Error(`dsh-feishu: image type "${mediaType ?? 'unknown'}" is not accepted by the deployment`)
+    }
     inputs.push({
       data: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
       mediaType,
@@ -122,39 +147,55 @@ async function admitImagesForMessage(
   return refs
 }
 
-/** Download directory for inbound file attachments. Lazily created. */
-let fileDownloadDir: string | undefined
-
 /**
- * Shared, persistent inbox directory for inbound files. Files live here so the
- * agent session (which reads from the same user home) can open them with its
- * file tools. A plain `/tmp` path is unusable because the channel service and
- * the agent's tool sandbox have isolated `/tmp` mounts; DSH_HOME is a real
- * on-disk directory both sides can reach.
+ * Fallback inbox directory (when no session workspace is resolved at inbound
+ * time) so inbound files always land somewhere persistent and readable by the
+ * agent's file tools. A plain `/tmp` path is unusable because the channel
+ * service and the agent's tool sandbox have isolated `/tmp` mounts; DSH_HOME is
+ * a real on-disk directory both sides can reach.
  */
-async function getFileDownloadDir(): Promise<string> {
-  if (fileDownloadDir !== undefined) return fileDownloadDir
+async function getFallbackInboxDir(): Promise<string> {
   const dshHome = process.env.DSH_HOME || `${homedir()}/.dsh`
   const dir = join(dshHome, 'feishu-inbox')
   await mkdir(dir, { recursive: true })
-  fileDownloadDir = dir
   return dir
 }
 
 /**
+ * Resolve the per-workspace inbox directory for an inbound file. Prefers the
+ * session's workspace root (`<workspace>/.feishu-inbox/`) so files stay with
+ * the session's files instead of a global shared dir; falls back to the
+ * global `~/.dsh/feishu-inbox/` when no workspace is resolvable.
+ */
+async function resolveInboxDir(message: NormalizedMessage, resolveWorkspaceRoot?: (msg: NormalizedMessage) => Promise<string | undefined>): Promise<string> {
+  if (resolveWorkspaceRoot !== undefined) {
+    try {
+      const root = await resolveWorkspaceRoot(message)
+      if (root !== undefined && root.trim() !== '') {
+        const dir = join(root, '.feishu-inbox')
+        await mkdir(dir, { recursive: true })
+        return dir
+      }
+    } catch { /* fall through to global inbox */ }
+  }
+  return getFallbackInboxDir()
+}
+
+/**
  * Download every file resource off one normalized message and persist the
- * bytes to a temp directory. Returns an array of `{ path, fileName }` entries
- * so the inbound message content can reference them. Returns an empty array
- * when the message carries no file resources.
+ * bytes to the session's workspace inbox dir. Returns an array of
+ * `{ path, fileName }` entries so the inbound message content can reference
+ * them. Returns an empty array when the message carries no file resources.
  */
 async function admitFilesForMessage(
   channel: LarkChannel,
   message: NormalizedMessage,
   signal: AbortSignal,
+  resolveWorkspaceRoot?: (msg: NormalizedMessage) => Promise<string | undefined>,
 ): Promise<readonly { path: string; fileName: string }[]> {
   const resources = (message.resources ?? []).filter(resource => resource.type === 'file')
   if (resources.length === 0) return []
-  const dir = await getFileDownloadDir()
+  const dir = await resolveInboxDir(message, resolveWorkspaceRoot)
   const results: { path: string; fileName: string }[] = []
   for (const resource of resources) {
     if (signal.aborted) throw new Error('dsh-feishu: file admission aborted')
@@ -211,6 +252,7 @@ export async function startChannel(
     sendOnboardingCard(msg: NormalizedMessage): Promise<void>
   },
   getTranslations?: () => Translations,
+  resolveWorkspaceRoot?: (msg: NormalizedMessage) => Promise<string | undefined>,
 ): Promise<{ stop: () => Promise<void>; channel: LarkChannel }> {
   const logError = (message: string) => {
     logger.error(message)
@@ -225,6 +267,14 @@ export async function startChannel(
     loggerLevel: LoggerLevel.info,
     handshakeTimeoutMs: 15_000,
     includeRawEvent: true,
+    // Self-healing inbound: on a silent network partition (TCP half-open) the
+    // socket never emits a clean `close`, so the SDK's auto-reconnect never
+    // fires and inbound messages stop while outbound (new HTTP connections per
+    // send) still works. The SDK's liveness watchdog (no inbound frame within
+    // `pingTimeout` of the last ping) terminates the dead socket to trigger a
+    // reconnect — but it is DISABLED unless `wsConfig.pingTimeout` is set
+    // (defaults to 0). Enabling it restores inbound self-healing.
+    wsConfig: { pingTimeout: 60 },
     policy: {
       requireMention: config.requireMention,
       dmMode: config.dmMode,
@@ -330,7 +380,7 @@ export async function startChannel(
       // file paths into the message content so the agent can read them.
       if ((message.resources ?? []).some(resource => resource.type === 'file')) {
         try {
-          const files = await admitFilesForMessage(channel, message, new AbortController().signal)
+          const files = await admitFilesForMessage(channel, message, new AbortController().signal, resolveWorkspaceRoot)
           if (files.length > 0) {
             const fileRefs = files.map(f => `[文件: ${f.fileName} → ${f.path}]`).join('\n')
             const extraContent = inboundMessage.content.length > 0
@@ -380,12 +430,15 @@ export async function startChannel(
               })
             }
           } else {
-            // No intermediate card was sent — send the full reply card.
-            const card = renderReplyCard(text, meta)
-            await channel.send(chatId, { card }, {
-              replyTo: replyToId,
-              replyInThread,
-            })
+            // No intermediate card was sent — send the full reply, split across
+            // multiple cards if the output exceeds one card's content budget.
+            const cards = renderReplyCards(text, meta)
+            for (const card of cards) {
+              await channel.send(chatId, { card }, {
+                replyTo: replyToId,
+                replyInThread,
+              })
+            }
           }
         }).catch((error: unknown) => {
           if (error instanceof TurnDroppedError) {
@@ -474,28 +527,72 @@ function renderReasoningForReply(reasoning: string): object {
 }
 
 /**
- * Render an assistant reply as a Feishu interactive card with optional
- * workspace/preset footer metadata. Card JSON 2.0 supports full markdown
- * (tables, headings, inline code) natively.
+ * Render an assistant reply as one or more Feishu interactive cards with
+ * optional workspace/preset footer metadata. Card JSON 2.0 supports full
+ * markdown (tables, headings, inline code) natively.
+ *
+ * Long model output is partitioned into multiple cards so none of them is
+ * silently truncated by the card renderer. Reasoning is only drawn on the
+ * first card; the footer metadata is only drawn on the last card.
  */
-function renderReplyCard(text: string, meta?: ReplyCardMeta, reasoning?: string): object {
+export function renderReplyCards(text: string, meta?: ReplyCardMeta, reasoning?: string): object[] {
   // Ensure content is never empty - use a placeholder if needed
   const displayText = text.trim() === '' ? '(empty response)' : text
-  const elements: object[] = []
-  // Add reasoning section if present
-  if (reasoning !== undefined && reasoning !== '') {
-    const displayReasoning = reasoning.length > 2000 ? reasoning.slice(0, 2000) + '\n…(truncated)' : reasoning
+  const reasonForHeader = (reasoning !== undefined && reasoning !== '') ? reasoning : undefined
+
+  const textChunks = chunkText(displayText, CARD_TEXT_MAX)
+  const total = textChunks.length
+  const cards: object[] = []
+
+  for (let i = 0; i < total; i++) {
+    const isFirst = i === 0
+    const isLast = i === total - 1
+    const elements: object[] = []
+
+    if (isFirst && reasonForHeader !== undefined) {
+      const displayReasoning = reasonForHeader.length > 2000 ? reasonForHeader.slice(0, 2000) + '\n…(truncated)' : reasonForHeader
+      elements.push({
+        tag: 'markdown',
+        content: `🧠 **Reasoning**\n\`\`\`\n${displayReasoning}\n\`\`\``,
+      })
+      elements.push({ tag: 'hr' })
+    }
+
+    // A short continuation header helps the reader see a card is a fragment of
+    // a longer reply instead of thinking the answer ended abruptly.
+    if (total > 1) {
+      elements.push({ tag: 'markdown', content: `*(${tReplyPart(i + 1, total)})*`, text_size: 'notation' })
+    }
     elements.push({
       tag: 'markdown',
-      content: `🧠 **Reasoning**\n\`\`\`\n${displayReasoning}\n\`\`\``,
+      content: textChunks[i],
     })
-    elements.push({ tag: 'hr' })
+
+    if (isLast) {
+      elements.push(...buildReplyFooter(meta))
+    }
+
+    cards.push({
+      schema: '2.0',
+      config: { wide_screen_mode: true },
+      header: {
+        title: { tag: 'plain_text', content: total > 1 ? `Reply (${i + 1}/${total})` : 'Reply' },
+        template: 'blue',
+      },
+      body: { elements },
+    })
   }
-  elements.push({
-    tag: 'markdown',
-    content: displayText,
-  })
-  // Add footer with workspace/preset/model/context info when available
+  return cards
+}
+
+/** Local "part i/total" label used in the reply card continuation header. */
+function tReplyPart(i: number, total: number): string {
+  return `Part ${i}/${total}`
+}
+
+/** Build the footer metadata elements (workspace/preset/model/context). */
+function buildReplyFooter(meta?: ReplyCardMeta): object[] {
+  const elements: object[] = []
   const line1: string[] = []
   const line2: string[] = []
   if (meta?.workspace !== undefined && meta.workspace !== '') {
@@ -529,15 +626,7 @@ function renderReplyCard(text: string, meta?: ReplyCardMeta, reasoning?: string)
       elements.push({ tag: 'markdown', content: footerContent, text_size: 'notation' })
     }
   }
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true },
-    header: {
-      title: { tag: 'plain_text', content: 'Reply' },
-      template: 'blue',
-    },
-    body: { elements },
-  }
+  return elements
 }
 
 /**

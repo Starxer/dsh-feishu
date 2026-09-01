@@ -8,9 +8,9 @@ import { translationsFor } from '../src/i18n.ts'
 const t = translationsFor('zh')
 
 const SESSIONS: SessionEntry[] = [
-  { id: 's1', updatedAt: Date.now(), title: 'Fix the bug', ownedBy: 'chat:a' },
+  { id: 's1', updatedAt: Date.now(), title: 'Fix the bug', ownedBy: 'chat:a', agentPreset: 'PTC 模式' },
   { id: 's2', updatedAt: Date.now() - 60000, title: 'Write docs' },
-  { id: 's3', updatedAt: Date.now() - 120000, title: '' },
+  { id: 's3', updatedAt: Date.now() - 120000, title: '', agentPreset: 'Creator 模式' },
 ]
 
 function markdownOf(card: any): string {
@@ -65,9 +65,13 @@ describe('renderSessionListCard', () => {
   it('renders a markdown table of sessions', () => {
     const card = renderSessionListCard(SESSIONS, t) as any
     const md = markdownOf(card)
-    expect(md).toContain('| 会话 | ID | 占用 | 最近活跃 |')
+    expect(md).toContain('| 会话 | ID | 预设 | 占用 | 最近活跃 |')
     expect(md).toContain('Fix the bug')
     expect(md).toContain('🔒') // owned by another chat
+    // Agent preset column: shows the display name, and '-' when unknown.
+    expect(md).toContain('PTC 模式')
+    expect(md).toContain('Creator 模式')
+    expect(md).toMatch(/\| Write docs.*\| - \|/)
   })
 })
 

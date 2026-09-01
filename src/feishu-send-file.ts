@@ -8,11 +8,15 @@
  * agent an explicit way to deliver a produced file into the chat that owns the
  * current session.
  *
- * Sending goes through the SDK's `LarkChannel.send({ file })` path, which
- * uploads via `im.v1.file.create` (file_type `stream`, the generic "other
- * file" bucket) and then sends a file message — no hand-rolled upload + send
- * dance needed. Thread replies reuse the same `replyTo`/`replyInThread`
- * options the question/approval cards use.
+ * Sending goes through the SDK's `LarkChannel.send` path. Real image bytes
+ * (magic-sniffed) are sent as an inline-preview **image message**
+ * (`{ image }` → `msg_type:'image'` → uploaded via `im.v1.image.create`),
+ * so the user sees the picture directly instead of a click-to-open file.
+ * Non-images, or images over Feishu's 10 MB image cap, fall back to a
+ * `{ file }` message (`im.v1.file.create`, `file_type 'stream'`), which still
+ * lands but requires opening. No hand-rolled upload + send dance needed.
+ * Thread replies reuse the same `replyTo`/`replyInThread` options the
+ * question/approval cards use.
  *
  * @module @starxer/chatterbox4dsh/feishu-send-file
  */
@@ -24,9 +28,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { LarkChannel } from '@larksuiteoapi/node-sdk'
 import type { HarnessConversationService } from './harness.ts'
 import { errorText } from './error-text.ts'
+import { sniffImageMime } from './channel.ts'
 
 /** Feishu file-message ceiling (`im.v1.file.create` rejects > 30 MB). */
 const MAX_FILE_BYTES = 30 * 1024 * 1024
+/** Feishu image-message ceiling (`im.v1.image.create` rejects > 10 MB; larger
+ *  images must be sent as files and cannot inline-preview). */
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 /** Minimal logger surface; matches ctx.logger's call style. */
 interface PluginLogger {
@@ -58,8 +66,10 @@ export function startFeishuSendFileTool(deps: FeishuSendFileDeps): () => void {
     description:
       'Send a file from the workspace to the user via Feishu chat. Pass the absolute filesystem '
       + 'path of the file you produced. The file must exist, be a regular non-empty file, and be '
-      + 'under 30 MB. Only works when the current session is bound to a Feishu chat; otherwise it '
-      + 'fails with a clear error and you should just tell the user the file path instead.',
+      + 'under 30 MB. Images are sent as inline-preview image messages; anything else (or an image '
+      + 'over 10 MB) is sent as a file the user opens. Only works when the current session is bound '
+      + 'to a Feishu chat; otherwise it fails with a clear error and you should just tell the user '
+      + 'the file path instead.',
     parameters: {
       path: {
         type: 'string',
@@ -148,13 +158,22 @@ export function startFeishuSendFileTool(deps: FeishuSendFileDeps): () => void {
       }
 
       exec.signal.throwIfAborted()
+      // Real image bytes (magic-sniffed) get an inline-preview image message
+      // (`{ image }` → `msg_type:'image'` → `image_key`); everything else — or
+      // an image over Feishu's 10 MB image cap — falls back to a `{ file }`
+      // message so it still lands, just as a click-to-open attachment.
+      const isImage = sniffImageMime(bytes) !== undefined
+      const sendAsImage = isImage && bytes.length <= MAX_IMAGE_BYTES
       // Surfacing the specific reason (and Feishu API code, e.g. 230021 for an
       // oversized file) on failure lets the agent report exactly why the send
       // failed instead of a generic "send failed".
-      const result = await ch.send(chat.chatId, { file: { source: bytes, fileName } }, opts).catch((error: unknown) => {
+      const payload = sendAsImage
+        ? { image: { source: bytes } }
+        : { file: { source: bytes, fileName } }
+      const result = await ch.send(chat.chatId, payload, opts).catch((error: unknown) => {
         throw new Error(`Failed to send "${fileName}" via Feishu: ${errorText(error, 'unknown Feishu error')}`)
       })
-      logger.warn(`dsh-feishu: feishu_send_file sent "${fileName}" to chat ${chat.chatId}`)
+      logger.warn(`dsh-feishu: feishu_send_file sent "${fileName}" to chat ${chat.chatId} (${sendAsImage ? 'image' : 'file'})`)
 
       return {
         file_name: fileName,

@@ -252,8 +252,23 @@ function renderOnboardingCard(
   }
 }
 
+/** Middle-elide a long path so a button label never overflows: keep a head
+ *  fragment and the trailing basename, join with an ellipsis. */
+function elideMiddle(value: string, max: number): string {
+  if (value.length <= max) return value
+  const head = Math.max(4, Math.floor(max * 0.4))
+  const tail = Math.max(4, Math.floor(max * 0.45))
+  return `${value.slice(0, head)}…${value.slice(-tail)}`
+}
+
 /** Workspace picker card (step 1 of /new): choose an existing workspace or
- *  create a new one by absolute path or a `~`-relative path. */
+ *  create a new one by absolute path or a `~`-relative path.
+ *
+ *  Long workspace paths do not fit a Feishu button's single-line label, so
+ *  each row renders the FULL path as a wrapping `markdown` line (guaranteed
+ *  readable) plus a compact button that carries a short label (a workspace
+ *  name, or a middle-elided path when unnamed) and the full path in its
+ *  `behavior` value. */
 function renderWorkspacePicker(workspaces: readonly WorkspaceLike[], currentWorkspace: string | undefined, t: Translations): object {
   const elements: object[] = [
     { tag: 'markdown', content: t.onboardingWorkspaceHeader },
@@ -263,11 +278,14 @@ function renderWorkspacePicker(workspaces: readonly WorkspaceLike[], currentWork
     elements.push({ tag: 'markdown', content: t.onboardingNoWorkspaces })
   }
   for (const ws of workspaces) {
-    const label = ws.name !== undefined && ws.name !== '' ? ws.name : ws.path
+    const named = ws.name !== undefined && ws.name !== ''
+    const buttonLabel = named ? (ws.name as string) : elideMiddle(ws.path, 28)
     const mark = ws.path === currentWorkspace ? ' ✅' : ''
+    // Full path first (wraps freely, never clipped), then the pick button.
+    elements.push({ tag: 'markdown', content: `📁 \`${ws.path}\`` })
     elements.push({
       tag: 'button',
-      text: { tag: 'plain_text', content: `📁 ${label}${mark}` },
+      text: { tag: 'plain_text', content: `选择：${buttonLabel}${mark}` },
       type: ws.path === currentWorkspace ? 'primary' : 'default',
       behaviors: [{ type: 'callback', value: { kind: 'pick-workspace', value: ws.path } }],
     })

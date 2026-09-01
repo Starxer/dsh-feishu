@@ -28,6 +28,8 @@ export interface SessionEntry {
   updatedAt: number
   title: string
   ownedBy?: string
+  /** Display name (or id) of the session's agent preset; absent when unknown. */
+  agentPreset?: string
 }
 
 /** Narrow bridge surface the panel consumes. */
@@ -276,10 +278,11 @@ export function renderSessionRenameCard(sessionLabel: string, t: Translations): 
 export function renderSessionListCard(sessions: readonly SessionEntry[], t: Translations): object {
   const rows = sessions.map(entry => {
     const owned = entry.ownedBy === undefined ? '-' : '🔒'
-    return `| ${sessionLabel(entry)} | \`${entry.id.slice(-12)}\` | ${owned} | ${formatRelative(entry.updatedAt, t)} |`
+    const preset = entry.agentPreset === undefined || entry.agentPreset === '' ? '-' : entry.agentPreset
+    return `| ${sessionLabel(entry)} | \`${entry.id.slice(-12)}\` | ${preset} | ${owned} | ${formatRelative(entry.updatedAt, t)} |`
   })
   const body = rows.length > 0
-    ? `${t.sessionListTableHeader}\n|---|---|---|---|\n${rows.join('\n')}`
+    ? `${t.sessionListTableHeader}\n|---|---|---|---|---|\n${rows.join('\n')}`
     : t.sessionListNone
   return {
     schema: '2.0',

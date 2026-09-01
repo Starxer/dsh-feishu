@@ -9,3 +9,6 @@ src/*.bak.*
 *.bak.*
 # Map 文件通常不 commit（upstream 也没 commit client.js.map，对应 lib/index.js.map 一致）
 client/client.js.map
+
+# 运行期入站文件收件箱（每个会话工作区根下的 .feishu-inbox），非项目文件
+.feishu-inbox/

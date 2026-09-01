@@ -24,7 +24,7 @@ Harness Agent (模型、工具、会话日志)
 | 文件 | 职责 |
 |---|---|
 | `src/index.ts` | 插件入口，注册服务和命令 |
-| `src/channel.ts` | 飞书 Channel 封装，回复卡片渲染，Turn Complete 卡片 |
+| `src/channel.ts` | 飞书 Channel 封装，入站图片/文件接收（`admitImagesForMessage`/`admitFilesForMessage`），回复卡片渲染，Turn Complete 卡片 |
 | `src/harness.ts` | Harness 会话服务，session 映射持久化 |
 | `src/feishu-streaming.ts` | 统一 per-step 卡片：订阅 mux 事件流，渲染 reasoning + text + 工具调用 + 结果预览 + 时长/token footer |
 | `src/feishu-todos.ts` | Todo 进度卡片 |
@@ -58,3 +58,5 @@ turn/end         → flush debounce，发送 Turn Complete 卡片
 - **Flush 同步**：`turn/end` 时 flush pending debounce，确保卡片更新在 Turn Complete 之前完成
 - **Error-safe**：内层 try/catch 保护 mux 事件处理，防止单个事件错误导致整个流断开
 - **Card JSON 2.0**：所有卡片使用 `schema: '2.0'` + `body.elements`，原生支持 markdown
+- **入站图片判型按字节**：飞书 `messageResource` 不给内容 MIME、SDK 归一化的 image 资源无文件名，故图片必须**先下载字节、用 magic bytes 判真实格式**（`sniffImageMime`）再交给 `attachments.saveImage`，**不得猜 JPEG**——DSH 附件库会校验声明与实际字节（`IMAGE_TYPE_MISMATCH`），猜错即拒收非 JPEG 图片
+- **入站文件落工作区收件箱**：文件经 `admitFilesForMessage` 落到会话工作区根 `.feishu-inbox/`（`resolveWorkspaceRoot` 解析，无则回退全局）；图片走 DSH 原生附件库（`~/.dsh/attachments/v1/`），**两条独立路径**

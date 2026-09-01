@@ -20,13 +20,18 @@ describe('renderPermissionCard', () => {
     expect(active.disabled).toBe(true)
   })
 
-  it('renders Full access as danger and Read Only as default', () => {
-    const card = renderPermissionCard('read-only', t) as any
+  it('keeps every selectable button clearly clickable (no gray Read Only lookalike)', () => {
+    // Read Only and Workspace Write share the blue primary so neither looks
+    // like the grayed-out disabled current-mode button; only Full access is
+    // red (a danger signal). No mode is `default` (gray) anymore.
+    const card = renderPermissionCard('workspace-write', t) as any
     const buttons = buttonsOf(card)
-    const full = buttons.find((b: any) => textOf(b).includes('Full access'))
     const readOnly = buttons.find((b: any) => textOf(b).includes('Read Only'))
+    const full = buttons.find((b: any) => textOf(b).includes('Full access'))
+    expect(readOnly.type).toBe('primary')
     expect(full.type).toBe('danger')
-    expect(readOnly.type).toBe('default')
+    // Only the active (current) button may be disabled.
+    expect(buttons.filter((b: any) => b.disabled === true)).toHaveLength(1)
   })
 })
 
@@ -57,6 +62,66 @@ describe('startFeishuPermission', () => {
     expect(append).toHaveBeenCalledWith('sandbox/mode', { mode: 'danger-full-access' })
     expect(updateCard).toHaveBeenCalledTimes(1)
 
+    handle.stop()
+  })
+
+  it('switches through the DSH permissionPresets.set() write path when available', async () => {
+    const set = vi.fn()
+    const current = vi.fn(() => 'danger-full-access')
+    const session = { append: vi.fn() }
+    const send = vi.fn(async () => ({ messageId: 'om_card' }))
+    const updateCard = vi.fn(async () => undefined)
+    let actionHandler: ((evt: any) => unknown) | undefined
+    const handle = startFeishuPermission({
+      channel: {
+        send,
+        updateCard,
+        onCardAction: (h: any) => { actionHandler = h; return () => undefined },
+      },
+      // sandbox left undefined: the preset service owns both the read and write.
+      permissionPresets: { set, current },
+      sessionGetter: () => session,
+      logger: { warn: vi.fn(), error: vi.fn() },
+      getTranslations: () => t,
+    } as any)
+
+    const mid = await handle.open({ chatId: 'oc_1', chatType: 'p2p' }, 'session-1')
+    expect(mid).toBe('om_card')
+    // Opening reads the mode from the preset service, not from sandbox.
+    expect(current).toHaveBeenCalledWith(session)
+    const card = ((send.mock.calls as any)[0][1] as any).card
+    const full = buttonsOf(card).find((b: any) => textOf(b).includes('Full access'))
+    await actionHandler!({ messageId: 'om_card', action: { value: full.value } })
+    // The full bundle is written through set(), never a bare sandbox/mode append.
+    expect(set).toHaveBeenCalledWith(session, 'danger-full-access')
+    expect(session.append).not.toHaveBeenCalled()
+    expect(updateCard).toHaveBeenCalledTimes(1)
+
+    handle.stop()
+  })
+
+  it('falls back to a bare sandbox/mode append when the preset service is absent', async () => {
+    const append = vi.fn()
+    const session = { append }
+    const send = vi.fn(async () => ({ messageId: 'om_card' }))
+    const updateCard = vi.fn(async () => undefined)
+    let actionHandler: ((evt: any) => unknown) | undefined
+    const handle = startFeishuPermission({
+      channel: {
+        send,
+        updateCard,
+        onCardAction: (h: any) => { actionHandler = h; return () => undefined },
+      },
+      sandbox: { resolve: () => ({ mode: 'workspace-write' }) },
+      sessionGetter: () => session,
+      logger: { warn: vi.fn(), error: vi.fn() },
+      getTranslations: () => t,
+    } as any)
+    await handle.open({ chatId: 'oc_1', chatType: 'p2p' }, 'session-1')
+    const card = ((send.mock.calls as any)[0][1] as any).card
+    const full = buttonsOf(card).find((b: any) => textOf(b).includes('Full access'))
+    await actionHandler!({ messageId: 'om_card', action: { value: full.value } })
+    expect(append).toHaveBeenCalledWith('sandbox/mode', { mode: 'danger-full-access' })
     handle.stop()
   })
 
