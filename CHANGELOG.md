@@ -125,7 +125,7 @@
 - **工具调用结果不展示**：`renderResultPreview` 里多个分支（terminal / web / search / read / diff / generic）匹配到 `resultView.card` 后**提前 `return`**；若该视图缺关键字段（如 terminal 视图无 `output`），会返回空元素且**不再回退到原始结果**。新增 `finish()` 兜底：任一匹配分支产出空、且有原始结果内容时，改为渲染原始结果的代码块，保证结果始终可见。
 - 测试：新增 `renderStepCard` 两项（terminal 视图无 output 时回退原始结果；args 含反引号时落在代码块内）。
 
-本仓库基于 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark) HEAD（`ee639df`）独立维护，**不再跟踪 upstream 同步**。所有改动仅修改本仓库文件，**未对 DSH 源码（`DSH 源码/packages/*`、`vendor/*`）做任何改动**。上游 LICENSE（MIT, Copyright (c) 2026 sugarforever）保留以满足 MIT modified-work 声明。
+本仓库基于 [sugarforever/dsh-lark](https://github.com/sugarforever/dsh-lark) HEAD（`ee639df`）独立维护，**不再跟踪 upstream 同步**。所有改动仅修改本仓库文件，**未对 DSH 源码做任何改动**。上游 LICENSE（MIT, Copyright (c) 2026 sugarforever）保留以满足 MIT modified-work 声明。
 
 ### `/session` 综合会话管理面板 + `/session list` 表格 + `/help` 卡片（`src/feishu-session.ts` / `src/index.ts`）
 

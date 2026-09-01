@@ -354,7 +354,7 @@ commit `3ca9c7d489` "rename code-mode to ptc (PTC mode)"
 
 ## 八、参考
 
-- DSH 源码：`本机 deepseek-harness 工作区/`
+- DSH 源码：本机 `deepseek-harness` 工作区
 - 目标 commit：`cd5ef81481`（0.1.2-alpha.1）
 - 迁移文档：`.agents/notes/implemented/architecture/2026-08-10-unary-apiproxy-remote-migration.md`
 - 新 session-controller API：`packages/api/session-controller/src/`
